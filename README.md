@@ -1,4 +1,3 @@
-```md
 # Proton + LinUwUx Builder
 
 Automated script to build **proton-cachyos** or **proton-ge-custom (GE)** with the LinUwUx patches applied.
