@@ -71,3 +71,7 @@ mkdir -p ~/.steam/root/compatibilitytools.d/GE-Proton-11-3-LinUwUx
 - First run of any version will take a long time (submodules + full compile).
 - Subsequent runs of the same version reuse the existing source folder.
 - Different versions never overwrite each other.
+
+## Credits
+ - LinUwUx for the patch.
+ - DenuvOwO for the HV Bypass.
