@@ -37,7 +37,7 @@ diff -ruN a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
      TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", ctx->uc_mcontext.gregs[REG_RAX],
              ctx->uc_mcontext.gregs[REG_RIP]);
  
-@@ -2691,6 +2713,90 @@
+@@ -2682,6 +2713,90 @@
      return TRUE;
  }
  
