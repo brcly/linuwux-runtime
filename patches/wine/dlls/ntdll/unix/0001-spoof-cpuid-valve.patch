@@ -1,15 +1,11 @@
 diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
-index 0466b1d2056..24903272f6a 100644
 --- a/dlls/ntdll/unix/signal_x86_64.c
 +++ b/dlls/ntdll/unix/signal_x86_64.c
-@@ -507,6 +507,14 @@ void set_process_instrumentation_callback( void *callback )
+@@ -507,6 +507,12 @@ void set_process_instrumentation_callback( void *callback )
      server_leave_uninterrupted_section( &instrumentation_callback_mutex, &sigset );
  }
  
-+// This will point to the games memory region where syscall spoofing is happening
-+uint64_t TargetSysHandler = 0;
-+uint64_t SyscallBypassMagic = 0x1337133713371337;
-+// Spoofed CPUID values - will be set based on CPU vendor
++/* Spoofed CPUID values – set based on CPU vendor */
 +static unsigned int spoof_leaf40000000_eax, spoof_leaf40000000_ebx, spoof_leaf40000000_ecx, spoof_leaf40000000_edx;
 +static unsigned int spoof_leaf40000001_eax, spoof_leaf40000001_ebx, spoof_leaf40000001_ecx, spoof_leaf40000001_edx;
 +static unsigned int spoof_leaf1_eax, spoof_leaf1_ebx, spoof_leaf1_ecx, spoof_leaf1_edx;
@@ -17,118 +13,101 @@ index 0466b1d2056..24903272f6a 100644
  struct xcontext
  {
      CONTEXT c;
-@@ -1884,6 +1892,19 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
-     struct syscall_frame *frame = amd64_thread_data()->syscall_frame;
-     ucontext_t *ctx = sigcontext;
- 
-+    __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
-+        if (TargetSysHandler != 0 && (xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) != 0x1337133713371337) {
-+           xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
-+            ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
-+            ctx->uc_mcontext.gregs[REG_RCX] = TargetSysHandler;
-+            ctx->uc_mcontext.gregs[REG_RIP] = TargetSysHandler;
-+            return;
-+        }
-+        if ((xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) == 0x1337133713371337) {
-+            xmm_regs[5] = 0;
-+            //MESSAGE("SyscallBypassMagic!\n");
-+        }
-+
-     TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", ctx->uc_mcontext.gregs[REG_RAX],
-             ctx->uc_mcontext.gregs[REG_RIP]);
- 
-@@ -2348,6 +2369,90 @@ static BOOL handle_syscall_trap( ucontext_t *sigcontext, siginfo_t *siginfo )
+@@ -2348,6 +2354,88 @@ static BOOL handle_syscall_trap( ucontext_t *sigcontext, siginfo_t *siginfo )
      return TRUE;
  }
  
 +/**
-++* Patch KUSER_SHARED_DATA with spoofed values
-++*/
-+static void patch_kuser_shared_data(void) {
++ * Patch KUSER_SHARED_DATA with spoofed values
++ */
++static void patch_kuser_shared_data(void)
++{
 +    UINT8 *kuser = (UINT8 *)0x000000007FFE0000UL;
-+
-+    // Make memory writable
 +    size_t page_size = sysconf(_SC_PAGESIZE);
 +    void *page_start = (void *)((uintptr_t)0x000000007FFE0000UL & ~(page_size - 1));
-+    //unsigned char* user_shared_data = (unsigned char*)0x7ffe0000;
 +
-+    if (mprotect(page_start, page_size, PROT_READ | PROT_WRITE) == -1) {
++    if (mprotect(page_start, page_size, PROT_READ | PROT_WRITE) == -1)
++    {
 +        MESSAGE("Failed to make kuser_shared_data writable: %s\n", strerror(errno));
 +        return;
 +    }
 +
-+    // === Original patching code (adapted) ===
-+    memcpy((void*)(kuser + 0x30), "\x43\x00\x3A\x00\x5C\x00\x57\x00\x69\x00\x6E\x00\x64\x00\x6F\x00\x77\x00\x73\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 0x104);
++    memcpy((void *)(kuser + 0x30),
++           "\x43\x00\x3A\x00\x5C\x00\x57\x00\x69\x00\x6E\x00\x64\x00\x6F\x00\x77\x00\x73\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
++           "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
++           0x104);
 +
++    *(UINT64 *)(kuser + 0x260) = 0x0100006658;
++    *(UINT32 *)(kuser + 0x268) = 0x090001;
++    *(UINT32 *)(kuser + 0x26C) = 0x0A;
++    *(UINT32 *)(kuser + 0x270) = 0x00;
 +
-+    *(UINT64*)(kuser + 0x260) = 0x0100006658;
-+    *(UINT32*)(kuser + 0x268) = 0x090001;
-+    *(UINT32*)(kuser + 0x26C) = 0x0A;
-+    *(UINT32*)(kuser + 0x270) = 0x00;
++    *(UINT32 *)(kuser + 0x274) = 0x01010000;
++    *(UINT32 *)(kuser + 0x278) = 0x010000;
++    *(UINT32 *)(kuser + 0x27C) = 0x010101;
++    *(UINT32 *)(kuser + 0x280) = 0x010101;
++    *(UINT32 *)(kuser + 0x284) = 0x0100;
++    *(UINT32 *)(kuser + 0x288) = 0x01010101;
++    *(UINT32 *)(kuser + 0x28C) = 0x0;
++    *(UINT32 *)(kuser + 0x290) = 0x01;
++    *(UINT32 *)(kuser + 0x294) = 0x01000101;
++    *(UINT32 *)(kuser + 0x298) = 0x01010101;
++    *(UINT32 *)(kuser + 0x29C) = 0x010001;
++    *(UINT32 *)(kuser + 0x2A0) = 0x0;
++    *(UINT32 *)(kuser + 0x2A4) = 0x0;
++    *(UINT32 *)(kuser + 0x2A8) = 0x0;
++    *(UINT32 *)(kuser + 0x2AC) = 0x0;
++    *(UINT32 *)(kuser + 0x2B0) = 0x1;
 +
-+    // ProcessorFeatures
-+    *(UINT32*)(kuser + 0x274) = 0x01010000;
-+    *(UINT32*)(kuser + 0x278) = 0x010000;
-+    *(UINT32*)(kuser + 0x27C) = 0x010101;
-+    *(UINT32*)(kuser + 0x280) = 0x010101;
-+    *(UINT32*)(kuser + 0x284) = 0x0100;
-+    *(UINT32*)(kuser + 0x288) = 0x01010101;
-+    *(UINT32*)(kuser + 0x28C) = 0x0;
-+    *(UINT32*)(kuser + 0x290) = 0x01;
-+    *(UINT32*)(kuser + 0x294) = 0x01000101;
-+    *(UINT32*)(kuser + 0x298) = 0x01010101;
-+    *(UINT32*)(kuser + 0x29C) = 0x010001;
-+    *(UINT32*)(kuser + 0x2A0) = 0x0;
-+    *(UINT32*)(kuser + 0x2A4) = 0x0;
-+    *(UINT32*)(kuser + 0x2A8) = 0x0;
-+    *(UINT32*)(kuser + 0x2AC) = 0x0;
-+    *(UINT32*)(kuser + 0x2B0) = 0x1;
++    *(UINT8 *)(kuser + 0x290) = 0x0;
++    *(UINT8 *)(kuser + 0x294) = 0x0;
++    *(UINT8 *)(kuser + 0x295) = 0x0;
++    *(UINT8 *)(kuser + 0x297) = 0x0;
 +
-+    // Disable specific features (byte-level patches)
-+    *(UINT8*)(kuser + 0x290) = 0x0;    // Disable MONITORX support
-+    *(UINT8*)(kuser + 0x294) = 0x0;    // Disable RDTSCP support
-+    *(UINT8*)(kuser + 0x295) = 0x0;    // Disable RDPID support
-+    *(UINT8*)(kuser + 0x297) = 0x0;    // Disable RDRAND support
-+
-+    if (getenv("PROTON_AVX") == NULL || (getenv("PROTON_AVX") != NULL && strcmp(getenv("PROTON_AVX"), "1")) != 0){
-+        // XSAVE related stuff
-+        *(UINT8*)(kuser + 0x285) = 0x0;    // Disable XSAVE support
-+        *(UINT8*)(kuser + 0x29B) = 0x0;    // Disable AVX support
-+        *(UINT8*)(kuser + 0x29C) = 0x0;    // Disable AVX2 support
++    if (getenv("PROTON_AVX") == NULL ||
++        (getenv("PROTON_AVX") != NULL && strcmp(getenv("PROTON_AVX"), "1") != 0))
++    {
++        *(UINT8 *)(kuser + 0x285) = 0x0;
++        *(UINT8 *)(kuser + 0x29B) = 0x0;
++        *(UINT8 *)(kuser + 0x29C) = 0x0;
 +    }
 +
-+    *(UINT64*)(kuser + 0x3D8) = 0x0;   // EnabledFeatures
-+    *(UINT64*)(kuser + 0x3E0) = 0x0;   // EnabledVolatileFeatures
-+    *(UINT32*)(kuser + 0x3EC) = 0x0;   // ControlFlags
-+    memset((void*)(kuser + 0x3F0), 0x00, 0x200);   // Features
-+    *(UINT64*)(kuser + 0x5F0) = 0x0;   // EnabledSupervisorFeatures
-+    *(UINT64*)(kuser + 0x5F8) = 0x0;   // AlignedFeatures
-+    memset((void*)(kuser + 0x604), 0x00, 0x200);   // AllFeatures
-+    *(UINT64*)(kuser + 0x808) = 0x0;   // EnabledUserVisibleSupervisorFeatures
-+    *(UINT64*)(kuser + 0x810) = 0x0;   // ExtendedFeatureDisableFeatures
++    *(UINT64 *)(kuser + 0x3D8) = 0x0;
++    *(UINT64 *)(kuser + 0x3E0) = 0x0;
++    *(UINT32 *)(kuser + 0x3EC) = 0x0;
++    memset((void *)(kuser + 0x3F0), 0x00, 0x200);
++    *(UINT64 *)(kuser + 0x5F0) = 0x0;
++    *(UINT64 *)(kuser + 0x5F8) = 0x0;
++    memset((void *)(kuser + 0x604), 0x00, 0x200);
++    *(UINT64 *)(kuser + 0x808) = 0x0;
++    *(UINT64 *)(kuser + 0x810) = 0x0;
 +
-+    *(UINT64*)(kuser + 0x2D0) = 0x320A0000000110;
-+    *(UINT64*)(kuser + 0x2E8) = 0x0100007FB10B;
-+    *(UINT32*)(kuser + 0x2F4) = 0x0;
-+    *(UINT64*)(kuser + 0x36C) = 0x0;
-+    *(UINT64*)(kuser + 0x374) = 0x0;
-+    *(UINT32*)(kuser + 0x37C) = 0x1;
-+    *(UINT64*)(kuser + 0x3C0) = 0x83000100000010;
++    *(UINT64 *)(kuser + 0x2D0) = 0x320A0000000110;
++    *(UINT64 *)(kuser + 0x2E8) = 0x0100007FB10B;
++    *(UINT32 *)(kuser + 0x2F4) = 0x0;
++    *(UINT64 *)(kuser + 0x36C) = 0x0;
++    *(UINT64 *)(kuser + 0x374) = 0x0;
++    *(UINT32 *)(kuser + 0x37C) = 0x1;
++    *(UINT64 *)(kuser + 0x3C0) = 0x83000100000010;
 +
-+    *(UINT32*)(kuser + 0xFFC) = 0x13371337;
-+
-+    // === End of original patching code ===
-+
-+    // Patch usage of syscalls
-+    // 0 = syscalls take slow route, everything gets hooked
-+    // 1 = syscalls take fast route unless ntdll.dll gets modified (default)
-+    //user_shared_data[0x308] = 1;
++    *(UINT32 *)(kuser + 0xFFC) = 0x13371337;
 +}
 +
  
  /**********************************************************************
   *		segv_handler
-@@ -2361,6 +2466,107 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -2361,6 +2449,104 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
      ucontext_t *ucontext = init_handler( sigcontext );
      void *steamclient_addr = NULL;
  
@@ -139,171 +118,162 @@ index 0466b1d2056..24903272f6a 100644
 +
 +    uc = (ucontext_t *)sigcontext;
 +    rip = (unsigned char *)uc->uc_mcontext.gregs[REG_RIP];
-+    leaf = ucontext->uc_mcontext.gregs[REG_RAX];
-+    subleaf = ucontext->uc_mcontext.gregs[REG_RCX];
-+    if ((siginfo->si_code == SI_KERNEL || leaf == 0x336933) && rip[0] == 0x0F && rip[1] == 0xA2) {
-+        // Spoof CPUID results based on leaf
-+        switch (leaf) {
-+            case 1:
-+                uc->uc_mcontext.gregs[REG_RAX] = spoof_leaf1_eax;
-+                uc->uc_mcontext.gregs[REG_RBX] = spoof_leaf1_ebx;
-+                uc->uc_mcontext.gregs[REG_RCX] = spoof_leaf1_ecx | (TargetSysHandler ? 0 : (0x1 << 31));
-+                uc->uc_mcontext.gregs[REG_RDX] = spoof_leaf1_edx;
-+                break;
++    leaf = uc->uc_mcontext.gregs[REG_RAX];
++    subleaf = uc->uc_mcontext.gregs[REG_RCX];
++    if ((siginfo->si_code == SI_KERNEL || leaf == 0x336933) &&
++        rip[0] == 0x0F && rip[1] == 0xA2)
++    {
++        switch (leaf)
++        {
++        case 1:
++            uc->uc_mcontext.gregs[REG_RAX] = spoof_leaf1_eax;
++            uc->uc_mcontext.gregs[REG_RBX] = spoof_leaf1_ebx;
++            uc->uc_mcontext.gregs[REG_RCX] = spoof_leaf1_ecx | (1u << 31);
++            uc->uc_mcontext.gregs[REG_RDX] = spoof_leaf1_edx;
++            break;
 +
-+            case 0x40000000:
-+                uc->uc_mcontext.gregs[REG_RAX] = spoof_leaf40000000_eax;
-+                uc->uc_mcontext.gregs[REG_RBX] = spoof_leaf40000000_ebx;
-+                uc->uc_mcontext.gregs[REG_RCX] = spoof_leaf40000000_ecx;
-+                uc->uc_mcontext.gregs[REG_RDX] = spoof_leaf40000000_edx;
-+                break;
++        case 0x40000000:
++            uc->uc_mcontext.gregs[REG_RAX] = spoof_leaf40000000_eax;
++            uc->uc_mcontext.gregs[REG_RBX] = spoof_leaf40000000_ebx;
++            uc->uc_mcontext.gregs[REG_RCX] = spoof_leaf40000000_ecx;
++            uc->uc_mcontext.gregs[REG_RDX] = spoof_leaf40000000_edx;
++            break;
 +
-+            case 0x40000001:
-+                uc->uc_mcontext.gregs[REG_RAX] = spoof_leaf40000001_eax;
-+                uc->uc_mcontext.gregs[REG_RBX] = spoof_leaf40000001_ebx;
-+                uc->uc_mcontext.gregs[REG_RCX] = spoof_leaf40000001_ecx;
-+                uc->uc_mcontext.gregs[REG_RDX] = spoof_leaf40000001_edx;
-+                break;
++        case 0x40000001:
++            uc->uc_mcontext.gregs[REG_RAX] = spoof_leaf40000001_eax;
++            uc->uc_mcontext.gregs[REG_RBX] = spoof_leaf40000001_ebx;
++            uc->uc_mcontext.gregs[REG_RCX] = spoof_leaf40000001_ecx;
++            uc->uc_mcontext.gregs[REG_RDX] = spoof_leaf40000001_edx;
++            break;
 +
-+            case 0x80000002:
-+                uc->uc_mcontext.gregs[REG_RAX] = 0x756E6544;
-+                uc->uc_mcontext.gregs[REG_RBX] = 0x4F774F76;
-+                uc->uc_mcontext.gregs[REG_RCX] = 0x55504320;
-+                uc->uc_mcontext.gregs[REG_RDX] = 0x31204020;
-+                break;
++        case 0x80000002:
++            uc->uc_mcontext.gregs[REG_RAX] = 0x756E6544;
++            uc->uc_mcontext.gregs[REG_RBX] = 0x4F774F76;
++            uc->uc_mcontext.gregs[REG_RCX] = 0x55504320;
++            uc->uc_mcontext.gregs[REG_RDX] = 0x31204020;
++            break;
 +
-+            case 0x80000003:
-+                uc->uc_mcontext.gregs[REG_RAX] = 0x20373333;
-+                uc->uc_mcontext.gregs[REG_RBX] = 0x007A4847;
-+                uc->uc_mcontext.gregs[REG_RCX] = 0x00000000;
-+                uc->uc_mcontext.gregs[REG_RDX] = 0x00000000;
-+                break;
++        case 0x80000003:
++            uc->uc_mcontext.gregs[REG_RAX] = 0x20373333;
++            uc->uc_mcontext.gregs[REG_RBX] = 0x007A4847;
++            uc->uc_mcontext.gregs[REG_RCX] = 0x00000000;
++            uc->uc_mcontext.gregs[REG_RDX] = 0x00000000;
++            break;
 +
-+            case 0x80000004:
-+                uc->uc_mcontext.gregs[REG_RAX] = 0x0;
-+                uc->uc_mcontext.gregs[REG_RBX] = 0x0;
-+                uc->uc_mcontext.gregs[REG_RCX] = 0x0;
-+                uc->uc_mcontext.gregs[REG_RDX] = 0x0;
-+                break;
++        case 0x80000004:
++            uc->uc_mcontext.gregs[REG_RAX] = 0x0;
++            uc->uc_mcontext.gregs[REG_RBX] = 0x0;
++            uc->uc_mcontext.gregs[REG_RCX] = 0x0;
++            uc->uc_mcontext.gregs[REG_RDX] = 0x0;
++            break;
 +
-+            case 0x336933:
-+                MESSAGE("Spoofing CPUID leaf %x\n", leaf);
-+                TargetSysHandler = uc->uc_mcontext.gregs[REG_RCX];
-+                patch_kuser_shared_data();
-+                uc->uc_mcontext.gregs[REG_RAX] = 0x0;
-+                uc->uc_mcontext.gregs[REG_RBX] = 0x0;
-+                uc->uc_mcontext.gregs[REG_RCX] = 0x0;
-+                uc->uc_mcontext.gregs[REG_RDX] = 0x0;
-+                break;
++        case 0x336933:
++            MESSAGE("Spoofing CPUID leaf %x\n", leaf);
++            if (NtCurrentTeb()->Peb)
++                NtCurrentTeb()->Peb->BeingDebugged = 0;
++            patch_kuser_shared_data();
++            uc->uc_mcontext.gregs[REG_RAX] = 0x0;
++            uc->uc_mcontext.gregs[REG_RBX] = 0x0;
++            uc->uc_mcontext.gregs[REG_RCX] = 0x0;
++            uc->uc_mcontext.gregs[REG_RDX] = 0x0;
++            break;
 +
-+            case 0x336967:
-+                MESSAGE("Setting Faketime to %llx... \n", uc->uc_mcontext.gregs[REG_RCX]);
-+                SERVER_START_REQ( set_faketime )
-+                {
-+                    req->faketime = uc->uc_mcontext.gregs[REG_RCX];
-+                    wine_server_call( req );
-+                }
-+                SERVER_END_REQ;
-+                uc->uc_mcontext.gregs[REG_RAX] = 0x0;
-+                uc->uc_mcontext.gregs[REG_RBX] = 0x0;
-+                uc->uc_mcontext.gregs[REG_RCX] = 0x0;
-+                uc->uc_mcontext.gregs[REG_RDX] = 0x0;
-+                break;
++        case 0x336967:
++            MESSAGE("Setting Faketime to %llx...\n",
++                    (unsigned long long)uc->uc_mcontext.gregs[REG_RCX]);
++            SERVER_START_REQ(set_faketime)
++            {
++                req->faketime = uc->uc_mcontext.gregs[REG_RCX];
++                wine_server_call(req);
++            }
++            SERVER_END_REQ;
++            uc->uc_mcontext.gregs[REG_RAX] = 0x0;
++            uc->uc_mcontext.gregs[REG_RBX] = 0x0;
++            uc->uc_mcontext.gregs[REG_RCX] = 0x0;
++            uc->uc_mcontext.gregs[REG_RDX] = 0x0;
++            break;
 +
-+            default:
-+                // Should implement caching for optimization
-+                // Disable CPUID faulting for real CPUID call
-+                syscall(SYS_arch_prctl, ARCH_SET_CPUID, 1);
-+                __asm__ volatile(
-+                        "cpuid"
-+                        : "=a"(uc->uc_mcontext.gregs[REG_RAX]),
-+                            "=b"(uc->uc_mcontext.gregs[REG_RBX]),
-+                            "=c"(uc->uc_mcontext.gregs[REG_RCX]),
-+                            "=d"(uc->uc_mcontext.gregs[REG_RDX])
-+                        : "a"(leaf), "c"(subleaf)
-+                        : "memory"
-+                    );
-+                // Enable CPUID faulting again
-+                syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);
++        default:
++            syscall(SYS_arch_prctl, ARCH_SET_CPUID, 1);
++            __asm__ volatile(
++                "cpuid"
++                : "=a"(uc->uc_mcontext.gregs[REG_RAX]),
++                  "=b"(uc->uc_mcontext.gregs[REG_RBX]),
++                  "=c"(uc->uc_mcontext.gregs[REG_RCX]),
++                  "=d"(uc->uc_mcontext.gregs[REG_RDX])
++                : "a"(leaf), "c"(subleaf)
++                : "memory");
++            syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);
++            break;
 +        }
 +
-+        // Skip the CPUID instruction (2 bytes: 0F A2)
 +        uc->uc_mcontext.gregs[REG_RIP] += 2;
 +        return;
 +    }
 +
-+
      rec.ExceptionAddress = (void *)RIP_sig(ucontext);
      save_context( &context, ucontext );
  
-@@ -2879,6 +3085,66 @@ static void *mac_thread_gsbase(void)
+@@ -2879,6 +3065,64 @@ static void *mac_thread_gsbase(void)
  }
  #endif
  
-+// Function to detect CPU vendor at startup
-+static void detect_cpu_vendor(void) {
++static void detect_cpu_vendor(void)
++{
 +    unsigned int eax, ebx, ecx, edx;
 +    int avx = 0;
-+    if (getenv("PROTON_AVX") != NULL && strcmp(getenv("PROTON_AVX"), "1") == 0) avx = 1;
 +
-+   // Try to get CPUID(0) to detect vendor
++    if (getenv("PROTON_AVX") != NULL && strcmp(getenv("PROTON_AVX"), "1") == 0)
++        avx = 1;
++
 +    __asm__ volatile(
 +        "cpuid"
 +        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
 +        : "a"(0)
-+        : "memory"
-+    );
++        : "memory");
 +
-+    // Check vendor string
-+    if (ebx == 0x756E6547 && edx == 0x49656E69 && ecx == 0x6C65746E) {
-+        // "GenuineIntel" - Intel CPU
-+
-+        // Set Intel-specific spoofed values
++    if (ebx == 0x756E6547 && edx == 0x49656E69 && ecx == 0x6C65746E)
++    {
++        /* GenuineIntel */
 +        spoof_leaf1_eax = 0x000A0655;
 +        spoof_leaf1_ebx = 0x00200800;
-+        if (avx) {
-+        	spoof_leaf1_ecx = 0x7BFAFBFF;
-+        } else spoof_leaf1_ecx = 0x01FAEBFF;
++        spoof_leaf1_ecx = avx ? 0x7BFAFBFF : 0x01FAEBFF;
 +        spoof_leaf1_edx = 0xBFEBFBFF;
 +
 +        spoof_leaf40000000_eax = 0x40000001;
-+        spoof_leaf40000000_ebx = 0x65707948; // 'epyH'
-+        spoof_leaf40000000_ecx = 0x67624472; // 'gbDr'
++        spoof_leaf40000000_ebx = 0x65707948; /* epyH */
++        spoof_leaf40000000_ecx = 0x67624472; /* gbDr */
 +        spoof_leaf40000000_edx = 0;
 +
-+        spoof_leaf40000001_eax = 0x30237648; // '0#vH'
-+        spoof_leaf40000001_ebx = 0;
-+        spoof_leaf40000001_ecx = 0;
-+        spoof_leaf40000001_edx = 0;
-+
-+    } else if (ebx == 0x68747541 && edx == 0x69746E65 && ecx == 0x444D4163) {
-+        // "AuthenticAMD" - AMD CPU
-+
-+        // Set AMD-specific spoofed values
-+        spoof_leaf1_eax = 0x00A20F12;
-+        spoof_leaf1_ebx = 0x00100800;
-+        if (avx) {
-+        	spoof_leaf1_ecx = 0x7AD8320B;
-+        } else spoof_leaf1_ecx = 0x00F8220B;
-+        spoof_leaf1_edx = 0x178BFBFF;
-+
-+        spoof_leaf40000000_eax = 0x40000001;
-+        spoof_leaf40000000_ebx = 0x706D6953; // 'pmiS'
-+        spoof_leaf40000000_ecx = 0x7653656C; // 'vSel'
-+        spoof_leaf40000000_edx = 0x2020206D; // '   m'
-+
-+        spoof_leaf40000001_eax = 0x30237648; // '0#vH'
++        spoof_leaf40000001_eax = 0x30237648; /* 0#vH */
 +        spoof_leaf40000001_ebx = 0;
 +        spoof_leaf40000001_ecx = 0;
 +        spoof_leaf40000001_edx = 0;
 +    }
-+    // Sorry Zhaoxin/Hygon CPU owners :(
++    else if (ebx == 0x68747541 && edx == 0x69746E65 && ecx == 0x444D4163)
++    {
++        /* AuthenticAMD */
++        spoof_leaf1_eax = 0x00A20F12;
++        spoof_leaf1_ebx = 0x00100800;
++        spoof_leaf1_ecx = avx ? 0x7AD8320B : 0x00F8220B;
++        spoof_leaf1_edx = 0x178BFBFF;
++
++        spoof_leaf40000000_eax = 0x40000001;
++        spoof_leaf40000000_ebx = 0x706D6953; /* pmiS */
++        spoof_leaf40000000_ecx = 0x7653656C; /* vSel */
++        spoof_leaf40000000_edx = 0x2020206D; /*    m */
++
++        spoof_leaf40000001_eax = 0x30237648; /* 0#vH */
++        spoof_leaf40000001_ebx = 0;
++        spoof_leaf40000001_ecx = 0;
++        spoof_leaf40000001_edx = 0;
++    }
 +}
 +
  
  /**********************************************************************
   *		signal_init_process
-@@ -2961,6 +3227,8 @@ void signal_init_process(void)
+@@ -2961,6 +3205,8 @@ void signal_init_process(void)
      if (sigaction( SIGTRAP, &sig_act, NULL ) == -1) goto error;
      sig_act.sa_sigaction = segv_handler;
      if (sigaction( SIGSEGV, &sig_act, NULL ) == -1) goto error;
