@@ -1,8 +1,0 @@
-diff -ruN a/loader/wine.inf.in b/loader/wine.inf.in
---- a/loader/wine.inf.in
-+++ b/loader/wine.inf.in
-@@ -1795,3 +1795,4 @@
- ;;Other app-specific overrides
- HKCU,Software\Wine\AppDefaults\Pentiment.exe\DllOverrides,"SpeechSynthesisWrapper",4,
- HKCU,Software\Wine\AppDefaults\Maine-Win64-Shipping.exe\DllOverrides,"SpeechSynthWrapper",4,
-+HKLM,System\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001,"HwProfileGuid",,"{12345678-1234-1234-1234-123456789012}"
