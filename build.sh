@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# Proton + LinUwUx Builder v2.2
+# Proton + LinUwUx Builder v1.5
 # Supports: proton-cachyos, proton-ge-custom (GE)
 # ============================================================
 
