@@ -1,0 +1,31 @@
+diff -ruN a/server/fd.c b/server/fd.c
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -352,6 +352,8 @@
+ timeout_t current_time;
+ timeout_t monotonic_time;
+ 
++static timeout_t faketime = 0;
++
+ struct _KUSER_SHARED_DATA *user_shared_data = NULL;
+ static const timeout_t user_shared_data_timeout = 16 * 10000;
+ 
+@@ -433,7 +435,7 @@
+     static const timeout_t ticks_1601_to_1970 = (timeout_t)86400 * (369 * 365 + 89) * TICKS_PER_SEC;
+     struct timeval now;
+     gettimeofday( &now, NULL );
+-    current_time = (timeout_t)now.tv_sec * TICKS_PER_SEC + now.tv_usec * 10 + ticks_1601_to_1970;
++    current_time = (timeout_t)now.tv_sec * TICKS_PER_SEC + now.tv_usec * 10 + ticks_1601_to_1970 - faketime;
+     monotonic_time = monotonic_counter();
+     if (user_shared_data) set_user_shared_data_time();
+ }
+@@ -3357,3 +3359,9 @@
+         release_object( fd );
+     }
+ }
++
++DECL_HANDLER(set_faketime)
++{
++    
++    faketime = ((current_time >> 32) - req->faketime) << 32;
++}

@@ -1,0 +1,23 @@
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2049,6 +2057,20 @@
+     extern const void *__wine_syscall_dispatcher_prolog_end_ptr;
+     ucontext_t *ucontext = init_handler( sigcontext );
+     struct syscall_frame *frame = get_syscall_frame();
++    ucontext_t *ctx = sigcontext;
++    
++    __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
++    if (TargetSysHandler != 0 && (xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) != 0x1337133713371337) {
++        xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
++        ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
++        ctx->uc_mcontext.gregs[REG_RCX] = TargetSysHandler;
++        ctx->uc_mcontext.gregs[REG_RIP] = TargetSysHandler;
++        return;
++    }
++    if ((xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) == 0x1337133713371337) {
++        xmm_regs[5] = 0;
++        //MESSAGE("SyscallBypassMagic!\n");
++    }
+ 
+     TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", RAX_sig(ucontext), RIP_sig(ucontext));
+ 
