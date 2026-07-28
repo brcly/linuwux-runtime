@@ -9,7 +9,7 @@ set -euo pipefail
 # packages the result as a ready-to-install Steam Play compatibility tool.
 # ============================================================
 
-VERSION="1.15.1"
+VERSION="1.16"
 CONTAINER_ENGINE="podman"
 PATCH_REPO="https://github.com/brcly/proton-LinUwUx-patch.git"
 
@@ -263,10 +263,15 @@ pause
 # ============================================================
 # 6. Apply the patches
 #
-# CachyOS applies everything under patches/wine/ itself, as part of its own
-# build - so only the fixes below (none of which are raw .patch files) need
-# to run manually there. GE has no equivalent mechanism, so for GE we also
-# apply the .patch files ourselves further down.
+# Both variants apply .patch files the same way now: directly, on the host,
+# via apply_linuwux_patches below - not CachyOS's own build-time auto-apply.
+# A build that completed without error but whose patches silently weren't
+# applied is a worse failure mode than a build that fails loudly, and it's
+# not fully visible from outside CachyOS's own build pipeline (ccache is
+# enabled for CachyOS specifically - --enable-ccache - and caches compiled
+# objects by content hash; a stale cached object slipping through at the
+# wrong point would look exactly like this). Applying ourselves, before the
+# container (and its cache) ever sees the source, removes the question.
 # ============================================================
 
 apply_regedit_fix() {
@@ -275,7 +280,6 @@ apply_regedit_fix() {
     local line='HKLM,System\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001,"HwProfileGuid",,"{12345678-1234-1234-1234-123456789012}"'
 
     info "Applying regedit fix (HwProfileGuid) to $inf ..."
-
     [[ -f "$inf" ]] || die "$inf not found - wine's layout may have changed upstream"
 
     if grep -q 'HwProfileGuid' "$inf"; then
@@ -410,11 +414,12 @@ if [[ "$VARIANT" == "ge" ]]; then
     apply_cpuid_spoof_definitions_fix "wine"
     apply_linuwux_patches "wine"
 else
-    info "CachyOS – patch files installed; build system will apply them"
-    info "Skipping manual apply to avoid double-patching"
+    info "CachyOS – applying LinUwUx patches directly rather than trusting CachyOS's own auto-apply"
     apply_regedit_fix "wine"
     apply_faketime_protocol_fix "wine"
     apply_cpuid_spoof_definitions_fix "wine"
+    apply_linuwux_patches "wine"
+    find patches/wine -name '*.patch' -delete
 fi
 pause
 
@@ -524,8 +529,6 @@ if [[ -z "$TARBALL" ]]; then
             REDIST_DIR="$BUILD_NAME"
         fi
 
-        # CachyOS's official releases ship .tar.xz; GE ships .tar.gz - match
-        # that convention, falling back to gzip if xz isn't installed.
         if [[ "$VARIANT" == "cachyos" ]] && command -v xz >/dev/null 2>&1; then
             tar -c "$REDIST_DIR" | xz -T0 > "${BUILD_NAME}.tar.xz"
             TARBALL="${BUILD_NAME}.tar.xz"
