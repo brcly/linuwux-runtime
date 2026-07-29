@@ -16,9 +16,10 @@ set -euo pipefail
 #     patches/overrides/<key>/wine/, where <key> is the branch/tag with
 #     CachyOS's trailing /main[_native] removed.
 #   - Additive content (HwProfileGuid, set_faketime request, CPUID
-#     definitions, user_settings.py) lives under patches/base/ and is
-#     applied by content rather than fragile context diffs so the
-#     changes survive large rearrangements of upstream Wine sources.
+#     definitions + handler logic, user_settings.py) lives under
+#     patches/base/ and is applied by content rather than fragile
+#     context diffs so the changes survive large rearrangements of
+#     upstream Wine sources.
 # ============================================================
 
 VERSION="26.07.29"
@@ -101,8 +102,8 @@ Notes:
   in place for debugging. Pass --no-clean to keep them (faster patch-dev loop).
 
   Required additive content lives under patches/base/:
-    user_settings.py, cpuid_spoof_defs.c, hwprofile_guid.reg,
-    set_faketime.protocol
+    user_settings.py, cpuid_spoof_defs.c, cpuid_spoof_handler.c,
+    hwprofile_guid.reg, set_faketime.protocol
 
 EOF
     exit 0
@@ -434,12 +435,12 @@ pause
 # ------------------------------------------------------------
 # 5. Apply LinUwUx fixes and patches
 #
-#    Three classes of change:
+#    Classes of change:
 #      a) Hardware profile GUID  – appended to wine.inf.in
 #      b) Faketime protocol req  – appended to server/protocol.def
-#      c) CPUID spoof definitions – content-inserted into
-#         signal_x86_64.c (survives large source rearrangements)
-#      d) Remaining .patch files  – applied with patch(1), then
+#      c) CPUID spoof definitions – content-inserted (before struct xcontext)
+#      d) CPUID spoof handler logic – content-inserted at start of segv_handler
+#      e) Remaining .patch files  – applied with patch(1), then
 #         server protocol is regenerated
 # ------------------------------------------------------------
 
@@ -516,6 +517,50 @@ apply_cpuid_spoof_definitions_fix() {
     info "  Inserted definitions before line $anchor_line (struct xcontext)"
 }
 
+# d) Insert the CPUID handling logic at the start of segv_handler.
+#    Uses a function-scoped two-step anchor so we never hit other handlers.
+apply_cpuid_spoof_handler_fix() {
+    local wine_dir="$1"
+    local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local handler_file="${PATCHES_DIR}/base/cpuid_spoof_handler.c"
+
+    info "Applying CPUID spoof handler logic to $target ..."
+    [[ -f "$target" ]]       || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$handler_file" ]] || die "$handler_file not found - expected under patches/base/"
+
+    # Already present?
+    if grep -q 'Spoofing CPUID leaf' "$target"; then
+        info "  Handler logic already present"
+        return
+    fi
+
+    # Step 1: find the unique function start
+    local func_line
+    func_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
+    [[ -n "$func_line" ]] || die "Could not find 'static void segv_handler' in $target"
+
+    # Step 2: from that point forward, find a stable early local that only
+    # appears near the top of *this* function. Prefer the distinctive
+    # steamclient_addr line; fall back to the first struct xcontext.
+    local anchor_line
+    anchor_line=$(awk -v start="$func_line" '
+        NR >= start && /void \*steamclient_addr = NULL;/ { print NR; exit }
+        NR >= start && /struct xcontext (context|xcontext);/ { print NR; exit }
+    ' "$target")
+
+    [[ -n "$anchor_line" ]] || die "Could not find a stable anchor inside segv_handler after line $func_line"
+
+    # Insert *after* the anchor line (same relative position the old .patch used)
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="$anchor_line" -v handler="$handler_file" '
+        NR == line { print; while ((getline l < handler) > 0) print l; next }
+        { print }
+    ' "$target" > "$tmp" && mv "$tmp" "$target"
+
+    info "  Inserted handler logic after line $anchor_line (inside segv_handler)"
+}
+
 # Helper: apply a single .patch file, log the result, return status
 apply_patch_file() {
     local patch_file="$1" label="$2" log="$3"
@@ -536,10 +581,9 @@ apply_patch_file() {
     fi
 }
 
-# d) Apply every .patch under patches/wine/, then regenerate the wineserver
-#    protocol headers. This regen (tools/make_requests) reads protocol.def,
-#    so it picks up the set_faketime request appended in step (b) – which is
-#    why that append must happen before this runs.
+# e) Apply every remaining .patch under patches/wine/, then regenerate the
+#    wineserver protocol headers. This regen (tools/make_requests) reads
+#    protocol.def, so it picks up the set_faketime request appended in step (b).
 apply_linuwux_patches() {
     local wine_dir="$1"
     local patch_log="${LOG_DIR}/linuwux-patches.log"
@@ -609,6 +653,7 @@ fi
 apply_regedit_fix "wine"
 apply_faketime_protocol_fix "wine"
 apply_cpuid_spoof_definitions_fix "wine"
+apply_cpuid_spoof_handler_fix "wine"
 apply_linuwux_patches "wine"
 
 # We've already applied these patches to the wine tree above, so the staged
@@ -631,6 +676,8 @@ user_settings_src="${PATCHES_DIR}/base/user_settings.py"
     || die "user_settings.py not found at $user_settings_src – obtain it and place it there before building"
 [[ -f "${PATCHES_DIR}/base/cpuid_spoof_defs.c" ]] \
     || die "cpuid_spoof_defs.c not found under ${PATCHES_DIR}/base/ – required"
+[[ -f "${PATCHES_DIR}/base/cpuid_spoof_handler.c" ]] \
+    || die "cpuid_spoof_handler.c not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/hwprofile_guid.reg" ]] \
     || die "hwprofile_guid.reg not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/set_faketime.protocol" ]] \
