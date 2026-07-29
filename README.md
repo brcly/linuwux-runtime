@@ -49,13 +49,14 @@ Then restart Steam and pick the tool under a game's *Compatibility* settings.
 
 ## What the patches do
 
-The LinUwUx set (pulled from `proton-LinUwUx-patch`) layers three targeted changes
-onto Wine, plus a set of `.patch` files:
+The LinUwUx set layers three targeted additive changes onto Wine, plus a set of `.patch` files:
 
 - **HwProfileGuid** — adds a stable hardware-profile GUID to the registry
   (`wine.inf.in`) so the guest presents a consistent machine identity.
+  Content lives in `patches/base/hwprofile_guid.reg`.
 - **faketime request** — adds a `set_faketime` request to the Wine server protocol
   (`protocol.def`), used to spoof the reported time.
+  Content lives in `patches/base/set_faketime.protocol`.
 - **CPUID spoofing** — injects `cpuid_spoof_defs.c` into the ntdll unix signal handler
   and adds handling for CPUID leaf `0x336933`, so the guest sees a spoofed CPU identity.
 
@@ -63,9 +64,14 @@ A `user_settings.py` — supplied in the patch repo at `patches/base/` — is co
 the redist, typically setting `winmm`/`version`/`reflex` DLL overrides and
 `PROTON_DISABLE_LSTEAMCLIENT=1`. The build fails if that file is missing.
 
-The patch repo is expected to provide `patches/base/user_settings.py` and
-`patches/base/cpuid_spoof_defs.c` (both required — the build stops if either is
-missing), the common `patches/wine/` set, and optionally
+The patch repo is expected to provide these required files under `patches/base/`:
+
+- `user_settings.py`
+- `cpuid_spoof_defs.c`
+- `hwprofile_guid.reg`
+- `set_faketime.protocol`
+
+plus the common `patches/wine/` set, and optionally
 `patches/overrides/<branch-or-tag>/wine/` for version-specific patch sets.
 
 > Valve's official Proton is intentionally **not** supported (debugger-detection issues).
@@ -143,7 +149,7 @@ check — see Behaviour notes), then a numbered pipeline:
    Wine server protocol. For GE, `protonprep` runs first so LinUwUx layers on top; for
    CachyOS the staged `.patch` files are removed afterward as cleanup.
 6. **Install `user_settings.py`** — copies `patches/base/user_settings.py` into the
-   source tree; the build stops with an error if it isn't present.
+   source tree; the build stops with an error if any of the required base files are missing.
 7. **Wire `user_settings.py` into the package** — patches `Makefile.in` so the file
    ships in the redist, and fails loudly if the expected anchors have moved upstream.
 8. **Configure & build** — runs `configure.sh` (ccache enabled for CachyOS) and
