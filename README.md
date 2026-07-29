@@ -1,12 +1,26 @@
 # Proton + LinUwUx Builder
 
-A single Bash script (`build.sh`) that builds **proton-cachyos** or **proton-ge-custom**
-from source with the **LinUwUx** patch set applied, and packages the result as a
-ready-to-install Steam Play compatibility tool.
+A single, carefully structured Bash script (`build.sh`) that builds **proton-cachyos** or **proton-ge-custom** from source with the **LinUwUx** patch set applied, then packages a ready-to-install Steam Play compatibility tool.
 
-The patches make certain games run under Proton that otherwise detect the Linux/Wine
-environment and refuse to launch. The finished tarball drops straight into Steam's
-`compatibilitytools.d/`.
+Other projects offer pre-built tarballs. This one gives you a reproducible, maintainable *build system* so you can generate the latest patched Proton yourself whenever upstream moves — without waiting for someone else to upload a release.
+
+## Why this structure is different (and better)
+
+Most LinUwUx Proton repos simply ship pre-patched binaries. That’s convenient for “download and go”, but it doesn’t scale and it hides how the patches were applied.
+
+This project is built differently on purpose:
+
+- **Version-isolated trees** — every branch/tag gets its own `-src` / `-build` / `logs/` directories. Multiple builds never clobber each other.
+- **Host-side, fail-loud patching** — LinUwUx patches are applied *before* the container ever sees the tree. If a patch or a required `Makefile.in` anchor fails, the build stops. You never ship a silently broken Proton.
+- **Clean layering** — LinUwUx is applied *on top of* upstream (GE’s `protonprep` or CachyOS’s already-patched wine-cachyos fork). We don’t replace their work.
+- **Version-specific overrides** — drop a complete set under `patches/overrides/<branch-or-tag>/wine/` and it fully replaces the common set for that version. Perfect for when a new Proton needs adjusted context.
+- **Local patch iteration** — the `patches/` folder is preferred over a fresh clone. Edit, re-run with `--no-clean`, iterate. Pass `--update-patches` only when you want upstream again.
+- **Live latest resolution** — no branch/tag given? It queries the remote for the newest `cachyos_*/main` or `GE-ProtonN-M` tag.
+- **Self-updating awareness** — the script checks its own version against GitHub and refuses to run if you’re on an outdated copy (offline builds still work).
+- **Proper packaging of `user_settings.py`** — the real file (not just the sample) is wired into the redist via targeted `Makefile.in` edits that die if the anchors move upstream.
+- **Clean on success, keep on failure** — successful builds leave only the tarball in `dist/`. Failed builds leave the trees for debugging. `--no-clean` for a fast patch-dev loop.
+
+You still get pre-built releases for convenience, but the primary deliverable is the builder itself.
 
 ## CURRENTLY ONLY PROTON V11 IS SUPPORTED.
 
