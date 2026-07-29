@@ -16,11 +16,8 @@ static void patch_kuser_shared_data(void) {
 
     /* NtSystemRoot – force a stable "C:\Windows" so games that fingerprint
        the system root always see the same value. */
-    {
-        static const WCHAR nt_system_root[] = L"C:\\Windows";
-        memset(kuser + 0x30, 0, 0x104);                 /* clear whole buffer */
-        memcpy(kuser + 0x30, nt_system_root, sizeof(nt_system_root));
-    }
+    static const WCHAR nt_system_root[] = L"C:\\Windows";
+    memcpy(kuser + 0x30, nt_system_root, sizeof(nt_system_root));
 
     *(UINT64*)(kuser + 0x260) = 0x0100006658;
     *(UINT32*)(kuser + 0x268) = 0x090001;
