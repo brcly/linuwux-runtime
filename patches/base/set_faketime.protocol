@@ -1,0 +1,4 @@
+@REQ(set_faketime)
+    timeout_t faketime;
+@REPLY
+@END
