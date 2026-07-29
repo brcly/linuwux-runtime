@@ -438,12 +438,22 @@ pause
 #    Classes of change:
 #      a) Hardware profile GUID  – appended to wine.inf.in
 #      b) Faketime protocol req  – appended to server/protocol.def
-#      c) CPUID spoof definitions – content-inserted (before struct xcontext)
-#      d) KUSER_SHARED_DATA patch – content-inserted (same area)
+#      c) CPUID spoof definitions – content-inserted at file scope
+#      d) KUSER_SHARED_DATA patch – content-inserted at file scope
 #      e) CPUID spoof handler logic – content-inserted at start of segv_handler
 #      f) Remaining .patch files  – applied with patch(1), then
 #         server protocol is regenerated
 # ------------------------------------------------------------
+
+# Shared helper: return the line number after the last #include (file scope).
+# Falls back to die() if no includes are found.
+file_scope_anchor() {
+    local target="$1"
+    local line
+    line=$(grep -n '^#include' "$target" | tail -1 | cut -d: -f1)
+    [[ -n "$line" ]] || die "No #include found in $target – cannot locate a safe file-scope insertion point"
+    echo "$line"
+}
 
 # a) Fixed HwProfileGuid so games that fingerprint hardware profiles
 #    see a stable, known value instead of a random one each boot.
@@ -488,9 +498,8 @@ apply_faketime_protocol_fix() {
     fi
 }
 
-# c) Insert the CPUID-spoofing helper functions and globals.
-#    Done by content (before 'struct xcontext') rather than as a
-#    normal patch so it keeps working when surrounding code moves.
+# c) Insert the CPUID-spoofing helper functions and globals at file scope
+#    (after the last #include) so they can never land inside a function.
 apply_cpuid_spoof_definitions_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
@@ -506,20 +515,19 @@ apply_cpuid_spoof_definitions_fix() {
     fi
 
     local anchor_line
-    anchor_line=$(grep -n '^struct xcontext' "$target" | head -1 | cut -d: -f1)
-    [[ -n "$anchor_line" ]] || die "Anchor 'struct xcontext' not found in $target - wine's layout may have changed upstream"
+    anchor_line=$(file_scope_anchor "$target")
 
     local tmp
     tmp=$(mktemp)
     awk -v line="$anchor_line" -v defs_file="$defs_file" '
-        NR == line { while ((getline l < defs_file) > 0) print l; print; next }
+        NR == line { print; while ((getline l < defs_file) > 0) print l; next }
         { print }
     ' "$target" > "$tmp" && mv "$tmp" "$target"
-    info "  Inserted definitions before line $anchor_line (struct xcontext)"
+    info "  Inserted definitions after line $anchor_line (last #include, file scope)"
 }
 
-# d) Insert the KUSER_SHARED_DATA patching function.
-#    Same content-insertion pattern as the definitions.
+# d) Insert the KUSER_SHARED_DATA patching function at file scope
+#    (same robust anchor as the definitions).
 apply_kuser_shared_data_patch_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
@@ -529,25 +537,22 @@ apply_kuser_shared_data_patch_fix() {
     [[ -f "$target" ]]     || die "$target not found - wine's layout may have changed upstream"
     [[ -f "$patch_file" ]] || die "$patch_file not found - expected under patches/base/"
 
-    # Already present?
     if grep -q 'static void patch_kuser_shared_data' "$target"; then
         info "  KUSER_SHARED_DATA patch function already present"
         return
     fi
 
-    # Re-use the same anchor the definitions currently use.
     local anchor_line
-    anchor_line=$(grep -n '^struct xcontext' "$target" | head -1 | cut -d: -f1)
-    [[ -n "$anchor_line" ]] || die "Anchor 'struct xcontext' not found in $target"
+    anchor_line=$(file_scope_anchor "$target")
 
     local tmp
     tmp=$(mktemp)
     awk -v line="$anchor_line" -v patch="$patch_file" '
-        NR == line { while ((getline l < patch) > 0) print l; print; next }
+        NR == line { print; while ((getline l < patch) > 0) print l; next }
         { print }
     ' "$target" > "$tmp" && mv "$tmp" "$target"
 
-    info "  Inserted KUSER_SHARED_DATA patch function before line $anchor_line"
+    info "  Inserted KUSER_SHARED_DATA patch function after line $anchor_line (last #include, file scope)"
 }
 
 # e) Insert the CPUID handling logic at the start of the executable part of
