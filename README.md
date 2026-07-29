@@ -1,161 +1,168 @@
 # Proton + LinUwUx Builder
 
-Automated script to build **proton-cachyos** or **proton-ge-custom (GE)** with the LinUwUx patches applied.
+A single Bash script (`build.sh`) that builds **proton-cachyos** or **proton-ge-custom**
+from source with the **LinUwUx** patch set applied, and packages the result as a
+ready-to-install Steam Play compatibility tool.
+
+The patches make certain games run under Proton that otherwise detect the Linux/Wine
+environment and refuse to launch. The finished tarball drops straight into Steam's
+`compatibilitytools.d/`.
+
+---
+
+## What it produces
+
+A compressed redistributable in `dist/`:
+
+```
+dist/<version>-LinUwUx.tar.xz      # CachyOS (xz when available)
+dist/<version>-LinUwUx.tar.gz      # GE, or when xz is unavailable
+```
+
+Install it into Steam:
+
+```bash
+mkdir -p ~/.steam/root/compatibilitytools.d/<version>-LinUwUx
+tar -xf dist/<version>-LinUwUx.tar.xz \
+    -C ~/.steam/root/compatibilitytools.d/<version>-LinUwUx --strip-components=1
+```
+
+Then restart Steam and pick the tool under a game's *Compatibility* settings.
+
+---
+
+## What the patches do
+
+The LinUwUx set (pulled from `proton-LinUwUx-patch`) layers three targeted changes
+onto Wine, plus a set of `.patch` files:
+
+- **HwProfileGuid** — adds a stable hardware-profile GUID to the registry
+  (`wine.inf.in`) so the guest presents a consistent machine identity.
+- **faketime request** — adds a `set_faketime` request to the Wine server protocol
+  (`protocol.def`), used to spoof the reported time.
+- **CPUID spoofing** — injects `cpuid_spoof_defs.c` into the ntdll unix signal handler
+  and adds handling for CPUID leaf `0x336933`, so the guest sees a spoofed CPU identity.
+
+A `user_settings.py` — supplied in the patch repo at `patches/base/` — is copied into
+the redist, typically setting `winmm`/`version`/`reflex` DLL overrides and
+`PROTON_DISABLE_LSTEAMCLIENT=1`. The build fails if that file is missing.
+
+The patch repo is expected to provide `patches/base/user_settings.py` and
+`patches/base/cpuid_spoof_defs.c` (both required — the build stops if either is
+missing), the common `patches/wine/` set, and optionally
+`patches/overrides/<branch-or-tag>/wine/` for version-specific patch sets.
+
+> Valve's official Proton is intentionally **not** supported (debugger-detection issues).
+> Use `cachyos` or `ge`.
+
+---
 
 ## Requirements
 
-- `git`
-- `podman` (default) or `docker` — pass `--container-engine=docker` to use Docker instead
-- `make`, `sed`, `tar`, `patch`
-- Sufficient disk space (~30–40 GB per build)
+`git`, a container engine (`podman` by default, or `docker`), `make`, `sed`, `awk`,
+`tar`, and `patch`. `xz` is used for CachyOS output when present. `curl` or `wget`
+is used for the startup version check (optional — if neither is present, or you're
+offline, that check is skipped).
+
+---
 
 ## Usage
 
 ```bash
-chmod +x build.sh
+./build.sh [OPTIONS] [VARIANT] [BRANCH/TAG]
+```
 
-# Build latest CachyOS (default)
-./build.sh
+### Variants
 
-# Build a specific CachyOS branch
-./build.sh cachyos cachyos_11.0_20260702/main
+| Variant             | Source                           | Default branch/tag                                   |
+|---------------------|----------------------------------|------------------------------------------------------|
+| `cachyos` (default) | CachyOS/proton-cachyos           | latest `cachyos_*/main` (resolved live)              |
+| `ge`                | GloriousEggroll/proton-ge-custom | latest `GE-ProtonN-M` tag (resolved live → `master`) |
 
-# Build latest GE (master)
-./build.sh ge
+### Examples
 
-# Build a specific GE tag
-./build.sh ge GE-Proton11-3
-./build.sh ge GE-Proton10-28
-
-# Force a clean re-clone instead of reusing an existing source tree
-./build.sh --force ge GE-Proton11-3
-
-# Build with Docker instead of Podman
+```bash
+./build.sh                          # latest CachyOS
+./build.sh cachyos <branch>         # a specific CachyOS branch
+./build.sh ge                       # latest GE
+./build.sh ge GE-Proton11-3         # a specific GE tag
 ./build.sh --container-engine=docker ge
+./build.sh --update-patches         # force a fresh clone of patches/
 ```
 
-## What It Does
+### Options
 
-1. Clones the LinUwUx patch files from this repo.
-2. Clones (or reuses/updates) the proton-cachyos or proton-ge-custom source for the requested branch/tag.
-3. Updates submodules.
-4. Installs the LinUwUx Wine patches.
-5. Applies them:
-   - **GE** — applied directly by this script (`protonprep` first, then the LinUwUx patches).
-   - **CachyOS** — installed into `patches/wine/`, where CachyOS's own build system auto-applies them.
-   - Both variants get the hardware profile GUID (regedit) fix and the faketime protocol request appended directly, rather than as `.patch` files.
-6. Adds `user_settings.py` (DLL overrides, `PROTON_DISABLE_LSTEAMCLIENT=1`) and patches `Makefile.in` so it's packaged.
-7. Runs `configure.sh` and `make redist`.
-8. Packages the result into a single `*-LinUwUx.tar.gz`/`.tar.xz`.
+| Flag                        | Effect                                                    |
+|-----------------------------|-----------------------------------------------------------|
+| `-f`, `--force`             | Force a full re-clone and clean rebuild.                  |
+| `-k`, `--no-clean`          | Keep the `-src`/`-build` trees after a successful build.  |
+| `--update-patches`          | Delete and re-clone the `patches/` folder from upstream.  |
+| `--container-engine=<name>` | Container engine to build with (default: `podman`).       |
+| `-h`, `--help`              | Show help.                                                |
 
-If any LinUwUx patch fails to apply, the build stops rather than shipping a Proton that's silently missing it.
+### Environment
 
-## Folder Structure
+| Variable | Effect                                                     |
+|----------|------------------------------------------------------------|
+| `SLOW=1` | Restore the 1.2s pauses between steps (off by default).    |
 
-Every branch/tag gets its own folder, so multiple versions can coexist and rebuilding one never touches another:
+---
 
-```
-./
-├── build.sh
-├── logs/
-│   ├── GE-Proton-11-3/
-│   │   ├── prep.log               # GE only
-│   │   ├── linuwux-patches.log     # GE only
-│   │   └── build.log
-│   └── proton-cachyos-11.0-20260702-slr/
-│       └── build.log
-├── GE-Proton-11-3-src/
-├── GE-Proton-11-3-build/
-├── proton-cachyos-11.0-20260702-slr-src/
-└── proton-cachyos-11.0-20260702-slr-build/
-```
+## How it works
 
-Re-running the same branch/tag reuses its existing source tree (fetches and checks out the latest) instead of re-cloning from scratch. Use `--force` to wipe and re-clone.
+The script runs a preflight (dependency + free-space checks and a startup version
+check — see Behaviour notes), then a numbered pipeline:
 
-## Naming
+1. **Obtain LinUwUx patches** — reuses the local `patches/` folder if present,
+   otherwise clones the patch repo. Pass `--update-patches` to force a fresh clone.
+2. **Resolve version & clone/reuse source** — derives a version id from the branch/tag,
+   then clones the Proton source (or reuses an existing tree unless `--force`).
+3. **Update submodules** — recursive and tree-filtered (Wine, DXVK, etc.); deinit +
+   re-init on `--force`.
+4. **Install patch files** — populates a fresh `patches/wine` staging directory in the
+   source tree from your LinUwUx repo: the common `wine` set, or a version-specific
+   `overrides/<branch>/wine` set if one exists.
+5. **Apply the patches** — applies the three targeted fixes (HwProfileGuid, faketime
+   request, CPUID definitions) and the `.patch` set on the host, then regenerates the
+   Wine server protocol. For GE, `protonprep` runs first so LinUwUx layers on top; for
+   CachyOS the staged `.patch` files are removed afterward as cleanup.
+6. **Install `user_settings.py`** — copies `patches/base/user_settings.py` into the
+   source tree; the build stops with an error if it isn't present.
+7. **Wire `user_settings.py` into the package** — patches `Makefile.in` so the file
+   ships in the redist, and fails loudly if the expected anchors have moved upstream.
+8. **Configure & build** — runs `configure.sh` (ccache enabled for CachyOS) and
+   `make redist` inside the container.
+9. **Package & verify** — finds or creates the `*-LinUwUx.*` archive, then fails the
+   build if `user_settings.py` or the core `proton`/`version` files are missing (and
+   warns on a suspiciously small archive).
+10. **Move to `dist/` & clean up** — moves the tarball to `dist/` and, unless
+    `--no-clean`, removes the `-src`/`-build` trees.
 
-The folder/package name comes straight from the branch or tag you build:
+---
 
-- GE tags read through as-is: `GE-Proton11-3` → `GE-Proton-11-3`.
-- CachyOS branches (`cachyos_<version>_<date>/<subpath>`) are translated to match CachyOS's actual release naming: `/main` → `-slr`, `/main_native` → `-native`.
+## Behaviour notes
 
-## Patches Are Downloaded Once, Then Reused
-
-The first time you build anything, the script clones `proton-LinUwUx-patch` and keeps its `patches/` folder next to `build.sh`:
-
-```
-build.sh
-patches/
-├── wine/...
-├── overrides/...
-└── base/...
-```
-
-Every later run checks for that folder first: if it's there, it's used exactly as-is with **no network call at all** — the script never re-downloads or overwrites it. That makes it the natural place to test patch changes before pushing them: edit `patches/` directly (or `cd patches/ && git init` / point it at your own checkout if you want version control while iterating), rerun `build.sh`, and your local edits are what gets built.
-
-To go back to a fresh copy of whatever's currently on GitHub, just delete the folder:
-
-```bash
-rm -rf patches/
-```
-
-and the next run will re-download it.
-
-## The patches/base/ Folder
-
-Alongside `patches/wine/` (the diff patches, subject to the override system below) there's `patches/base/`, which holds plain source snippets that get appended directly into wine's source rather than applied with `patch`. Currently that's `cpuid_spoof_defs.c` — the CPUID-spoofing variables and helper functions, appended into `signal_x86_64.c` before it's compiled.
-
-This folder is **not** part of the override system: its contents are applied identically for every version, every variant, regardless of which override (if any) is in play. It exists as a separate category specifically because this content is self-contained new code with no dependency on a particular version's source layout — unlike the diff patches, it never needs re-offsetting.
-
-## Version-Specific Patch Overrides
-
-Not every LinUwUx patch applies cleanly to every Proton version (e.g. an older base like `GE-Proton9-4` may need its own patch set entirely). Drop version-specific files in the patch repo under:
-
-```
-patches/overrides/<exact branch or tag you'd pass on the CLI>/wine/...
-```
-
-mirroring the same layout as the common `patches/wine/` tree, e.g.:
-
-```
-patches/overrides/GE-Proton9-4/wine/dlls/ntdll/unix/0001-spoof-cpuid.patch
-```
-
-The build script uses one or the other, never both: if a version has an override folder, that becomes its *entire* patch set — the common patches are not applied alongside it. Versions without an override folder just use the common patches as normal.
-
-**This mechanism itself is solid, but making an override actually work for a given version is not guaranteed** — that part depends on the patch content, not the script. In practice, getting a version working has meant:
-
-- Manually re-offsetting a patch's context to match that version's source, which can require real investigation (checking the actual post-patch code, verifying the patched function is genuinely reachable, not just that `patch` applied without complaint).
-- Splitting large patches into smaller ones, since a single patch touching several unrelated functions makes any one hunk's failure block everything else.
-- Compiler differences between versions can surface bugs that were already present but never triggered — e.g. a stricter GCC catching an out-of-bounds `memcpy` that had been silently overreading a buffer in every build up to that point.
-
-So: the script will *build* whatever override you give it and apply the same checks either way (patch failures still `die`, a stale patch redefining something `cpuid_spoof_defs.c` already owns still gets caught). Whether the *resulting Proton actually works correctly* for a given version needs real testing — a clean build is not the same as a working build.
-
-## Output Package
-
-The finished redistributable is named `<version>-LinUwUx.tar.gz` (or `.tar.xz` for CachyOS, matching their official releases), and contains:
-
-- The LinUwUx Wine patches (CPU ID spoof, faketime, hardware profile GUID)
-- `user_settings.py` with the DLL overrides and `PROTON_DISABLE_LSTEAMCLIENT=1`
-
-## Installing the Build
-
-```bash
-mkdir -p ~/.steam/root/compatibilitytools.d/GE-Proton-11-3-LinUwUx
-tar -xf GE-Proton-11-3-LinUwUx.tar.gz -C ~/.steam/root/compatibilitytools.d/GE-Proton-11-3-LinUwUx --strip-components=1
-# restart Steam and select the new tool
-```
-
-(The script prints the exact commands for whatever it just built at the end of every run.)
-
-## Notes
-
-- First run of any version takes a long time (submodules + full compile).
-- Subsequent runs of the same version reuse the existing source folder.
-- Different versions never overwrite each other.
-- Check `logs/<version>/` if a build fails or a patch doesn't apply cleanly.
-- A version-specific override building cleanly doesn't mean the resulting Proton actually works correctly - see [Version-Specific Patch Overrides](#version-specific-patch-overrides).
-
-## Credits
-- LinUwUx for the patches.
-- DenuvOwO for the HV Bypass.
+- **Latest version is resolved live.** With no branch/tag given, `cachyos` queries the
+  remote for the newest `cachyos_*/main` branch and `ge` for the newest `GE-ProtonN-M`
+  tag, each falling back to a pinned default if the lookup fails.
+- **Startup version check.** On each run the script compares its own `VERSION` against
+  the copy published on GitHub. If the local script is older it stops and asks you to
+  update; if you're offline (or `curl`/`wget` are absent) the check is skipped with a
+  warning.
+- **Clean on success, keep on failure.** A successful build leaves only the tarball in
+  `dist/`; the `-src`/`-build` trees are removed so the next run starts fresh. A
+  *failed* build leaves its trees in place for debugging. Pass `--no-clean` to always
+  keep them (faster patch-development loop).
+- **LinUwUx layers on top of upstream — it doesn't replace it.** The `patches/wine`
+  directory the script wipes and repopulates is a private staging area; neither CachyOS
+  nor GE ships wine patches there. CachyOS's wine patches come pre-applied via its
+  `wine-cachyos` fork submodule, and GE's are applied by `protonprep`. LinUwUx patches
+  apply on top of that already-patched wine tree, so both sets end up in the build.
+- **Patches are applied on the host, and fail loudly.** They're applied before the
+  container ever sees the source, so a build can't silently ship without them. If a
+  patch or a required `Makefile.in` anchor doesn't apply, the script stops rather than
+  producing a quietly-broken build.
+- **Versioned folders.** Source, build, and log folders are named per version, so
+  multiple builds never clobber each other.
+- **Logs** are written to `logs/<version>/` (`build.log`, `linuwux-patches.log`, and
+  `prep.log` for GE).

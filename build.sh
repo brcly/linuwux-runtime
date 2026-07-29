@@ -3,21 +3,21 @@ set -euo pipefail
 
 # ============================================================
 # Proton + LinUwUx Builder
-#
-# Automates building proton-cachyos or proton-ge-custom with the LinUwUx
-# patch set (CPU ID spoofing, faketime, hardware profile GUID) applied, and
-# packages the result as a ready-to-install Steam Play compatibility tool.
+# Builds proton-cachyos or proton-ge-custom with LinUwUx patches
+# (CPUID spoof, faketime, hardware profile GUID) applied.
 # ============================================================
 
-VERSION="1.16"
+VERSION="26.07.29"
 CONTAINER_ENGINE="podman"
 PATCH_REPO="https://github.com/brcly/proton-LinUwUx-patch.git"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCHES_DIR="${SCRIPT_DIR}/patches"
+DIST_DIR="${SCRIPT_DIR}/dist"
 FORCE=0
+CLEAN=1
+UPDATE_PATCHES=0
 
-# -------------------- Colour output (off when not a terminal) --------------------
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -29,13 +29,18 @@ else
     RED='' GREEN='' YELLOW='' CYAN='' BOLD='' RESET=''
 fi
 
-# -------------------- Output + utility helpers --------------------
-die()  { echo -e "${RED}ERROR: $*${RESET}" >&2; exit 1; }
-info() { echo -e "${GREEN}==> $*${RESET}"; }
-warn() { echo -e "${YELLOW}WARNING: $*${RESET}" >&2; }
+ts() { date '+%H:%M:%S'; }
+
+die()  { echo -e "${RED}[$(ts)] ERROR: $*${RESET}" >&2; exit 1; }
+info() { echo -e "${GREEN}[$(ts)] ==> $*${RESET}"; }
+warn() { echo -e "${YELLOW}[$(ts)] WARNING: $*${RESET}" >&2; }
 header(){ echo -e "\n${CYAN}${BOLD}$*${RESET}"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found"; }
-pause(){ sleep 1.2; }
+pause(){ [[ "${SLOW:-0}" == "1" ]] && sleep 1.2; return 0; }
+
+HR="$(printf '=%.0s' {1..60})"
+
+trap 'echo -e "\n${RED}[$(ts)] Build failed – source/build trees left in place for debugging${RESET}" >&2' ERR
 
 usage() {
     cat << EOF
@@ -51,23 +56,42 @@ Variants:
 Examples:
   $(basename "$0")                          # latest CachyOS
   $(basename "$0") cachyos <branch>
-  $(basename "$0") ge                       # latest GE
+  $(basename "$0") ge                       # latest GE tag (or master)
   $(basename "$0") ge GE-Proton11-3
   $(basename "$0") ge GE-Proton9-4
   $(basename "$0") --container-engine=docker ge
+  $(basename "$0") --update-patches         # force re-download of patches/
 
 Options:
-  -f, --force               Force full re-clone and clean rebuild
+  -f, --force               Force full re-clone and clean rebuild of the Proton source
+  -k, --no-clean            Keep the -src/-build trees after a successful build
+                            (default: they're removed, leaving only the tarball)
+  --update-patches          Delete and re-clone the patches/ folder from upstream
   --container-engine=<name> Container engine to build with (default: podman)
   -h, --help                Show this help
 
-Versioned folders are used so multiple builds never overwrite each other.
+Environment:
+  SLOW=1                     Restore the 1.2s pauses between steps (off by default)
+
+Notes:
+  Versioned folders are used so multiple builds never overwrite each other.
+  With no branch given:
+    - cachyos resolves the latest cachyos_*/main branch from the remote
+    - ge resolves the newest GE-ProtonN-M tag (falls back to master)
+  On success the finished tarball is moved to dist/ and the -src/-build trees are
+  removed, so each run starts from a fresh clone. A failed build leaves its trees
+  in place for debugging. Pass --no-clean to keep them (faster patch-dev loop).
+
+  Place a ready-made user_settings.py at patches/base/user_settings.py
+  so it is copied into every build.
 
 EOF
     exit 0
 }
 
-# -------------------- Argument parsing --------------------
+# ------------------------------------------------------------
+# Argument parsing
+# ------------------------------------------------------------
 VARIANT="cachyos"
 BRANCH=""
 
@@ -75,6 +99,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)   usage ;;
         -f|--force)  FORCE=1; shift ;;
+        -k|--no-clean) CLEAN=0; shift ;;
+        --update-patches) UPDATE_PATCHES=1; shift ;;
         --container-engine=*)
             CONTAINER_ENGINE="${1#--container-engine=}"
             [[ -n "$CONTAINER_ENGINE" ]] || die "--container-engine requires a value (e.g. --container-engine=docker)"
@@ -93,7 +119,32 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# -------------------- Resolve variant --------------------
+# ------------------------------------------------------------
+# Resolve variant → repo + default branch/tag
+# (auto-detects latest when no explicit branch/tag is given)
+# ------------------------------------------------------------
+detect_latest_cachyos_branch() {
+    local fallback="$1" latest
+    command -v git >/dev/null 2>&1 || { echo "$fallback"; return; }
+    latest=$(git ls-remote --heads "$REPO" 'refs/heads/cachyos_*' 2>/dev/null \
+        | sed 's|.*refs/heads/||' \
+        | grep '/main$' \
+        | sort -t_ -k3 \
+        | tail -1)
+    [[ -n "$latest" ]] && echo "$latest" || echo "$fallback"
+}
+
+detect_latest_ge_tag() {
+    local fallback="master" latest
+    command -v git >/dev/null 2>&1 || { echo "$fallback"; return; }
+    latest=$(git ls-remote --tags "$REPO" 'refs/tags/GE-Proton*' 2>/dev/null \
+        | sed 's|.*refs/tags/||' \
+        | grep -E '^GE-Proton[0-9]+-[0-9]+$' \
+        | sort -V \
+        | tail -1)
+    [[ -n "$latest" ]] && echo "$latest" || echo "$fallback"
+}
+
 case "$VARIANT" in
     cachyos|cachy)
         VARIANT="cachyos"
@@ -105,36 +156,99 @@ case "$VARIANT" in
         REPO="https://github.com/GloriousEggroll/proton-ge-custom.git"
         DEFAULT_BRANCH="master"
         ;;
-    *)
-        die "Unknown variant '$VARIANT'"
-        ;;
 esac
 
+if [[ -z "$BRANCH" ]]; then
+    if [[ "$VARIANT" == "cachyos" ]]; then
+        info "Resolving latest CachyOS branch from remote..."
+        DEFAULT_BRANCH=$(detect_latest_cachyos_branch "$DEFAULT_BRANCH")
+        info "  Using branch: $DEFAULT_BRANCH"
+    else
+        info "Resolving latest GE-Proton tag from remote..."
+        DEFAULT_BRANCH=$(detect_latest_ge_tag)
+        info "  Using tag/branch: $DEFAULT_BRANCH"
+    fi
+fi
 BRANCH="${BRANCH:-$DEFAULT_BRANCH}"
 
+# ------------------------------------------------------------
+# Dependency + free-space checks
+# ------------------------------------------------------------
 need git
 need "$CONTAINER_ENGINE"
 need make
 need sed
+need awk
 need tar
 need patch
 
-header "============================================================"
+if ! command -v xz >/dev/null 2>&1; then
+    warn "xz not found – CachyOS packages will fall back to .tar.gz"
+fi
+
+FREE_GB=$(df -BG --output=avail "$SCRIPT_DIR" 2>/dev/null | tail -1 | tr -dc '0-9' || echo 0)
+if [[ "$FREE_GB" -gt 0 && "$FREE_GB" -lt 35 ]]; then
+    warn "Only ~${FREE_GB} GB free under $SCRIPT_DIR – a full build typically needs 30-40 GB"
+elif [[ "$FREE_GB" -gt 0 ]]; then
+    info "Free space: ~${FREE_GB} GB"
+fi
+
+# ------------------------------------------------------------
+# Script version check against upstream
+# ------------------------------------------------------------
+check_script_version() {
+    local remote_version=""
+    local raw_url="https://raw.githubusercontent.com/brcly/proton-LinUwUx-patch/main/build.sh"
+
+    if command -v curl >/dev/null 2>&1; then
+        remote_version=$(curl -fsSL --max-time 8 "$raw_url" 2>/dev/null \
+            | grep -m1 '^VERSION=' | sed -E 's/^VERSION="([^"]+)".*/\1/') || true
+    elif command -v wget >/dev/null 2>&1; then
+        remote_version=$(wget -qO- --timeout=8 "$raw_url" 2>/dev/null \
+            | grep -m1 '^VERSION=' | sed -E 's/^VERSION="([^"]+)".*/\1/') || true
+    fi
+
+    if [[ -z "$remote_version" ]]; then
+        warn "Could not check for script updates (offline or network error) – continuing"
+        return 0
+    fi
+
+    if [[ "$remote_version" == "$VERSION" ]]; then
+        info "Script is up to date (v${VERSION})"
+        return 0
+    fi
+
+    # Local is older if it sorts first under version sort
+    if printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | head -1 | grep -qx "$VERSION"; then
+        die "This script is outdated (v${VERSION}). Latest is v${remote_version}.
+  Update with:  git -C \"$(dirname "$0")\" pull
+  or re-download from: https://github.com/brcly/proton-LinUwUx-patch"
+    fi
+
+    # Local is newer than published (dev build) – just note it
+    info "Local script (v${VERSION}) is newer than published v${remote_version}"
+}
+
+check_script_version
+
+header "$HR"
 header "  Proton + LinUwUx Builder v${VERSION}"
 header "  Variant     : $VARIANT"
 header "  Branch/Tag  : $BRANCH"
-header "============================================================"
+header "$HR"
 pause
 
-# ============================================================
-# 1. Get the LinUwUx patches - download once, then reuse forever
-#
-# patches/ is checked for first; only cloned if missing. This makes it safe
-# to edit patches/ directly to test changes before pushing them upstream -
-# delete the folder to force a fresh download again.
-# ============================================================
+# ------------------------------------------------------------
+# 1. Obtain LinUwUx patches (reuse local copy or clone)
+# ------------------------------------------------------------
+if [[ $UPDATE_PATCHES -eq 1 ]]; then
+    info "--update-patches: removing existing patches/ so a fresh copy is fetched"
+    rm -rf "$PATCHES_DIR"
+fi
+
 if [[ -d "$PATCHES_DIR" ]]; then
     info "Using existing patches/ folder ($PATCHES_DIR) – not re-downloading"
+    info "  (pass --update-patches to force a fresh clone)"
 else
     info "Downloading LinUwUx patches..."
     tmp_clone="${SCRIPT_DIR}/.tmp-patches-clone"
@@ -146,10 +260,9 @@ else
 fi
 pause
 
-# ============================================================
-# 2 & 3. Work out the version being built, then clone/reuse its source tree
-# ============================================================
-
+# ------------------------------------------------------------
+# 2. Compute versioned folder names + clone/reuse Proton source
+# ------------------------------------------------------------
 compute_version_id() {
     local raw="$1" variant="$2" id
     case "$variant" in
@@ -168,9 +281,9 @@ compute_version_id() {
 }
 
 ensure_unshallow() {
-    if git rev-parse --is-shallow-repository 2>/dev/null | grep -q true; then
+    if git -C "$SRC_DIR" rev-parse --is-shallow-repository 2>/dev/null | grep -q true; then
         info "  Repo is shallow – fetching full history/tags..."
-        git fetch --unshallow --tags --force \
+        git -C "$SRC_DIR" fetch --unshallow --tags --force \
             || warn "  Unshallow fetch failed – version detection may still break at build time!"
     fi
 }
@@ -193,49 +306,51 @@ mkdir -p "$LOG_DIR"
 
 if [[ $FORCE -eq 0 && -d "$SRC_DIR/.git" ]]; then
     info "Reusing existing source tree (use --force to re-clone)"
-    cd "$SRC_DIR"
     ensure_unshallow
-    git fetch --tags --force || true
-    git checkout -q "$BRANCH" 2>/dev/null || git checkout -q -B "$BRANCH" "origin/$BRANCH"
-    if git symbolic-ref -q HEAD >/dev/null; then
-        git pull --ff-only || true
+    git -C "$SRC_DIR" fetch --tags --force || true
+    git -C "$SRC_DIR" checkout -q "$BRANCH" 2>/dev/null \
+        || git -C "$SRC_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH"
+    if git -C "$SRC_DIR" symbolic-ref -q HEAD >/dev/null; then
+        git -C "$SRC_DIR" pull --ff-only || true
     fi
 else
     info "Cloning source..."
     rm -rf "$SRC_DIR"
-    if ! git clone --branch "$BRANCH" --filter=tree:0 --tags "$REPO" "$SRC_DIR" 2>/dev/null; then
+    if ! git clone --branch "$BRANCH" --filter=tree:0 "$REPO" "$SRC_DIR" 2>/dev/null; then
         info "Branch/tag not found on default clone attempt – retrying without --branch..."
-        git clone --filter=tree:0 --tags "$REPO" "$SRC_DIR" || die "Failed to clone $REPO"
-        cd "$SRC_DIR"
-        git checkout -q "$BRANCH" 2>/dev/null || die "Branch/tag '$BRANCH' not found"
-    else
-        cd "$SRC_DIR"
+        git clone --filter=tree:0 "$REPO" "$SRC_DIR" || die "Failed to clone $REPO"
+        git -C "$SRC_DIR" checkout -q "$BRANCH" 2>/dev/null || die "Branch/tag '$BRANCH' not found"
     fi
     ensure_unshallow
 fi
 pause
 
-# ============================================================
-# 4. Update submodules
-# ============================================================
+# ------------------------------------------------------------
+# 3. Update submodules
+# ------------------------------------------------------------
 info "Updating submodules (this can take a while)..."
 if [[ $FORCE -eq 1 ]]; then
     info "  --force: deiniting submodules for a full clean update"
-    git submodule deinit -f --all 2>/dev/null || true
+    git -C "$SRC_DIR" submodule deinit -f --all 2>/dev/null || true
 fi
-git submodule update --init --recursive --force --filter=tree:0 || die "Submodule update failed"
+git -C "$SRC_DIR" submodule update --init --recursive --force --filter=tree:0 \
+    || die "Submodule update failed"
 pause
 
-# ============================================================
-# 5. Install the LinUwUx patch files for this build
-# ============================================================
+# ------------------------------------------------------------
+# 4. Install LinUwUx patch files into the source tree
+#    (version-specific override if present, otherwise common set)
+# ------------------------------------------------------------
 info "Installing LinUwUx patch files..."
+
+cd "$SRC_DIR"
 
 rm -rf patches/wine
 mkdir -p patches/wine
 
 if [[ -d "$PATCHES_DIR/overrides/$BRANCH/wine" ]]; then
-    info "Using version-specific overrides for '$BRANCH' (common patches not applied)"
+    info "Using version-specific overrides for '$BRANCH'"
+    info "  (common patches under patches/wine/ are NOT applied when an override exists)"
     cp -r "$PATCHES_DIR/overrides/$BRANCH/wine/." patches/wine/
 else
     info "No version-specific overrides for '$BRANCH' – using common patches"
@@ -260,20 +375,13 @@ if [[ -n "$STALE_DEF_PATCHES" ]]; then
 fi
 pause
 
-# ============================================================
-# 6. Apply the patches
-#
-# Both variants apply .patch files the same way now: directly, on the host,
-# via apply_linuwux_patches below - not CachyOS's own build-time auto-apply.
-# A build that completed without error but whose patches silently weren't
-# applied is a worse failure mode than a build that fails loudly, and it's
-# not fully visible from outside CachyOS's own build pipeline (ccache is
-# enabled for CachyOS specifically - --enable-ccache - and caches compiled
-# objects by content hash; a stale cached object slipping through at the
-# wrong point would look exactly like this). Applying ourselves, before the
-# container (and its cache) ever sees the source, removes the question.
-# ============================================================
-
+# ------------------------------------------------------------
+# 5. Apply LinUwUx fixes and patches
+#    - Hardware profile GUID (regedit)
+#    - Faketime protocol request
+#    - CPUID spoof definitions (content insert, not a .patch)
+#    - Remaining .patch files + protocol regeneration
+# ------------------------------------------------------------
 apply_regedit_fix() {
     local wine_dir="$1"
     local inf="${wine_dir}/loader/wine.inf.in"
@@ -341,9 +449,9 @@ apply_cpuid_spoof_definitions_fix() {
 apply_patch_file() {
     local patch_file="$1" label="$2" log="$3"
     {
-        echo "============================================================"
-        echo "Applying: $label"
-        echo "============================================================"
+        echo "$HR"
+        echo "[$(ts)] Applying: $label"
+        echo "$HR"
     } >> "$log" 2>&1
 
     if patch -Np1 --forward --fuzz=0 < "$patch_file" >> "$log" 2>&1; then
@@ -385,68 +493,77 @@ apply_linuwux_patches() {
     fi
 
     popd > /dev/null
-    info "Full patch log: $patch_log"
 
     if [[ $failures -gt 0 ]]; then
         die "$failures LinUwUx patch step(s) failed - see $patch_log (stopping rather than shipping a build silently missing them)"
     fi
 }
 
-if [[ "$VARIANT" == "ge" ]]; then
-    PREP_SCRIPT=$(find patches -maxdepth 1 -name 'protonprep*.sh' | head -1)
-    if [[ -n "$PREP_SCRIPT" ]]; then
-        info "Running GE protonprep..."
-        bash "$PREP_SCRIPT" 2>&1 | tee "$LOG_DIR/prep.log" || warn "protonprep returned non-zero"
-
-        FAIL_LINES=$(grep -ic 'fail' "$LOG_DIR/prep.log" 2>/dev/null || true)
-        if [[ "${FAIL_LINES:-0}" -gt 0 ]]; then
-            warn "protonprep log contains ${FAIL_LINES} line(s) mentioning 'fail' – review $LOG_DIR/prep.log:"
-            grep -i 'fail' "$LOG_DIR/prep.log" | sed 's|^|      |'
-        else
-            info "protonprep log clean – no failures mentioned"
-        fi
-    else
+ge_protonprep() {
+    local prep_script
+    prep_script=$(find patches -maxdepth 1 -name 'protonprep*.sh' | head -1)
+    if [[ -z "$prep_script" ]]; then
         warn "No protonprep script found – continuing"
+        return
     fi
+    info "Running GE protonprep..."
+    bash "$prep_script" 2>&1 | tee "$LOG_DIR/prep.log" || warn "protonprep returned non-zero"
+
+    local fail_lines
+    fail_lines=$(grep -ic 'fail' "$LOG_DIR/prep.log" 2>/dev/null || true)
+    if [[ "${fail_lines:-0}" -gt 0 ]]; then
+        warn "protonprep log contains ${fail_lines} line(s) mentioning 'fail' – review $LOG_DIR/prep.log:"
+        grep -i 'fail' "$LOG_DIR/prep.log" | sed 's|^|      |'
+    else
+        info "protonprep log clean – no failures mentioned"
+    fi
+}
+
+if [[ "$VARIANT" == "ge" ]]; then
+    ge_protonprep
     pause
-    apply_regedit_fix "wine"
-    apply_faketime_protocol_fix "wine"
-    apply_cpuid_spoof_definitions_fix "wine"
-    apply_linuwux_patches "wine"
 else
     info "CachyOS – applying LinUwUx patches directly rather than trusting CachyOS's own auto-apply"
-    apply_regedit_fix "wine"
-    apply_faketime_protocol_fix "wine"
-    apply_cpuid_spoof_definitions_fix "wine"
-    apply_linuwux_patches "wine"
+fi
+
+apply_regedit_fix "wine"
+apply_faketime_protocol_fix "wine"
+apply_cpuid_spoof_definitions_fix "wine"
+apply_linuwux_patches "wine"
+
+if [[ "$VARIANT" == "cachyos" ]]; then
     find patches/wine -name '*.patch' -delete
 fi
 pause
 
-# ============================================================
-# 7. Write user_settings.py
-# ============================================================
-info "Creating user_settings.py..."
-cat > user_settings.py << 'EOF'
-# LinUwUx defaults – automatically included in the redist
-user_settings = {
-    "WINEDLLOVERRIDES": "winmm=n,b;version=n,b;reflex=n,b",
-    "PROTON_DISABLE_LSTEAMCLIENT": "1",
-}
-EOF
+# ------------------------------------------------------------
+# 6. Install user_settings.py (must exist under patches/base/)
+# ------------------------------------------------------------
+info "Installing user_settings.py..."
+
+user_settings_src="${PATCHES_DIR}/base/user_settings.py"
+[[ -f "$user_settings_src" ]] \
+    || die "user_settings.py not found at $user_settings_src – obtain it and place it there before building"
+cp "$user_settings_src" user_settings.py
+info "  Installed from $user_settings_src"
 pause
 
-# ============================================================
-# 8. Wire user_settings.py into the package build
-#
-# Proton's Makefile only knows how to ship user_settings.sample.py by
-# default; this adds a matching rule so the real user_settings.py (written
-# above) gets copied into the redist too. Guarded by a marker check so a
-# reused source tree doesn't get this rule added twice.
-# ============================================================
+# ------------------------------------------------------------
+# 7. Wire user_settings.py into the package (Makefile.in)
+# ------------------------------------------------------------
 info "Ensuring user_settings.py is included in the package..."
 
-if ! grep -q 'USER_SETTINGS_REAL_TARGET' Makefile.in; then
+if grep -q 'USER_SETTINGS_REAL_TARGET' Makefile.in; then
+    info "Makefile.in already contains the rule"
+else
+    anchor_dst='USER_SETTINGS_PY_TARGET := $(addprefix $(DST_BASE)/,user_settings.sample.py)'
+    anchor_src='$(USER_SETTINGS_PY_TARGET): $(addprefix $(SRCDIR)/,user_settings.sample.py)'
+    anchor_dist='DIST_COPY_TARGETS := $(FILELOCK_TARGET) $(PROTON_PY_TARGET) \'
+
+    grep -qF "$anchor_dst"  Makefile.in || die "Makefile.in anchor missing (DST_BASE target) – upstream layout changed, user_settings.py wiring needs updating"
+    grep -qF "$anchor_src"  Makefile.in || die "Makefile.in anchor missing (SRCDIR target) – upstream layout changed, user_settings.py wiring needs updating"
+    grep -qF "$anchor_dist" Makefile.in || die "Makefile.in anchor missing (DIST_COPY_TARGETS) – upstream layout changed, user_settings.py wiring needs updating"
+
     sed -i \
         -e '/USER_SETTINGS_PY_TARGET := \$(addprefix \$(DST_BASE)\/,user_settings.sample.py)/a\
 USER_SETTINGS_REAL_TARGET := \$(addprefix \$(DST_BASE)\/,user_settings.py)' \
@@ -460,15 +577,20 @@ USER_SETTINGS_REAL_TARGET := \$(addprefix \$(DST_BASE)\/,user_settings.py)' \
     sed -i \
         -e 's|DIST_COPY_TARGETS := \$(FILELOCK_TARGET) \$(PROTON_PY_TARGET) \\|DIST_COPY_TARGETS := \$(FILELOCK_TARGET) \$(PROTON_PY_TARGET) \$(USER_SETTINGS_REAL_TARGET) \\|' \
         Makefile.in
+
+    grep -qF 'USER_SETTINGS_REAL_TARGET := $(addprefix $(DST_BASE)/,user_settings.py)' Makefile.in \
+        || die "Makefile.in edit failed: DST_BASE rule not inserted"
+    grep -qF '$(USER_SETTINGS_REAL_TARGET): $(addprefix $(SRCDIR)/,user_settings.py)' Makefile.in \
+        || die "Makefile.in edit failed: SRCDIR rule not inserted"
+    grep -qF 'DIST_COPY_TARGETS := $(FILELOCK_TARGET) $(PROTON_PY_TARGET) $(USER_SETTINGS_REAL_TARGET)' Makefile.in \
+        || die "Makefile.in edit failed: DIST_COPY_TARGETS not updated"
     info "Makefile.in updated"
-else
-    info "Makefile.in already contains the rule"
 fi
 pause
 
-# ============================================================
-# 9. Configure and build
-# ============================================================
+# ------------------------------------------------------------
+# 8. Configure and build the redistributable
+# ------------------------------------------------------------
 info "Preparing build directory..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
@@ -476,33 +598,22 @@ cd "$BUILD_DIR"
 pause
 
 info "Running configure.sh..."
-case "$VARIANT" in
-    cachyos)
-        "$SRC_DIR/configure.sh" \
-            --enable-ccache \
-            --build-name="$BUILD_NAME" \
-            --container-engine="$CONTAINER_ENGINE" \
-            || die "configure.sh failed"
-        ;;
-    ge)
-        "$SRC_DIR/configure.sh" \
-            --build-name="$BUILD_NAME" \
-            --container-engine="$CONTAINER_ENGINE" \
-            || die "configure.sh failed"
-        ;;
-esac
+ccache_flag=()
+if [[ "$VARIANT" == "cachyos" ]]; then
+    ccache_flag=(--enable-ccache)
+fi
+"$SRC_DIR/configure.sh" "${ccache_flag[@]}" \
+    --build-name="$BUILD_NAME" \
+    --container-engine="$CONTAINER_ENGINE" \
+    || die "configure.sh failed"
 pause
 
 info "Building redist (this will take a long time)..."
 make redist 2>&1 | tee "$LOG_DIR/build.log" || die "make redist failed – see $LOG_DIR/build.log"
 
-# ============================================================
-# 10. Package the result
-#
-# CachyOS's build produces a redist/ directory; GE's produces a tarball
-# directly. Either way, the end result here is one archive named
-# *-LinUwUx.* so installing is identical regardless of which was built.
-# ============================================================
+# ------------------------------------------------------------
+# 9. Locate / create the tarball and verify contents
+# ------------------------------------------------------------
 info "Verifying / packaging output..."
 
 TARBALL=$(find . -maxdepth 3 \( -name "${BUILD_NAME}*.tar.gz" -o -name "${BUILD_NAME}*.tar.xz" \) | head -1)
@@ -546,25 +657,64 @@ fi
 
 info "Found package: $TARBALL"
 
-if tar -tf "$TARBALL" 2>/dev/null | grep -q 'user_settings.py'; then
+MISSING=0
+listing=$(tar -tf "$TARBALL" 2>/dev/null || true)
+if grep -q 'user_settings.py' <<<"$listing"; then
     info "user_settings.py is present in the package"
 else
     warn "user_settings.py was NOT found inside the archive"
+    MISSING=1
+fi
+if grep -qE '(^|/)(proton|version)$' <<<"$listing"; then
+    info "Core files (proton / version) look present"
+else
+    warn "Could not locate 'proton' or 'version' inside the archive – package may be incomplete"
+    MISSING=1
+fi
+
+SIZE_MB=$(du -m "$TARBALL" | cut -f1)
+info "Package size: ${SIZE_MB} MB"
+if [[ "$SIZE_MB" -lt 200 ]]; then
+    warn "Tarball is only ${SIZE_MB} MB – this is unusually small for a Proton redist"
+fi
+
+[[ $MISSING -eq 0 ]] || die "Package failed verification (missing user_settings.py or core files) – see warnings above"
+
+# ------------------------------------------------------------
+# 10. Move tarball to dist/ and clean up (unless --no-clean)
+# ------------------------------------------------------------
+mkdir -p "$DIST_DIR"
+FINAL_TARBALL="${DIST_DIR}/$(basename "$TARBALL")"
+mv -f "$TARBALL" "$FINAL_TARBALL"
+info "Tarball moved to $FINAL_TARBALL"
+
+cd "$SCRIPT_DIR"
+
+if [[ $CLEAN -eq 1 ]]; then
+    info "Cleaning up build artifacts (use --no-clean to keep them)..."
+    rm -rf "$SRC_DIR" "$BUILD_DIR"
+    info "  Removed $(basename "$SRC_DIR") and $(basename "$BUILD_DIR")"
+else
+    info "Keeping -src/-build trees (--no-clean)"
 fi
 
 echo
-header "============================================================"
+header "$HR"
 header "  BUILD SUCCESSFUL"
-header "============================================================"
+header "$HR"
 echo -e "  ${BOLD}Variant${RESET}      : $VARIANT"
 echo -e "  ${BOLD}Branch/Tag${RESET}   : $BRANCH"
-echo -e "  ${BOLD}Source${RESET}       : $SRC_DIR"
-echo -e "  ${BOLD}Build dir${RESET}    : $BUILD_DIR"
+if [[ $CLEAN -eq 1 ]]; then
+    echo -e "  ${BOLD}Source/Build${RESET} : cleaned (--no-clean to keep)"
+else
+    echo -e "  ${BOLD}Source${RESET}       : $SRC_DIR"
+    echo -e "  ${BOLD}Build dir${RESET}    : $BUILD_DIR"
+fi
 echo -e "  ${BOLD}Logs${RESET}         : $LOG_DIR"
-echo -e "  ${BOLD}Package${RESET}      : $TARBALL"
-header "============================================================"
+echo -e "  ${BOLD}Package${RESET}      : $FINAL_TARBALL"
+header "$HR"
 echo
 echo "Install with:"
 echo "  mkdir -p ~/.steam/root/compatibilitytools.d/${BUILD_NAME}"
-echo "  tar -xf \"$TARBALL\" -C ~/.steam/root/compatibilitytools.d/${BUILD_NAME} --strip-components=1"
+echo "  tar -xf \"$FINAL_TARBALL\" -C ~/.steam/root/compatibilitytools.d/${BUILD_NAME} --strip-components=1"
 echo
