@@ -15,9 +15,10 @@ set -euo pipefail
 #   - Version-specific patch overrides live under
 #     patches/overrides/<key>/wine/, where <key> is the branch/tag with
 #     CachyOS's trailing /main[_native] removed.
-#   - CPUID definitions are inserted by content (not a fragile
-#     context diff) so they survive large rearrangements of
-#     signal_x86_64.c across Proton versions.
+#   - Additive content (HwProfileGuid, set_faketime request, CPUID
+#     definitions, user_settings.py) lives under patches/base/ and is
+#     applied by content rather than fragile context diffs so the
+#     changes survive large rearrangements of upstream Wine sources.
 # ============================================================
 
 VERSION="26.07.29"
@@ -99,8 +100,9 @@ Notes:
   removed, so each run starts from a fresh clone. A failed build leaves its trees
   in place for debugging. Pass --no-clean to keep them (faster patch-dev loop).
 
-  Place a ready-made user_settings.py at patches/base/user_settings.py
-  so it is copied into every build.
+  Required additive content lives under patches/base/:
+    user_settings.py, cpuid_spoof_defs.c, hwprofile_guid.reg,
+    set_faketime.protocol
 
 EOF
     exit 0
@@ -443,42 +445,44 @@ pause
 
 # a) Fixed HwProfileGuid so games that fingerprint hardware profiles
 #    see a stable, known value instead of a random one each boot.
+#    Content is read from patches/base/hwprofile_guid.reg.
 apply_regedit_fix() {
     local wine_dir="$1"
     local inf="${wine_dir}/loader/wine.inf.in"
-    local line='HKLM,System\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001,"HwProfileGuid",,"{12345678-1234-1234-1234-123456789012}"'
+    local content_file="${PATCHES_DIR}/base/hwprofile_guid.reg"
 
     info "Applying regedit fix (HwProfileGuid) to $inf ..."
-    [[ -f "$inf" ]] || die "$inf not found - wine's layout may have changed upstream"
+    [[ -f "$inf" ]]          || die "$inf not found - wine's layout may have changed upstream"
+    [[ -f "$content_file" ]] || die "$content_file not found - expected under patches/base/"
 
     if grep -q 'HwProfileGuid' "$inf"; then
         info "  HwProfileGuid already present"
     else
-        echo "$line" >> "$inf"
-        info "  Appended HwProfileGuid line"
+        cat "$content_file" >> "$inf"
+        echo >> "$inf"   # ensure the file ends with a newline
+        info "  Appended HwProfileGuid line from $content_file"
     fi
 }
 
 # b) Declare the set_faketime server request so the faketime patch
 #    can talk to wineserver.
+#    Content is read from patches/base/set_faketime.protocol.
 apply_faketime_protocol_fix() {
     local wine_dir="$1"
     local proto="${wine_dir}/server/protocol.def"
+    local content_file="${PATCHES_DIR}/base/set_faketime.protocol"
 
     info "Applying faketime request definition to $proto ..."
-    [[ -f "$proto" ]] || die "$proto not found - wine's layout may have changed upstream"
+    [[ -f "$proto" ]]          || die "$proto not found - wine's layout may have changed upstream"
+    [[ -f "$content_file" ]]   || die "$content_file not found - expected under patches/base/"
 
     if grep -q '@REQ(set_faketime)' "$proto"; then
         info "  set_faketime request already present"
     else
-        cat >> "$proto" << 'EOF'
-
-@REQ(set_faketime)
-    timeout_t faketime;
-@REPLY
-@END
-EOF
-        info "  Appended set_faketime request"
+        # Leave a blank line before the new block for readability
+        echo >> "$proto"
+        cat "$content_file" >> "$proto"
+        info "  Appended set_faketime request from $content_file"
     fi
 }
 
@@ -616,15 +620,22 @@ fi
 pause
 
 # ------------------------------------------------------------
-# 6. Install user_settings.py
-#    Must be provided as patches/base/user_settings.py (DLL
-#    overrides + PROTON_DISABLE_LSTEAMCLIENT=1, etc.).
+# 6. Install user_settings.py + verify all required base files
+#    Must be provided under patches/base/ (DLL overrides +
+#    PROTON_DISABLE_LSTEAMCLIENT=1, etc.).
 # ------------------------------------------------------------
-info "Installing user_settings.py..."
+info "Installing user_settings.py and checking required base files..."
 
 user_settings_src="${PATCHES_DIR}/base/user_settings.py"
 [[ -f "$user_settings_src" ]] \
     || die "user_settings.py not found at $user_settings_src – obtain it and place it there before building"
+[[ -f "${PATCHES_DIR}/base/cpuid_spoof_defs.c" ]] \
+    || die "cpuid_spoof_defs.c not found under ${PATCHES_DIR}/base/ – required"
+[[ -f "${PATCHES_DIR}/base/hwprofile_guid.reg" ]] \
+    || die "hwprofile_guid.reg not found under ${PATCHES_DIR}/base/ – required"
+[[ -f "${PATCHES_DIR}/base/set_faketime.protocol" ]] \
+    || die "set_faketime.protocol not found under ${PATCHES_DIR}/base/ – required"
+
 cp "$user_settings_src" user_settings.py
 info "  Installed from $user_settings_src"
 pause
