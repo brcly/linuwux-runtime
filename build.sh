@@ -13,7 +13,8 @@ set -euo pipefail
 #   - Each branch/tag gets its own -src/-build folders so builds
 #     never overwrite each other.
 #   - Version-specific patch overrides live under
-#     patches/overrides/<exact-branch-or-tag>/wine/
+#     patches/overrides/<key>/wine/, where <key> is the branch/tag with
+#     CachyOS's trailing /main[_native] removed.
 #   - CPUID definitions are inserted by content (not a fragile
 #     context diff) so they survive large rearrangements of
 #     signal_x86_64.c across Proton versions.
@@ -377,8 +378,9 @@ pause
 
 # ------------------------------------------------------------
 # 4. Install LinUwUx patch files into the source tree
-#    If patches/overrides/<branch>/wine/ exists, that set is used
-#    exclusively. Otherwise the common patches/wine/ set is used.
+#    If an override set exists for this version (patches/overrides/<key>/wine/,
+#    where <key> is the branch/tag with CachyOS's trailing /main dropped) it is
+#    used exclusively. Otherwise the common patches/wine/ set is used.
 # ------------------------------------------------------------
 info "Installing LinUwUx patch files..."
 
@@ -387,12 +389,20 @@ cd "$SRC_DIR"
 rm -rf patches/wine
 mkdir -p patches/wine
 
-if [[ -d "$PATCHES_DIR/overrides/$BRANCH/wine" ]]; then
-    info "Using version-specific overrides for '$BRANCH'"
+# CachyOS branches are named <version>/main (or /main_native), but the
+# override folders are keyed by the version alone – drop the trailing
+# path component so overrides/<version>/wine/ is found.
+override_key="$BRANCH"
+if [[ "$VARIANT" == "cachyos" ]]; then
+    override_key="${BRANCH%/*}"
+fi
+
+if [[ -d "$PATCHES_DIR/overrides/$override_key/wine" ]]; then
+    info "Using version-specific overrides for '$override_key'"
     info "  (common patches under patches/wine/ are NOT applied when an override exists)"
-    cp -r "$PATCHES_DIR/overrides/$BRANCH/wine/." patches/wine/
+    cp -r "$PATCHES_DIR/overrides/$override_key/wine/." patches/wine/
 else
-    info "No version-specific overrides for '$BRANCH' – using common patches"
+    info "No version-specific overrides for '$override_key' – using common patches"
     if [[ -d "$PATCHES_DIR/wine" ]]; then
         cp -r "$PATCHES_DIR/wine/." patches/wine/
     fi
