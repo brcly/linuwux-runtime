@@ -517,8 +517,9 @@ apply_cpuid_spoof_definitions_fix() {
     info "  Inserted definitions before line $anchor_line (struct xcontext)"
 }
 
-# d) Insert the CPUID handling logic at the start of segv_handler.
-#    Uses a function-scoped two-step anchor so we never hit other handlers.
+# d) Insert the CPUID handling logic at the start of the executable part of
+#    segv_handler. We deliberately insert *before* the first real statement
+#    so that all original local declarations stay together (C90 rule).
 apply_cpuid_spoof_handler_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
@@ -539,26 +540,26 @@ apply_cpuid_spoof_handler_fix() {
     func_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
     [[ -n "$func_line" ]] || die "Could not find 'static void segv_handler' in $target"
 
-    # Step 2: from that point forward, find a stable early local that only
-    # appears near the top of *this* function. Prefer the distinctive
-    # steamclient_addr line; fall back to the first struct xcontext.
+    # Step 2: from that point forward, find the first real statement of the
+    # function. Inserting *before* this line keeps every original local
+    # declaration together and places our early-return block at the very
+    # start of the executable section (C90-safe).
     local anchor_line
     anchor_line=$(awk -v start="$func_line" '
-        NR >= start && /void \*steamclient_addr = NULL;/ { print NR; exit }
-        NR >= start && /struct xcontext (context|xcontext);/ { print NR; exit }
+        NR >= start && /rec\.ExceptionAddress = \(void \*\)RIP_sig\(ucontext\);/ { print NR; exit }
     ' "$target")
 
-    [[ -n "$anchor_line" ]] || die "Could not find a stable anchor inside segv_handler after line $func_line"
+    [[ -n "$anchor_line" ]] || die "Could not find 'rec.ExceptionAddress = ...' inside segv_handler after line $func_line"
 
-    # Insert *after* the anchor line (same relative position the old .patch used)
+    # Insert *before* the anchor line
     local tmp
     tmp=$(mktemp)
     awk -v line="$anchor_line" -v handler="$handler_file" '
-        NR == line { print; while ((getline l < handler) > 0) print l; next }
+        NR == line { while ((getline l < handler) > 0) print l; print; next }
         { print }
     ' "$target" > "$tmp" && mv "$tmp" "$target"
 
-    info "  Inserted handler logic after line $anchor_line (inside segv_handler)"
+    info "  Inserted handler logic before line $anchor_line (start of executable part of segv_handler)"
 }
 
 # Helper: apply a single .patch file, log the result, return status
