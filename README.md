@@ -8,6 +8,8 @@ The patches make certain games run under Proton that otherwise detect the Linux/
 environment and refuse to launch. The finished tarball drops straight into Steam's
 `compatibilitytools.d/`.
 
+## CURRENTLY ONLY PROTON V11 IS SUPPORTED.
+
 ---
 
 ## What it produces
