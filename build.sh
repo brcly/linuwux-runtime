@@ -16,10 +16,10 @@ set -euo pipefail
 #     patches/overrides/<key>/wine/, where <key> is the branch/tag with
 #     CachyOS's trailing /main[_native] removed.
 #   - Additive content (HwProfileGuid, set_faketime request, CPUID
-#     definitions + handler logic, user_settings.py) lives under
-#     patches/base/ and is applied by content rather than fragile
-#     context diffs so the changes survive large rearrangements of
-#     upstream Wine sources.
+#     definitions + kuser patch + handler logic, user_settings.py)
+#     lives under patches/base/ and is applied by content rather than
+#     fragile context diffs so the changes survive large rearrangements
+#     of upstream Wine sources.
 # ============================================================
 
 VERSION="26.07.29"
@@ -102,8 +102,8 @@ Notes:
   in place for debugging. Pass --no-clean to keep them (faster patch-dev loop).
 
   Required additive content lives under patches/base/:
-    user_settings.py, cpuid_spoof_defs.c, cpuid_spoof_handler.c,
-    hwprofile_guid.reg, set_faketime.protocol
+    user_settings.py, cpuid_spoof_defs.c, kuser_shared_data_patch.c,
+    cpuid_spoof_handler.c, hwprofile_guid.reg, set_faketime.protocol
 
 EOF
     exit 0
@@ -423,12 +423,12 @@ info "Installed patches:"
 find patches/wine -name '*.patch' | sed 's|^|      |'
 
 # Guard against stale patches that still try to define symbols now
-# owned exclusively by patches/base/cpuid_spoof_defs.c
+# owned exclusively by the base content files
 STALE_DEF_PATCHES=$(grep -rl \
     '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data' \
     patches/wine 2>/dev/null || true)
 if [[ -n "$STALE_DEF_PATCHES" ]]; then
-    die "Patch(es) below still add content that now lives exclusively in cpuid_spoof_defs.c, remove it from: $STALE_DEF_PATCHES"
+    die "Patch(es) below still add content that now lives exclusively in patches/base/, remove it from: $STALE_DEF_PATCHES"
 fi
 pause
 
@@ -439,8 +439,9 @@ pause
 #      a) Hardware profile GUID  – appended to wine.inf.in
 #      b) Faketime protocol req  – appended to server/protocol.def
 #      c) CPUID spoof definitions – content-inserted (before struct xcontext)
-#      d) CPUID spoof handler logic – content-inserted at start of segv_handler
-#      e) Remaining .patch files  – applied with patch(1), then
+#      d) KUSER_SHARED_DATA patch – content-inserted (same area)
+#      e) CPUID spoof handler logic – content-inserted at start of segv_handler
+#      f) Remaining .patch files  – applied with patch(1), then
 #         server protocol is regenerated
 # ------------------------------------------------------------
 
@@ -517,7 +518,39 @@ apply_cpuid_spoof_definitions_fix() {
     info "  Inserted definitions before line $anchor_line (struct xcontext)"
 }
 
-# d) Insert the CPUID handling logic at the start of the executable part of
+# d) Insert the KUSER_SHARED_DATA patching function.
+#    Same content-insertion pattern as the definitions.
+apply_kuser_shared_data_patch_fix() {
+    local wine_dir="$1"
+    local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local patch_file="${PATCHES_DIR}/base/kuser_shared_data_patch.c"
+
+    info "Applying KUSER_SHARED_DATA patch function to $target ..."
+    [[ -f "$target" ]]     || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$patch_file" ]] || die "$patch_file not found - expected under patches/base/"
+
+    # Already present?
+    if grep -q 'static void patch_kuser_shared_data' "$target"; then
+        info "  KUSER_SHARED_DATA patch function already present"
+        return
+    fi
+
+    # Re-use the same anchor the definitions currently use.
+    local anchor_line
+    anchor_line=$(grep -n '^struct xcontext' "$target" | head -1 | cut -d: -f1)
+    [[ -n "$anchor_line" ]] || die "Anchor 'struct xcontext' not found in $target"
+
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="$anchor_line" -v patch="$patch_file" '
+        NR == line { while ((getline l < patch) > 0) print l; print; next }
+        { print }
+    ' "$target" > "$tmp" && mv "$tmp" "$target"
+
+    info "  Inserted KUSER_SHARED_DATA patch function before line $anchor_line"
+}
+
+# e) Insert the CPUID handling logic at the start of the executable part of
 #    segv_handler. We deliberately insert *before* the first real statement
 #    so that all original local declarations stay together (C90 rule).
 apply_cpuid_spoof_handler_fix() {
@@ -582,7 +615,7 @@ apply_patch_file() {
     fi
 }
 
-# e) Apply every remaining .patch under patches/wine/, then regenerate the
+# f) Apply every remaining .patch under patches/wine/, then regenerate the
 #    wineserver protocol headers. This regen (tools/make_requests) reads
 #    protocol.def, so it picks up the set_faketime request appended in step (b).
 apply_linuwux_patches() {
@@ -654,6 +687,7 @@ fi
 apply_regedit_fix "wine"
 apply_faketime_protocol_fix "wine"
 apply_cpuid_spoof_definitions_fix "wine"
+apply_kuser_shared_data_patch_fix "wine"
 apply_cpuid_spoof_handler_fix "wine"
 apply_linuwux_patches "wine"
 
@@ -677,6 +711,8 @@ user_settings_src="${PATCHES_DIR}/base/user_settings.py"
     || die "user_settings.py not found at $user_settings_src – obtain it and place it there before building"
 [[ -f "${PATCHES_DIR}/base/cpuid_spoof_defs.c" ]] \
     || die "cpuid_spoof_defs.c not found under ${PATCHES_DIR}/base/ – required"
+[[ -f "${PATCHES_DIR}/base/kuser_shared_data_patch.c" ]] \
+    || die "kuser_shared_data_patch.c not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/cpuid_spoof_handler.c" ]] \
     || die "cpuid_spoof_handler.c not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/hwprofile_guid.reg" ]] \
