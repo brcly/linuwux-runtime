@@ -7,8 +7,9 @@
 
         spoof_uc = (ucontext_t *)sigcontext;
         spoof_rip = (unsigned char *)spoof_uc->uc_mcontext.gregs[REG_RIP];
-        spoof_leaf = spoof_uc->uc_mcontext.gregs[REG_RAX];
-        spoof_subleaf = spoof_uc->uc_mcontext.gregs[REG_RCX];
+        /* leaf/subleaf from the init_handler-initialized ucontext */
+        spoof_leaf = ucontext->uc_mcontext.gregs[REG_RAX];
+        spoof_subleaf = ucontext->uc_mcontext.gregs[REG_RCX];
         if ((siginfo->si_code == SI_KERNEL || spoof_leaf == 0x336933) && spoof_rip[0] == 0x0F && spoof_rip[1] == 0xA2) {
             // Spoof CPUID results based on leaf
             switch (spoof_leaf) {
