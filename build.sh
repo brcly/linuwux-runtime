@@ -16,10 +16,10 @@ set -euo pipefail
 #     patches/overrides/<key>/wine/, where <key> is the branch/tag with
 #     CachyOS's trailing /main[_native] removed.
 #   - Additive content (HwProfileGuid, set_faketime request, CPUID
-#     definitions + kuser patch + handler logic, user_settings.py)
-#     lives under patches/base/ and is applied by content rather than
-#     fragile context diffs so the changes survive large rearrangements
-#     of upstream Wine sources.
+#     definitions + kuser patch + handler logic, signal_init hooks,
+#     user_settings.py) lives under patches/base/ and is applied by
+#     content rather than fragile context diffs so the changes survive
+#     large rearrangements of upstream Wine sources.
 # ============================================================
 
 VERSION="26.07.29"
@@ -103,7 +103,8 @@ Notes:
 
   Required additive content lives under patches/base/:
     user_settings.py, cpuid_spoof_defs.c, kuser_shared_data_patch.c,
-    cpuid_spoof_handler.c, hwprofile_guid.reg, set_faketime.protocol
+    cpuid_spoof_handler.c, signal_init_process_hooks.c,
+    hwprofile_guid.reg, set_faketime.protocol
 
 EOF
     exit 0
@@ -425,7 +426,7 @@ find patches/wine -name '*.patch' | sed 's|^|      |'
 # Guard against stale patches that still try to define symbols now
 # owned exclusively by the base content files
 STALE_DEF_PATCHES=$(grep -rl \
-    '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data' \
+    '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data\|^\+[[:space:]]*detect_cpu_vendor();' \
     patches/wine 2>/dev/null || true)
 if [[ -n "$STALE_DEF_PATCHES" ]]; then
     die "Patch(es) below still add content that now lives exclusively in patches/base/, remove it from: $STALE_DEF_PATCHES"
@@ -441,7 +442,8 @@ pause
 #      c) CPUID spoof definitions – content-inserted at file scope
 #      d) KUSER_SHARED_DATA patch – content-inserted at file scope
 #      e) CPUID spoof handler logic – content-inserted at start of segv_handler
-#      f) Remaining .patch files  – applied with patch(1), then
+#      f) signal_init_process hooks – content-inserted after SIGSEGV registration
+#      g) Remaining .patch files  – applied with patch(1), then
 #         server protocol is regenerated
 # ------------------------------------------------------------
 
@@ -605,6 +607,43 @@ apply_cpuid_spoof_handler_fix() {
     info "  Inserted handler logic before line $anchor_line (start of executable part of segv_handler)"
 }
 
+# f) Insert detect_cpu_vendor() + ARCH_SET_CPUID disable after SIGSEGV is
+#    registered in signal_init_process (was 0003-signal_init_process.patch).
+apply_signal_init_process_hooks() {
+    local wine_dir="$1"
+    local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local hooks_file="${PATCHES_DIR}/base/signal_init_process_hooks.c"
+
+    info "Applying signal_init_process hooks to $target ..."
+    [[ -f "$target" ]]     || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$hooks_file" ]] || die "$hooks_file not found - expected under patches/base/"
+
+    # Already present? (the call, not the function definition)
+    if grep -q 'detect_cpu_vendor();' "$target"; then
+        info "  signal_init_process hooks already present"
+        return
+    fi
+
+    local func_line
+    func_line=$(grep -n 'signal_init_process' "$target" | head -1 | cut -d: -f1)
+    [[ -n "$func_line" ]] || die "Could not find signal_init_process in $target"
+
+    local anchor_line
+    anchor_line=$(awk -v start="$func_line" '
+        NR >= start && /sigaction\( SIGSEGV, &sig_act, NULL \)/ { print NR; exit }
+    ' "$target")
+    [[ -n "$anchor_line" ]] || die "Could not find SIGSEGV sigaction inside signal_init_process"
+
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="$anchor_line" -v hooks="$hooks_file" '
+        NR == line { print; while ((getline l < hooks) > 0) print l; next }
+        { print }
+    ' "$target" > "$tmp" && mv "$tmp" "$target"
+
+    info "  Inserted init hooks after line $anchor_line (after SIGSEGV registration)"
+}
+
 # Helper: apply a single .patch file, log the result, return status
 apply_patch_file() {
     local patch_file="$1" label="$2" log="$3"
@@ -625,7 +664,7 @@ apply_patch_file() {
     fi
 }
 
-# f) Apply every remaining .patch under patches/wine/, then regenerate the
+# g) Apply every remaining .patch under patches/wine/, then regenerate the
 #    wineserver protocol headers. This regen (tools/make_requests) reads
 #    protocol.def, so it picks up the set_faketime request appended in step (b).
 apply_linuwux_patches() {
@@ -699,6 +738,7 @@ apply_faketime_protocol_fix "wine"
 apply_cpuid_spoof_definitions_fix "wine"
 apply_kuser_shared_data_patch_fix "wine"
 apply_cpuid_spoof_handler_fix "wine"
+apply_signal_init_process_hooks "wine"
 apply_linuwux_patches "wine"
 
 # We've already applied these patches to the wine tree above, so the staged
@@ -725,6 +765,8 @@ user_settings_src="${PATCHES_DIR}/base/user_settings.py"
     || die "kuser_shared_data_patch.c not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/cpuid_spoof_handler.c" ]] \
     || die "cpuid_spoof_handler.c not found under ${PATCHES_DIR}/base/ – required"
+[[ -f "${PATCHES_DIR}/base/signal_init_process_hooks.c" ]] \
+    || die "signal_init_process_hooks.c not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/hwprofile_guid.reg" ]] \
     || die "hwprofile_guid.reg not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/set_faketime.protocol" ]] \
