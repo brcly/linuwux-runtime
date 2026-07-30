@@ -16,9 +16,10 @@ set -euo pipefail
 #     patches/overrides/<key>/wine/, where <key> is the branch/tag with
 #     CachyOS's trailing /main[_native] removed.
 #   - Additive content (HwProfileGuid, set_faketime request, CPUID
-#     definitions, user_settings.py) lives under patches/base/ and is
-#     applied by content rather than fragile context diffs so the
-#     changes survive large rearrangements of upstream Wine sources.
+#     definitions + kuser patch + handler logic, user_settings.py)
+#     lives under patches/base/ and is applied by content rather than
+#     fragile context diffs so the changes survive large rearrangements
+#     of upstream Wine sources.
 # ============================================================
 
 VERSION="26.07.29"
@@ -85,8 +86,8 @@ Examples:
 Options:
   -f, --force               Force full re-clone and clean rebuild of the Proton source
   -k, --no-clean            Keep the -src/-build trees after a successful build
-  --legacy-reflex           Include the legacy Reflex compatibility protocol
                             (default: they're removed, leaving only the tarball)
+  --legacy-reflex           Include the legacy Reflex compatibility protocol
   --update-patches          Delete and re-clone the patches/ folder from upstream
   --container-engine=<name> Container engine to build with (default: podman)
   -h, --help                Show this help
@@ -104,8 +105,8 @@ Notes:
   in place for debugging. Pass --no-clean to keep them (faster patch-dev loop).
 
   Required additive content lives under patches/base/:
-    user_settings.py, cpuid_spoof_defs.c, hwprofile_guid.reg,
-    set_faketime.protocol
+    user_settings.py, cpuid_spoof_defs.c, kuser_shared_data_patch.c,
+    cpuid_spoof_handler.c, hwprofile_guid.reg, set_faketime.protocol
 
 EOF
     exit 0
@@ -424,13 +425,6 @@ fi
 # a .patch, so a stale loader patch here would only cause a conflict.
 rm -rf patches/wine/loader
 
-if [[ $LEGACY_REFLEX -eq 1 ]]; then
-    LEGACY_REFLEX_PATCHES="${PATCHES_DIR}/legacy-reflex/wine"
-    [[ -d "$LEGACY_REFLEX_PATCHES" ]] || die "Legacy Reflex patch directory not found: $LEGACY_REFLEX_PATCHES"
-    info "Adding legacy Reflex patch set"
-    cp -r "$LEGACY_REFLEX_PATCHES/." patches/wine/
-fi
-
 [[ -n "$(find patches/wine -name '*.patch' 2>/dev/null)" ]] \
     || die "No patch files found under patches/wine/ - check $PATCHES_DIR"
 
@@ -438,26 +432,42 @@ info "Installed patches:"
 find patches/wine -name '*.patch' | sed 's|^|      |'
 
 # Guard against stale patches that still try to define symbols now
-# owned exclusively by patches/base/cpuid_spoof_defs.c
+# owned exclusively by the base content files
 STALE_DEF_PATCHES=$(grep -rl \
     '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data' \
     patches/wine 2>/dev/null || true)
 if [[ -n "$STALE_DEF_PATCHES" ]]; then
-    die "Patch(es) below still add content that now lives exclusively in cpuid_spoof_defs.c, remove it from: $STALE_DEF_PATCHES"
+    die "Patch(es) below still add content that now lives exclusively in patches/base/, remove it from: $STALE_DEF_PATCHES"
 fi
 pause
 
 # ------------------------------------------------------------
 # 5. Apply LinUwUx fixes and patches
 #
-#    Three classes of change:
+#    Classes of change:
 #      a) Hardware profile GUID  – appended to wine.inf.in
 #      b) Faketime protocol req  – appended to server/protocol.def
-#      c) CPUID spoof definitions – content-inserted into
-#         signal_x86_64.c (survives large source rearrangements)
-#      d) Remaining .patch files  – applied with patch(1), then
+#      c) CPUID spoof definitions – content-inserted at file scope
+#      d) KUSER_SHARED_DATA patch – content-inserted at file scope
+#      e) CPUID spoof handler logic – content-inserted at start of segv_handler
+#      f) Remaining .patch files  – applied with patch(1), then
 #         server protocol is regenerated
 # ------------------------------------------------------------
+
+# Shared helper: locate a safe file-scope insertion point.
+# Prefer #include "dwarf.h" (unique, near the top, outside platform ifdefs).
+# Fall back to the last #include in the first 120 lines so we never land
+# inside a later #ifdef linux / #elif __APPLE__ block.
+file_scope_anchor() {
+    local target="$1"
+    local line
+    line=$(grep -n '^#include "dwarf.h"' "$target" | head -1 | cut -d: -f1)
+    if [[ -z "$line" ]]; then
+        line=$(head -n 120 "$target" | grep -n '^#include' | tail -1 | cut -d: -f1)
+    fi
+    [[ -n "$line" ]] || die "No safe file-scope insertion point found in $target"
+    echo "$line"
+}
 
 # a) Fixed HwProfileGuid so games that fingerprint hardware profiles
 #    see a stable, known value instead of a random one each boot.
@@ -502,43 +512,175 @@ apply_faketime_protocol_fix() {
     fi
 }
 
-# c) Insert the CPUID-spoofing helper functions and globals.
-#    Done by content (before 'struct xcontext') rather than as a
-#    normal patch so it keeps working when surrounding code moves.
-apply_cpuid_definitions_fix() {
-    local wine_dir="$1" defs_file="$2" marker="$3" label="$4"
+# c) Insert the CPUID-spoofing helper functions and globals at file scope
+#    (after dwarf.h / top include block) so they stay outside platform ifdefs.
+apply_cpuid_spoof_definitions_fix() {
+    local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local defs_file="${PATCHES_DIR}/base/cpuid_spoof_defs.c"
 
-    info "Applying $label to $target ..."
+    info "Applying CPUID spoof definitions to $target ..."
     [[ -f "$target" ]] || die "$target not found - wine's layout may have changed upstream"
     [[ -f "$defs_file" ]] || die "$defs_file not found - patch repo structure may have changed"
 
-    if grep -q "$marker" "$target"; then
+    if grep -q '^uint64_t TargetSysHandler' "$target"; then
         info "  Already present"
         return
     fi
 
     local anchor_line
-    anchor_line=$(grep -n '^struct xcontext' "$target" | head -1 | cut -d: -f1)
-    [[ -n "$anchor_line" ]] || die "Anchor 'struct xcontext' not found - wine's layout may have changed upstream"
+    anchor_line=$(file_scope_anchor "$target")
 
     local tmp
     tmp=$(mktemp)
     awk -v line="$anchor_line" -v defs_file="$defs_file" '
-        NR == line { while ((getline l < defs_file) > 0) print l; print; next }
+        NR == line { print; while ((getline l < defs_file) > 0) print l; next }
         { print }
     ' "$target" > "$tmp" && mv "$tmp" "$target"
-    info "  Inserted definitions before line $anchor_line (struct xcontext)"
+    info "  Inserted definitions after line $anchor_line (file scope, outside platform ifdefs)"
 }
 
-apply_cpuid_definitions() {
+# d) Insert the KUSER_SHARED_DATA patching function at file scope
+#    (same robust anchor as the definitions).
+apply_kuser_shared_data_patch_fix() {
     local wine_dir="$1"
-    apply_cpuid_definitions_fix "$wine_dir" "$PATCHES_DIR/base/cpuid_spoof_defs.c" \
-        '^uint64_t TargetSysHandler$' "CPUID spoof definitions"
-    if [[ $LEGACY_REFLEX -eq 1 ]]; then
-        apply_cpuid_definitions_fix "$wine_dir" "$PATCHES_DIR/legacy-reflex/base/cpuid_legacy_reflex_defs.c" \
-            '^uint64_t LegacyQuerySystemInformationHandler$' "legacy Reflex definitions"
+    local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local patch_file="${PATCHES_DIR}/base/kuser_shared_data_patch.c"
+
+    info "Applying KUSER_SHARED_DATA patch function to $target ..."
+    [[ -f "$target" ]]     || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$patch_file" ]] || die "$patch_file not found - expected under patches/base/"
+
+    if grep -q 'static void patch_kuser_shared_data' "$target"; then
+        info "  KUSER_SHARED_DATA patch function already present"
+        return
     fi
+
+    local anchor_line
+    anchor_line=$(file_scope_anchor "$target")
+
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="$anchor_line" -v patch="$patch_file" '
+        NR == line { print; while ((getline l < patch) > 0) print l; next }
+        { print }
+    ' "$target" > "$tmp" && mv "$tmp" "$target"
+
+    info "  Inserted KUSER_SHARED_DATA patch function after line $anchor_line (file scope, outside platform ifdefs)"
+}
+
+# e) Insert the CPUID handling logic at the start of the executable part of
+#    segv_handler. We deliberately insert *before* the first real statement
+#    so that all original local declarations stay together (C90 rule).
+apply_cpuid_spoof_handler_fix() {
+    local wine_dir="$1"
+    local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local handler_file="${PATCHES_DIR}/base/cpuid_spoof_handler.c"
+    local handler_label="CPUID spoof"
+
+    if [[ $LEGACY_REFLEX -eq 1 ]]; then
+        handler_file="${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_handler.c"
+        handler_label="legacy Reflex CPUID"
+    fi
+
+    info "Applying $handler_label handler logic to $target ..."
+    [[ -f "$target" ]]       || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$handler_file" ]] || die "$handler_file not found - expected for $handler_label"
+
+    # Already present?
+    if grep -q 'Spoofing CPUID leaf' "$target"; then
+        info "  Handler logic already present"
+        return
+    fi
+
+    # Step 1: find the unique function start
+    local func_line
+    func_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
+    [[ -n "$func_line" ]] || die "Could not find 'static void segv_handler' in $target"
+
+    # Step 2: from that point forward, find the first real statement of the
+    # function. Inserting *before* this line keeps every original local
+    # declaration together and places our early-return block at the very
+    # start of the executable section (C90-safe).
+    local anchor_line
+    anchor_line=$(awk -v start="$func_line" '
+        NR >= start && /rec\.ExceptionAddress = \(void \*\)RIP_sig\(ucontext\);/ { print NR; exit }
+    ' "$target")
+
+    [[ -n "$anchor_line" ]] || die "Could not find 'rec.ExceptionAddress = ...' inside segv_handler after line $func_line"
+
+    # Insert *before* the anchor line
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="$anchor_line" -v handler="$handler_file" '
+        NR == line { while ((getline l < handler) > 0) print l; print; next }
+        { print }
+    ' "$target" > "$tmp" && mv "$tmp" "$target"
+
+    info "  Inserted handler logic before line $anchor_line (start of executable part of segv_handler)"
+}
+
+# f) Insert legacy protocol globals at file scope when requested.
+apply_legacy_reflex_definitions_fix() {
+    local wine_dir="$1"
+    local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local defs_file="${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_defs.c"
+
+    [[ $LEGACY_REFLEX -eq 1 ]] || return 0
+
+    info "Applying legacy Reflex definitions to $target ..."
+    [[ -f "$target" ]] || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$defs_file" ]] || die "$defs_file not found - expected for legacy Reflex"
+
+    if grep -q '^uint64_t LegacyQuerySystemInformationHandler' "$target"; then
+        info "  Already present"
+        return
+    fi
+
+    local anchor_line
+    anchor_line=$(file_scope_anchor "$target")
+
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="$anchor_line" -v defs_file="$defs_file" '
+        NR == line { print; while ((getline l < defs_file) > 0) print l; next }
+        { print }
+    ' "$target" > "$tmp" && mv "$tmp" "$target"
+    info "  Inserted legacy Reflex definitions after line $anchor_line (file scope)"
+}
+
+# g) Overlay legacy SIGSYS routing after the common SIGSYS patch has applied.
+apply_legacy_reflex_sigsys_fix() {
+    local wine_dir="$1"
+    local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local handler_file="${PATCHES_DIR}/legacy-reflex/base/legacy_reflex_sigsys_handler.c"
+    local count tmp
+
+    [[ $LEGACY_REFLEX -eq 1 ]] || return 0
+
+    info "Applying legacy Reflex SIGSYS routing to $target ..."
+    [[ -f "$target" ]] || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$handler_file" ]] || die "$handler_file not found - expected for legacy Reflex"
+
+    if grep -q 'LegacyQuerySystemInformationId &&' "$target"; then
+        info "  Already present"
+        return
+    fi
+
+    count=$(grep -c 'if (TargetSysHandler != 0 &&' "$target" || true)
+    [[ "$count" -eq 1 ]] || die "Expected one common SIGSYS routing block in $target, found $count"
+
+    tmp=$(mktemp)
+    awk -v handler="$handler_file" '
+        /if \(TargetSysHandler != 0 &&/ && !inserted {
+            while ((getline l < handler) > 0) print l
+            inserted = 1
+        }
+        { print }
+        END { if (!inserted) exit 1 }
+    ' "$target" > "$tmp" || { rm -f "$tmp"; die "Could not insert legacy SIGSYS routing"; }
+    mv "$tmp" "$target"
+    info "  Inserted legacy SIGSYS routing"
 }
 
 # Helper: apply a single .patch file, log the result, return status
@@ -561,10 +703,9 @@ apply_patch_file() {
     fi
 }
 
-# d) Apply every .patch under patches/wine/, then regenerate the wineserver
-#    protocol headers. This regen (tools/make_requests) reads protocol.def,
-#    so it picks up the set_faketime request appended in step (b) – which is
-#    why that append must happen before this runs.
+# f) Apply every remaining .patch under patches/wine/, then regenerate the
+#    wineserver protocol headers. This regen (tools/make_requests) reads
+#    protocol.def, so it picks up the set_faketime request appended in step (b).
 apply_linuwux_patches() {
     local wine_dir="$1"
     local patch_log="${LOG_DIR}/linuwux-patches.log"
@@ -633,8 +774,12 @@ fi
 
 apply_regedit_fix "wine"
 apply_faketime_protocol_fix "wine"
-apply_cpuid_definitions "wine"
+apply_cpuid_spoof_definitions_fix "wine"
+apply_kuser_shared_data_patch_fix "wine"
+apply_cpuid_spoof_handler_fix "wine"
+apply_legacy_reflex_definitions_fix "wine"
 apply_linuwux_patches "wine"
+apply_legacy_reflex_sigsys_fix "wine"
 
 # We've already applied these patches to the wine tree above, so the staged
 # .patch copies are just clutter for the container build – remove them.
@@ -656,6 +801,18 @@ user_settings_src="${PATCHES_DIR}/base/user_settings.py"
     || die "user_settings.py not found at $user_settings_src – obtain it and place it there before building"
 [[ -f "${PATCHES_DIR}/base/cpuid_spoof_defs.c" ]] \
     || die "cpuid_spoof_defs.c not found under ${PATCHES_DIR}/base/ – required"
+[[ -f "${PATCHES_DIR}/base/kuser_shared_data_patch.c" ]] \
+    || die "kuser_shared_data_patch.c not found under ${PATCHES_DIR}/base/ – required"
+[[ -f "${PATCHES_DIR}/base/cpuid_spoof_handler.c" ]] \
+    || die "cpuid_spoof_handler.c not found under ${PATCHES_DIR}/base/ – required"
+if [[ $LEGACY_REFLEX -eq 1 ]]; then
+    [[ -f "${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_defs.c" ]] \
+        || die "cpuid_legacy_reflex_defs.c not found – required for legacy Reflex"
+    [[ -f "${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_handler.c" ]] \
+        || die "cpuid_legacy_reflex_handler.c not found – required for legacy Reflex"
+    [[ -f "${PATCHES_DIR}/legacy-reflex/base/legacy_reflex_sigsys_handler.c" ]] \
+        || die "legacy_reflex_sigsys_handler.c not found – required for legacy Reflex"
+fi
 [[ -f "${PATCHES_DIR}/base/hwprofile_guid.reg" ]] \
     || die "hwprofile_guid.reg not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/set_faketime.protocol" ]] \

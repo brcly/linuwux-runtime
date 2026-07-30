@@ -31,8 +31,9 @@ You still get pre-built releases for convenience, but the primary deliverable is
 A compressed redistributable in `dist/`:
 
 ```
-dist/<version>-LinUwUx.tar.xz      # CachyOS (xz when available)
-dist/<version>-LinUwUx.tar.gz      # GE, or when xz is unavailable
+dist/<version>-LinUwUx.tar.xz                   # CachyOS (xz when available)
+dist/<version>-LinUwUx.tar.gz                   # GE, or when xz is unavailable
+dist/<version>-LinUwUx-Legacy-Reflex.tar.{xz,gz} # only with --legacy-reflex
 ```
 
 Install it into Steam:
@@ -74,6 +75,10 @@ The patch repo is expected to provide these required files under `patches/base/`
 plus the common `patches/wine/` set, and optionally
 `patches/overrides/<branch-or-tag>/wine/` for version-specific patch sets.
 
+`--legacy-reflex` additionally selects the legacy CPUID handler and SIGSYS
+routing content under `patches/legacy-reflex/base/`. This is opt-in: normal
+builds do not contain the legacy Reflex protocol.
+
 > Valve's official Proton is intentionally **not** supported (debugger-detection issues).
 > Use `cachyos` or `ge`.
 
@@ -108,6 +113,7 @@ offline, that check is skipped).
 ./build.sh cachyos <branch>         # a specific CachyOS branch
 ./build.sh ge                       # latest GE
 ./build.sh ge GE-Proton11-3         # a specific GE tag
+./build.sh --legacy-reflex ge GE-Proton11-3
 ./build.sh --container-engine=docker ge
 ./build.sh --update-patches         # force a fresh clone of patches/
 ```
@@ -118,6 +124,7 @@ offline, that check is skipped).
 |-----------------------------|-----------------------------------------------------------|
 | `-f`, `--force`             | Force a full re-clone and clean rebuild.                  |
 | `-k`, `--no-clean`          | Keep the `-src`/`-build` trees after a successful build.  |
+| `--legacy-reflex`           | Build an isolated legacy Reflex compatibility variant.    |
 | `--update-patches`          | Delete and re-clone the `patches/` folder from upstream.  |
 | `--container-engine=<name>` | Container engine to build with (default: `podman`).       |
 | `-h`, `--help`              | Show help.                                                |
@@ -144,10 +151,12 @@ check — see Behaviour notes), then a numbered pipeline:
 4. **Install patch files** — populates a fresh `patches/wine` staging directory in the
    source tree from your LinUwUx repo: the common `wine` set, or a version-specific
    `overrides/<branch>/wine` set if one exists.
-5. **Apply the patches** — applies the three targeted fixes (HwProfileGuid, faketime
-   request, CPUID definitions) and the `.patch` set on the host, then regenerates the
-   Wine server protocol. For GE, `protonprep` runs first so LinUwUx layers on top; for
-   CachyOS the staged `.patch` files are removed afterward as cleanup.
+5. **Apply the patches** — applies the targeted fixes (HwProfileGuid, faketime,
+   CPUID definitions, KUSER data, and CPUID handler) and the `.patch` set on the host,
+   then regenerates the Wine server protocol. `--legacy-reflex` selects legacy handler
+   content and adds legacy SIGSYS routing after the common SIGSYS patch. For GE,
+   `protonprep` runs first so LinUwUx layers on top; for CachyOS the staged `.patch`
+   files are removed afterward as cleanup.
 6. **Install `user_settings.py`** — copies `patches/base/user_settings.py` into the
    source tree; the build stops with an error if any of the required base files are missing.
 7. **Wire `user_settings.py` into the package** — patches `Makefile.in` so the file
