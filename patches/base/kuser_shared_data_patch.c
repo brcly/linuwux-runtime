@@ -15,9 +15,15 @@ static void patch_kuser_shared_data(void) {
     }
 
     /* NtSystemRoot – force a stable "C:\Windows" so games that fingerprint
-       the system root always see the same value. */
-    static const WCHAR nt_system_root[] = L"C:\\Windows";
-    memcpy(kuser + 0x30, nt_system_root, sizeof(nt_system_root));
+       the system root always see the same value.
+       Use unsigned short (not WCHAR/L"") so we stay 16-bit on Linux and
+       avoid a mid-function declaration under C90. */
+    {
+        static const unsigned short nt_system_root[] = {
+            'C', ':', '\\', 'W', 'i', 'n', 'd', 'o', 'w', 's', 0
+        };
+        memcpy(kuser + 0x30, nt_system_root, sizeof(nt_system_root));
+    }
 
     *(UINT64*)(kuser + 0x260) = 0x0100006658;
     *(UINT32*)(kuser + 0x268) = 0x090001;
