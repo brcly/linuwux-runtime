@@ -32,6 +32,7 @@ DIST_DIR="${SCRIPT_DIR}/dist"
 FORCE=0
 CLEAN=1
 UPDATE_PATCHES=0
+PATCH_LOG=""
 
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
@@ -52,6 +53,20 @@ warn() { echo -e "${YELLOW}[$(ts)] WARNING: $*${RESET}" >&2; }
 header(){ echo -e "\n${CYAN}${BOLD}$*${RESET}"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found"; }
 pause(){ [[ "${SLOW:-0}" == "1" ]] && sleep 1.2; return 0; }
+
+# Mirror console messages into the patch session log when it is open.
+plog() {
+    info "$@"
+    [[ -n "${PATCH_LOG:-}" ]] && echo "[$(ts)] ==> $*" >> "$PATCH_LOG"
+}
+plog_warn() {
+    warn "$@"
+    [[ -n "${PATCH_LOG:-}" ]] && echo "[$(ts)] WARNING: $*" >> "$PATCH_LOG"
+}
+plog_die() {
+    [[ -n "${PATCH_LOG:-}" ]] && echo "[$(ts)] ERROR: $*" >> "$PATCH_LOG"
+    die "$@"
+}
 
 HR="$(printf '=%.0s' {1..60})"
 
@@ -290,6 +305,7 @@ SRC_DIR="${SCRIPT_DIR}/${VERSION_ID}-src"
 BUILD_DIR="${SCRIPT_DIR}/${VERSION_ID}-build"
 BUILD_NAME="${VERSION_ID}-LinUwUx"
 LOG_DIR="${SCRIPT_DIR}/logs/${VERSION_ID}"
+PATCH_LOG="${LOG_DIR}/linuwux-patches.log"
 
 info "Building version : $BRANCH"
 info "Source folder    : $SRC_DIR"
@@ -374,6 +390,18 @@ pause
 # 5. Apply LinUwUx fixes and patches
 # ------------------------------------------------------------
 
+# Unified log for content inserts + traditional .patch files
+: > "$PATCH_LOG"
+{
+    echo "$HR"
+    echo "[$(ts)] LinUwUx patch session start"
+    echo "  Variant : $VARIANT"
+    echo "  Branch  : $BRANCH"
+    echo "  Source  : $SRC_DIR"
+    echo "$HR"
+} >> "$PATCH_LOG"
+plog "Patch log → $PATCH_LOG"
+
 file_scope_anchor() {
     local target="$1"
     local line
@@ -381,34 +409,34 @@ file_scope_anchor() {
     if [[ -z "$line" ]]; then
         line=$(head -n 120 "$target" | grep -n '^#include' | tail -1 | cut -d: -f1)
     fi
-    [[ -n "$line" ]] || die "No safe file-scope insertion point found in $target"
+    [[ -n "$line" ]] || plog_die "No safe file-scope insertion point found in $target"
     echo "$line"
 }
 
 insert_after_line() {
     local target="$1" line="$2" content_file="$3"
-    [[ -r "$content_file" ]] || die "insert_after_line: unreadable $content_file"
+    [[ -r "$content_file" ]] || plog_die "insert_after_line: unreadable $content_file"
     local tmp
     tmp=$(mktemp -p "$(dirname "$target")")
     awk -v line="$line" -v content="$content_file" '
         BEGIN { if ((getline t < content) < 0) exit 1; close(content) }
         NR == line { print; while ((getline l < content) > 0) print l; next }
         { print }
-    ' "$target" > "$tmp" || { rm -f "$tmp"; die "insert_after_line: awk failed on $target"; }
+    ' "$target" > "$tmp" || { rm -f "$tmp"; plog_die "insert_after_line: awk failed on $target"; }
     chmod --reference="$target" "$tmp" 2>/dev/null || true
     mv "$tmp" "$target"
 }
 
 insert_before_line() {
     local target="$1" line="$2" content_file="$3"
-    [[ -r "$content_file" ]] || die "insert_before_line: unreadable $content_file"
+    [[ -r "$content_file" ]] || plog_die "insert_before_line: unreadable $content_file"
     local tmp
     tmp=$(mktemp -p "$(dirname "$target")")
     awk -v line="$line" -v content="$content_file" '
         BEGIN { if ((getline t < content) < 0) exit 1; close(content) }
         NR == line { while ((getline l < content) > 0) print l; print; next }
         { print }
-    ' "$target" > "$tmp" || { rm -f "$tmp"; die "insert_before_line: awk failed on $target"; }
+    ' "$target" > "$tmp" || { rm -f "$tmp"; plog_die "insert_before_line: awk failed on $target"; }
     chmod --reference="$target" "$tmp" 2>/dev/null || true
     mv "$tmp" "$target"
 }
@@ -418,16 +446,16 @@ apply_regedit_fix() {
     local inf="${wine_dir}/loader/wine.inf.in"
     local content_file="${PATCHES_DIR}/base/hwprofile_guid.reg"
 
-    info "Applying regedit fix (HwProfileGuid) to $inf ..."
-    [[ -f "$inf" ]]          || die "$inf not found - wine's layout may have changed upstream"
-    [[ -f "$content_file" ]] || die "$content_file not found - expected under patches/base/"
+    plog "Applying regedit fix (HwProfileGuid) to $inf ..."
+    [[ -f "$inf" ]]          || plog_die "$inf not found - wine's layout may have changed upstream"
+    [[ -f "$content_file" ]] || plog_die "$content_file not found - expected under patches/base/"
 
     if grep -q 'HwProfileGuid' "$inf"; then
-        info "  HwProfileGuid already present"
+        plog "  HwProfileGuid already present"
     else
         cat "$content_file" >> "$inf"
         echo >> "$inf"
-        info "  Appended HwProfileGuid line from $content_file"
+        plog "  Appended HwProfileGuid line from $content_file"
     fi
 }
 
@@ -436,16 +464,16 @@ apply_faketime_protocol_fix() {
     local proto="${wine_dir}/server/protocol.def"
     local content_file="${PATCHES_DIR}/base/set_faketime.protocol"
 
-    info "Applying faketime request definition to $proto ..."
-    [[ -f "$proto" ]]          || die "$proto not found - wine's layout may have changed upstream"
-    [[ -f "$content_file" ]]   || die "$content_file not found - expected under patches/base/"
+    plog "Applying faketime request definition to $proto ..."
+    [[ -f "$proto" ]]          || plog_die "$proto not found - wine's layout may have changed upstream"
+    [[ -f "$content_file" ]]   || plog_die "$content_file not found - expected under patches/base/"
 
     if grep -q '@REQ(set_faketime)' "$proto"; then
-        info "  set_faketime request already present"
+        plog "  set_faketime request already present"
     else
         echo >> "$proto"
         cat "$content_file" >> "$proto"
-        info "  Appended set_faketime request from $content_file"
+        plog "  Appended set_faketime request from $content_file"
     fi
 }
 
@@ -454,20 +482,20 @@ apply_cpuid_spoof_definitions_fix() {
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local defs_file="${PATCHES_DIR}/base/cpuid_spoof_defs.c"
 
-    info "Applying CPUID spoof definitions to $target ..."
-    [[ -f "$target" ]]    || die "$target not found - wine's layout may have changed upstream"
-    [[ -f "$defs_file" ]] || die "$defs_file not found - patch repo structure may have changed"
+    plog "Applying CPUID spoof definitions to $target ..."
+    [[ -f "$target" ]]    || plog_die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$defs_file" ]] || plog_die "$defs_file not found - patch repo structure may have changed"
 
     if grep -q '^uint64_t TargetSysHandler' "$target"; then
-        info "  Already present"
+        plog "  Already present"
         return
     fi
 
     local anchor_line
     anchor_line=$(file_scope_anchor "$target")
     insert_after_line "$target" "$anchor_line" "$defs_file"
-    grep -q '^uint64_t TargetSysHandler' "$target" || die "defs insert produced no change"
-    info "  Inserted definitions after line $anchor_line (file scope, outside platform ifdefs)"
+    grep -q '^uint64_t TargetSysHandler' "$target" || plog_die "defs insert produced no change"
+    plog "  Inserted definitions after line $anchor_line (file scope, outside platform ifdefs)"
 }
 
 apply_kuser_shared_data_patch_fix() {
@@ -475,20 +503,20 @@ apply_kuser_shared_data_patch_fix() {
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local patch_file="${PATCHES_DIR}/base/kuser_shared_data_patch.c"
 
-    info "Applying KUSER_SHARED_DATA patch function to $target ..."
-    [[ -f "$target" ]]     || die "$target not found - wine's layout may have changed upstream"
-    [[ -f "$patch_file" ]] || die "$patch_file not found - expected under patches/base/"
+    plog "Applying KUSER_SHARED_DATA patch function to $target ..."
+    [[ -f "$target" ]]     || plog_die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$patch_file" ]] || plog_die "$patch_file not found - expected under patches/base/"
 
     if grep -q 'static void patch_kuser_shared_data' "$target"; then
-        info "  KUSER_SHARED_DATA patch function already present"
+        plog "  KUSER_SHARED_DATA patch function already present"
         return
     fi
 
     local anchor_line
     anchor_line=$(file_scope_anchor "$target")
     insert_after_line "$target" "$anchor_line" "$patch_file"
-    grep -q 'static void patch_kuser_shared_data' "$target" || die "kuser insert produced no change"
-    info "  Inserted KUSER_SHARED_DATA patch function after line $anchor_line (file scope, outside platform ifdefs)"
+    grep -q 'static void patch_kuser_shared_data' "$target" || plog_die "kuser insert produced no change"
+    plog "  Inserted KUSER_SHARED_DATA patch function after line $anchor_line (file scope, outside platform ifdefs)"
 }
 
 apply_cpuid_spoof_handler_fix() {
@@ -496,30 +524,28 @@ apply_cpuid_spoof_handler_fix() {
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local handler_file="${PATCHES_DIR}/base/cpuid_spoof_handler.c"
 
-    info "Applying CPUID spoof handler logic to $target ..."
-    [[ -f "$target" ]]       || die "$target not found - wine's layout may have changed upstream"
-    [[ -f "$handler_file" ]] || die "$handler_file not found - expected under patches/base/"
+    plog "Applying CPUID spoof handler logic to $target ..."
+    [[ -f "$target" ]]       || plog_die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$handler_file" ]] || plog_die "$handler_file not found - expected under patches/base/"
 
     if grep -q 'linuwux-cpuid-handler' "$target"; then
-        info "  Handler logic already present"
+        plog "  Handler logic already present"
         return
     fi
 
     local func_line
     func_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
-    [[ -n "$func_line" ]] || die "Could not find 'static void segv_handler' in $target"
+    [[ -n "$func_line" ]] || plog_die "Could not find 'static void segv_handler' in $target"
 
-    # CachyOS/Proton local unique to segv_handler. Insert *after* it so our
-    # { } block sits past the declaration region (C90-safe).
     local anchor_line
     anchor_line=$(awk -v start="$func_line" '
         NR >= start && /void[[:space:]]*\*[[:space:]]*steamclient_addr[[:space:]]*=[[:space:]]*NULL/ { print NR; exit }
     ' "$target")
-    [[ -n "$anchor_line" ]] || die "Could not find 'void *steamclient_addr = NULL' inside segv_handler after line $func_line"
+    [[ -n "$anchor_line" ]] || plog_die "Could not find 'void *steamclient_addr = NULL' inside segv_handler after line $func_line"
 
     insert_after_line "$target" "$anchor_line" "$handler_file"
-    grep -q 'linuwux-cpuid-handler' "$target" || die "handler insert produced no change"
-    info "  Inserted handler logic after line $anchor_line (after steamclient_addr in segv_handler)"
+    grep -q 'linuwux-cpuid-handler' "$target" || plog_die "handler insert produced no change"
+    plog "  Inserted handler logic after line $anchor_line (after steamclient_addr in segv_handler)"
 }
 
 apply_signal_init_process_hooks() {
@@ -527,28 +553,28 @@ apply_signal_init_process_hooks() {
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local hooks_file="${PATCHES_DIR}/base/signal_init_process_hooks.c"
 
-    info "Applying signal_init_process hooks to $target ..."
-    [[ -f "$target" ]]     || die "$target not found - wine's layout may have changed upstream"
-    [[ -f "$hooks_file" ]] || die "$hooks_file not found - expected under patches/base/"
+    plog "Applying signal_init_process hooks to $target ..."
+    [[ -f "$target" ]]     || plog_die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$hooks_file" ]] || plog_die "$hooks_file not found - expected under patches/base/"
 
     if grep -q 'detect_cpu_vendor();' "$target"; then
-        info "  signal_init_process hooks already present"
+        plog "  signal_init_process hooks already present"
         return
     fi
 
     local func_line
     func_line=$(grep -n 'signal_init_process' "$target" | head -1 | cut -d: -f1)
-    [[ -n "$func_line" ]] || die "Could not find signal_init_process in $target"
+    [[ -n "$func_line" ]] || plog_die "Could not find signal_init_process in $target"
 
     local anchor_line
     anchor_line=$(awk -v start="$func_line" '
         NR >= start && /sigaction\( SIGSEGV, &sig_act, NULL \)/ { print NR; exit }
     ' "$target")
-    [[ -n "$anchor_line" ]] || die "Could not find SIGSEGV sigaction inside signal_init_process"
+    [[ -n "$anchor_line" ]] || plog_die "Could not find SIGSEGV sigaction inside signal_init_process"
 
     insert_after_line "$target" "$anchor_line" "$hooks_file"
-    grep -q 'detect_cpu_vendor();' "$target" || die "signal_init hooks insert produced no change"
-    info "  Inserted init hooks after line $anchor_line (after SIGSEGV registration)"
+    grep -q 'detect_cpu_vendor();' "$target" || plog_die "signal_init hooks insert produced no change"
+    plog "  Inserted init hooks after line $anchor_line (after SIGSEGV registration)"
 }
 
 apply_patch_file() {
@@ -560,21 +586,19 @@ apply_patch_file() {
     } >> "$log" 2>&1
 
     if patch -Np1 --forward --fuzz=0 < "$patch_file" >> "$log" 2>&1; then
-        info "  $label applied"
+        plog "  $label applied"
         return 0
     else
-        warn "  $label FAILED to apply – see $log"
+        plog_warn "  $label FAILED to apply – see $log"
         return 1
     fi
 }
 
 apply_linuwux_patches() {
     local wine_dir="$1"
-    local patch_log="${LOG_DIR}/linuwux-patches.log"
+    local patch_log="${PATCH_LOG:-${LOG_DIR}/linuwux-patches.log}"
     local failures=0
-    info "Applying LinUwUx patches to $wine_dir ..."
-    info "Patch log → $patch_log"
-    : > "$patch_log"
+    plog "Applying traditional .patch files to $wine_dir ..."
 
     pushd "$wine_dir" > /dev/null
 
@@ -584,27 +608,28 @@ apply_linuwux_patches() {
     done < <(find "$SRC_DIR/patches/wine" -name '*.patch' | sort)
 
     if grep -q 'linuwux-cpuid-handler\|0x336933' dlls/ntdll/unix/signal_x86_64.c; then
-        info "  CPUID leaf handling is present"
+        plog "  CPUID leaf handling is present"
     else
-        warn "  CPUID leaf handling is missing"
+        plog_warn "  CPUID leaf handling is missing"
         failures=$((failures+1))
     fi
 
-    info "Regenerating server protocol (tools/make_requests)..."
-    [[ -x tools/make_requests ]] || die "tools/make_requests missing or not executable"
+    plog "Regenerating server protocol (tools/make_requests)..."
+    [[ -x tools/make_requests ]] || plog_die "tools/make_requests missing or not executable"
     ./tools/make_requests >> "$patch_log" 2>&1 \
-        || die "tools/make_requests failed – see $patch_log"
+        || plog_die "tools/make_requests failed – see $patch_log"
 
     if ! grep -rq 'set_faketime' include/wine/server_protocol.h server/request.h server/protocol.h 2>/dev/null; then
-        die "set_faketime missing from generated server protocol headers after make_requests"
+        plog_die "set_faketime missing from generated server protocol headers after make_requests"
     fi
-    info "  set_faketime present in server protocol headers"
+    plog "  set_faketime present in server protocol headers"
 
     popd > /dev/null
 
     if [[ $failures -gt 0 ]]; then
-        die "$failures LinUwUx patch step(s) failed - see $patch_log (stopping rather than shipping a build silently missing them)"
+        plog_die "$failures LinUwUx patch step(s) failed - see $patch_log (stopping rather than shipping a build silently missing them)"
     fi
+    plog "LinUwUx patch session complete"
 }
 
 ge_protonprep() {
