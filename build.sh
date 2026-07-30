@@ -445,13 +445,18 @@ pause
 #         server protocol is regenerated
 # ------------------------------------------------------------
 
-# Shared helper: return the line number after the last #include (file scope).
-# Falls back to die() if no includes are found.
+# Shared helper: locate a safe file-scope insertion point.
+# Prefer #include "dwarf.h" (unique, near the top, outside platform ifdefs).
+# Fall back to the last #include in the first 120 lines so we never land
+# inside a later #ifdef linux / #elif __APPLE__ block.
 file_scope_anchor() {
     local target="$1"
     local line
-    line=$(grep -n '^#include' "$target" | tail -1 | cut -d: -f1)
-    [[ -n "$line" ]] || die "No #include found in $target – cannot locate a safe file-scope insertion point"
+    line=$(grep -n '^#include "dwarf.h"' "$target" | head -1 | cut -d: -f1)
+    if [[ -z "$line" ]]; then
+        line=$(head -n 120 "$target" | grep -n '^#include' | tail -1 | cut -d: -f1)
+    fi
+    [[ -n "$line" ]] || die "No safe file-scope insertion point found in $target"
     echo "$line"
 }
 
@@ -499,7 +504,7 @@ apply_faketime_protocol_fix() {
 }
 
 # c) Insert the CPUID-spoofing helper functions and globals at file scope
-#    (after the last #include) so they can never land inside a function.
+#    (after dwarf.h / top include block) so they stay outside platform ifdefs.
 apply_cpuid_spoof_definitions_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
@@ -523,7 +528,7 @@ apply_cpuid_spoof_definitions_fix() {
         NR == line { print; while ((getline l < defs_file) > 0) print l; next }
         { print }
     ' "$target" > "$tmp" && mv "$tmp" "$target"
-    info "  Inserted definitions after line $anchor_line (last #include, file scope)"
+    info "  Inserted definitions after line $anchor_line (file scope, outside platform ifdefs)"
 }
 
 # d) Insert the KUSER_SHARED_DATA patching function at file scope
@@ -552,7 +557,7 @@ apply_kuser_shared_data_patch_fix() {
         { print }
     ' "$target" > "$tmp" && mv "$tmp" "$target"
 
-    info "  Inserted KUSER_SHARED_DATA patch function after line $anchor_line (last #include, file scope)"
+    info "  Inserted KUSER_SHARED_DATA patch function after line $anchor_line (file scope, outside platform ifdefs)"
 }
 
 # e) Insert the CPUID handling logic at the start of the executable part of
