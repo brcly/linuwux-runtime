@@ -30,6 +30,7 @@ PATCHES_DIR="${SCRIPT_DIR}/patches"
 DIST_DIR="${SCRIPT_DIR}/dist"
 FORCE=0
 CLEAN=1
+LEGACY_REFLEX=0
 UPDATE_PATCHES=0
 
 # Colour output only when running on a real terminal
@@ -78,11 +79,13 @@ Examples:
   $(basename "$0") ge GE-Proton11-3
   $(basename "$0") ge GE-Proton9-4
   $(basename "$0") --container-engine=docker ge
+  $(basename "$0") --legacy-reflex ge GE-Proton11-3
   $(basename "$0") --update-patches         # force re-download of patches/
 
 Options:
   -f, --force               Force full re-clone and clean rebuild of the Proton source
   -k, --no-clean            Keep the -src/-build trees after a successful build
+  --legacy-reflex           Include the legacy Reflex compatibility protocol
                             (default: they're removed, leaving only the tarball)
   --update-patches          Delete and re-clone the patches/ folder from upstream
   --container-engine=<name> Container engine to build with (default: podman)
@@ -119,6 +122,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)   usage ;;
         -f|--force)  FORCE=1; shift ;;
         -k|--no-clean) CLEAN=0; shift ;;
+        --legacy-reflex) LEGACY_REFLEX=1; shift ;;
         --update-patches) UPDATE_PATCHES=1; shift ;;
         --container-engine=*)
             CONTAINER_ENGINE="${1#--container-engine=}"
@@ -262,6 +266,7 @@ header "$HR"
 header "  Proton + LinUwUx Builder v${VERSION}"
 header "  Variant     : $VARIANT"
 header "  Branch/Tag  : $BRANCH"
+header "  Legacy Reflex: $([[ $LEGACY_REFLEX -eq 1 ]] && echo enabled || echo disabled)"
 header "$HR"
 pause
 
@@ -326,10 +331,14 @@ ensure_unshallow() {
 }
 
 VERSION_ID=$(compute_version_id "$BRANCH" "$VARIANT")
-SRC_DIR="${SCRIPT_DIR}/${VERSION_ID}-src"
-BUILD_DIR="${SCRIPT_DIR}/${VERSION_ID}-build"
-BUILD_NAME="${VERSION_ID}-LinUwUx"
-LOG_DIR="${SCRIPT_DIR}/logs/${VERSION_ID}"
+BUILD_FLAVOR=""
+if [[ $LEGACY_REFLEX -eq 1 ]]; then
+    BUILD_FLAVOR="-Legacy-Reflex"
+fi
+SRC_DIR="${SCRIPT_DIR}/${VERSION_ID}${BUILD_FLAVOR}-src"
+BUILD_DIR="${SCRIPT_DIR}/${VERSION_ID}${BUILD_FLAVOR}-build"
+BUILD_NAME="${VERSION_ID}-LinUwUx${BUILD_FLAVOR}"
+LOG_DIR="${SCRIPT_DIR}/logs/${VERSION_ID}${BUILD_FLAVOR}"
 
 info "Building version : $BRANCH"
 info "Source folder    : $SRC_DIR"
@@ -415,6 +424,13 @@ fi
 # a .patch, so a stale loader patch here would only cause a conflict.
 rm -rf patches/wine/loader
 
+if [[ $LEGACY_REFLEX -eq 1 ]]; then
+    LEGACY_REFLEX_PATCHES="${PATCHES_DIR}/legacy-reflex/wine"
+    [[ -d "$LEGACY_REFLEX_PATCHES" ]] || die "Legacy Reflex patch directory not found: $LEGACY_REFLEX_PATCHES"
+    info "Adding legacy Reflex patch set"
+    cp -r "$LEGACY_REFLEX_PATCHES/." patches/wine/
+fi
+
 [[ -n "$(find patches/wine -name '*.patch' 2>/dev/null)" ]] \
     || die "No patch files found under patches/wine/ - check $PATCHES_DIR"
 
@@ -489,23 +505,22 @@ apply_faketime_protocol_fix() {
 # c) Insert the CPUID-spoofing helper functions and globals.
 #    Done by content (before 'struct xcontext') rather than as a
 #    normal patch so it keeps working when surrounding code moves.
-apply_cpuid_spoof_definitions_fix() {
-    local wine_dir="$1"
+apply_cpuid_definitions_fix() {
+    local wine_dir="$1" defs_file="$2" marker="$3" label="$4"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
-    local defs_file="${PATCHES_DIR}/base/cpuid_spoof_defs.c"
 
-    info "Applying CPUID spoof definitions to $target ..."
+    info "Applying $label to $target ..."
     [[ -f "$target" ]] || die "$target not found - wine's layout may have changed upstream"
     [[ -f "$defs_file" ]] || die "$defs_file not found - patch repo structure may have changed"
 
-    if grep -q '^uint64_t TargetSysHandler' "$target"; then
+    if grep -q "$marker" "$target"; then
         info "  Already present"
         return
     fi
 
     local anchor_line
     anchor_line=$(grep -n '^struct xcontext' "$target" | head -1 | cut -d: -f1)
-    [[ -n "$anchor_line" ]] || die "Anchor 'struct xcontext' not found in $target - wine's layout may have changed upstream"
+    [[ -n "$anchor_line" ]] || die "Anchor 'struct xcontext' not found - wine's layout may have changed upstream"
 
     local tmp
     tmp=$(mktemp)
@@ -514,6 +529,16 @@ apply_cpuid_spoof_definitions_fix() {
         { print }
     ' "$target" > "$tmp" && mv "$tmp" "$target"
     info "  Inserted definitions before line $anchor_line (struct xcontext)"
+}
+
+apply_cpuid_definitions() {
+    local wine_dir="$1"
+    apply_cpuid_definitions_fix "$wine_dir" "$PATCHES_DIR/base/cpuid_spoof_defs.c" \
+        '^uint64_t TargetSysHandler$' "CPUID spoof definitions"
+    if [[ $LEGACY_REFLEX -eq 1 ]]; then
+        apply_cpuid_definitions_fix "$wine_dir" "$PATCHES_DIR/legacy-reflex/base/cpuid_legacy_reflex_defs.c" \
+            '^uint64_t LegacyQuerySystemInformationHandler$' "legacy Reflex definitions"
+    fi
 }
 
 # Helper: apply a single .patch file, log the result, return status
@@ -608,7 +633,7 @@ fi
 
 apply_regedit_fix "wine"
 apply_faketime_protocol_fix "wine"
-apply_cpuid_spoof_definitions_fix "wine"
+apply_cpuid_definitions "wine"
 apply_linuwux_patches "wine"
 
 # We've already applied these patches to the wine tree above, so the staged
