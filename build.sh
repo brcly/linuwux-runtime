@@ -374,9 +374,6 @@ pause
 # 5. Apply LinUwUx fixes and patches
 # ------------------------------------------------------------
 
-# Prefer #include "dwarf.h" (unique, near the top, outside platform ifdefs).
-# Fall back to the last #include in the first 120 lines so we never land
-# inside a later #ifdef linux / #elif __APPLE__ block.
 file_scope_anchor() {
     local target="$1"
     local line
@@ -388,7 +385,6 @@ file_scope_anchor() {
     echo "$line"
 }
 
-# Insert contents of content_file after line N of target.
 insert_after_line() {
     local target="$1" line="$2" content_file="$3"
     [[ -r "$content_file" ]] || die "insert_after_line: unreadable $content_file"
@@ -403,7 +399,6 @@ insert_after_line() {
     mv "$tmp" "$target"
 }
 
-# Insert contents of content_file before line N of target.
 insert_before_line() {
     local target="$1" line="$2" content_file="$3"
     [[ -r "$content_file" ]] || die "insert_before_line: unreadable $content_file"
@@ -514,16 +509,17 @@ apply_cpuid_spoof_handler_fix() {
     func_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
     [[ -n "$func_line" ]] || die "Could not find 'static void segv_handler' in $target"
 
-    # Stable across old (assignment) and new (designated-init) Wine layouts.
+    # CachyOS/Proton local unique to segv_handler. Insert *after* it so our
+    # { } block sits past the declaration region (C90-safe).
     local anchor_line
     anchor_line=$(awk -v start="$func_line" '
-        NR >= start && /switch[[:space:]]*\([[:space:]]*TRAP_sig\(/ { print NR; exit }
+        NR >= start && /void[[:space:]]*\*[[:space:]]*steamclient_addr[[:space:]]*=[[:space:]]*NULL/ { print NR; exit }
     ' "$target")
-    [[ -n "$anchor_line" ]] || die "Could not find switch(TRAP_sig(...)) inside segv_handler after line $func_line"
+    [[ -n "$anchor_line" ]] || die "Could not find 'void *steamclient_addr = NULL' inside segv_handler after line $func_line"
 
-    insert_before_line "$target" "$anchor_line" "$handler_file"
+    insert_after_line "$target" "$anchor_line" "$handler_file"
     grep -q 'linuwux-cpuid-handler' "$target" || die "handler insert produced no change"
-    info "  Inserted handler logic before line $anchor_line (before switch(TRAP_sig) in segv_handler)"
+    info "  Inserted handler logic after line $anchor_line (after steamclient_addr in segv_handler)"
 }
 
 apply_signal_init_process_hooks() {
@@ -599,7 +595,6 @@ apply_linuwux_patches() {
     ./tools/make_requests >> "$patch_log" 2>&1 \
         || die "tools/make_requests failed – see $patch_log"
 
-    # Confirm set_faketime made it into a generated protocol header
     if ! grep -rq 'set_faketime' include/wine/server_protocol.h server/request.h server/protocol.h 2>/dev/null; then
         die "set_faketime missing from generated server protocol headers after make_requests"
     fi
