@@ -188,6 +188,7 @@ need sed
 need awk
 need tar
 need patch
+need perl
 
 if ! command -v xz >/dev/null 2>&1; then
     warn "xz not found – CachyOS packages will fall back to .tar.gz"
@@ -222,7 +223,7 @@ check_script_version() {
         return 0
     fi
 
-    if printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | head -1 | grep -qx "$VERSION"; then
+    if printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | head -1 | grep -Fqx "$VERSION"; then
         die "This script is outdated (v${VERSION}). Latest is v${remote_version}.
   Update with:  git -C \"$(dirname "$0")\" pull
   or re-download from: https://github.com/brcly/proton-LinUwUx-patch"
@@ -390,23 +391,31 @@ file_scope_anchor() {
 # Insert contents of content_file after line N of target.
 insert_after_line() {
     local target="$1" line="$2" content_file="$3"
+    [[ -r "$content_file" ]] || die "insert_after_line: unreadable $content_file"
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp -p "$(dirname "$target")")
     awk -v line="$line" -v content="$content_file" '
+        BEGIN { if ((getline t < content) < 0) exit 1; close(content) }
         NR == line { print; while ((getline l < content) > 0) print l; next }
         { print }
-    ' "$target" > "$tmp" && mv "$tmp" "$target"
+    ' "$target" > "$tmp" || { rm -f "$tmp"; die "insert_after_line: awk failed on $target"; }
+    chmod --reference="$target" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$target"
 }
 
 # Insert contents of content_file before line N of target.
 insert_before_line() {
     local target="$1" line="$2" content_file="$3"
+    [[ -r "$content_file" ]] || die "insert_before_line: unreadable $content_file"
     local tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp -p "$(dirname "$target")")
     awk -v line="$line" -v content="$content_file" '
+        BEGIN { if ((getline t < content) < 0) exit 1; close(content) }
         NR == line { while ((getline l < content) > 0) print l; print; next }
         { print }
-    ' "$target" > "$tmp" && mv "$tmp" "$target"
+    ' "$target" > "$tmp" || { rm -f "$tmp"; die "insert_before_line: awk failed on $target"; }
+    chmod --reference="$target" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$target"
 }
 
 apply_regedit_fix() {
@@ -462,6 +471,7 @@ apply_cpuid_spoof_definitions_fix() {
     local anchor_line
     anchor_line=$(file_scope_anchor "$target")
     insert_after_line "$target" "$anchor_line" "$defs_file"
+    grep -q '^uint64_t TargetSysHandler' "$target" || die "defs insert produced no change"
     info "  Inserted definitions after line $anchor_line (file scope, outside platform ifdefs)"
 }
 
@@ -482,6 +492,7 @@ apply_kuser_shared_data_patch_fix() {
     local anchor_line
     anchor_line=$(file_scope_anchor "$target")
     insert_after_line "$target" "$anchor_line" "$patch_file"
+    grep -q 'static void patch_kuser_shared_data' "$target" || die "kuser insert produced no change"
     info "  Inserted KUSER_SHARED_DATA patch function after line $anchor_line (file scope, outside platform ifdefs)"
 }
 
@@ -494,7 +505,6 @@ apply_cpuid_spoof_handler_fix() {
     [[ -f "$target" ]]       || die "$target not found - wine's layout may have changed upstream"
     [[ -f "$handler_file" ]] || die "$handler_file not found - expected under patches/base/"
 
-    # Stable marker embedded in the base content file
     if grep -q 'linuwux-cpuid-handler' "$target"; then
         info "  Handler logic already present"
         return
@@ -504,14 +514,16 @@ apply_cpuid_spoof_handler_fix() {
     func_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
     [[ -n "$func_line" ]] || die "Could not find 'static void segv_handler' in $target"
 
+    # Stable across old (assignment) and new (designated-init) Wine layouts.
     local anchor_line
     anchor_line=$(awk -v start="$func_line" '
-        NR >= start && /rec\.ExceptionAddress = \(void \*\)RIP_sig\(ucontext\);/ { print NR; exit }
+        NR >= start && /switch[[:space:]]*\([[:space:]]*TRAP_sig\(/ { print NR; exit }
     ' "$target")
-    [[ -n "$anchor_line" ]] || die "Could not find 'rec.ExceptionAddress = ...' inside segv_handler after line $func_line"
+    [[ -n "$anchor_line" ]] || die "Could not find switch(TRAP_sig(...)) inside segv_handler after line $func_line"
 
     insert_before_line "$target" "$anchor_line" "$handler_file"
-    info "  Inserted handler logic before line $anchor_line (start of executable part of segv_handler)"
+    grep -q 'linuwux-cpuid-handler' "$target" || die "handler insert produced no change"
+    info "  Inserted handler logic before line $anchor_line (before switch(TRAP_sig) in segv_handler)"
 }
 
 apply_signal_init_process_hooks() {
@@ -539,6 +551,7 @@ apply_signal_init_process_hooks() {
     [[ -n "$anchor_line" ]] || die "Could not find SIGSEGV sigaction inside signal_init_process"
 
     insert_after_line "$target" "$anchor_line" "$hooks_file"
+    grep -q 'detect_cpu_vendor();' "$target" || die "signal_init hooks insert produced no change"
     info "  Inserted init hooks after line $anchor_line (after SIGSEGV registration)"
 }
 
@@ -582,11 +595,15 @@ apply_linuwux_patches() {
     fi
 
     info "Regenerating server protocol (tools/make_requests)..."
-    if [[ -x tools/make_requests ]]; then
-        ./tools/make_requests >> "$patch_log" 2>&1 || warn "tools/make_requests returned non-zero"
-    else
-        warn "tools/make_requests not found or not executable"
+    [[ -x tools/make_requests ]] || die "tools/make_requests missing or not executable"
+    ./tools/make_requests >> "$patch_log" 2>&1 \
+        || die "tools/make_requests failed – see $patch_log"
+
+    # Confirm set_faketime made it into a generated protocol header
+    if ! grep -rq 'set_faketime' include/wine/server_protocol.h server/request.h server/protocol.h 2>/dev/null; then
+        die "set_faketime missing from generated server protocol headers after make_requests"
     fi
+    info "  set_faketime present in server protocol headers"
 
     popd > /dev/null
 
