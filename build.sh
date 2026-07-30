@@ -31,6 +31,7 @@ PATCHES_DIR="${SCRIPT_DIR}/patches"
 DIST_DIR="${SCRIPT_DIR}/dist"
 FORCE=0
 CLEAN=1
+LEGACY_REFLEX=0
 UPDATE_PATCHES=0
 
 # Colour output only when running on a real terminal
@@ -79,12 +80,14 @@ Examples:
   $(basename "$0") ge GE-Proton11-3
   $(basename "$0") ge GE-Proton9-4
   $(basename "$0") --container-engine=docker ge
+  $(basename "$0") --legacy-reflex ge GE-Proton11-3
   $(basename "$0") --update-patches         # force re-download of patches/
 
 Options:
   -f, --force               Force full re-clone and clean rebuild of the Proton source
   -k, --no-clean            Keep the -src/-build trees after a successful build
                             (default: they're removed, leaving only the tarball)
+  --legacy-reflex           Include the legacy Reflex compatibility protocol
   --update-patches          Delete and re-clone the patches/ folder from upstream
   --container-engine=<name> Container engine to build with (default: podman)
   -h, --help                Show this help
@@ -120,6 +123,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)   usage ;;
         -f|--force)  FORCE=1; shift ;;
         -k|--no-clean) CLEAN=0; shift ;;
+        --legacy-reflex) LEGACY_REFLEX=1; shift ;;
         --update-patches) UPDATE_PATCHES=1; shift ;;
         --container-engine=*)
             CONTAINER_ENGINE="${1#--container-engine=}"
@@ -263,6 +267,7 @@ header "$HR"
 header "  Proton + LinUwUx Builder v${VERSION}"
 header "  Variant     : $VARIANT"
 header "  Branch/Tag  : $BRANCH"
+header "  Legacy Reflex: $([[ $LEGACY_REFLEX -eq 1 ]] && echo enabled || echo disabled)"
 header "$HR"
 pause
 
@@ -327,10 +332,14 @@ ensure_unshallow() {
 }
 
 VERSION_ID=$(compute_version_id "$BRANCH" "$VARIANT")
-SRC_DIR="${SCRIPT_DIR}/${VERSION_ID}-src"
-BUILD_DIR="${SCRIPT_DIR}/${VERSION_ID}-build"
-BUILD_NAME="${VERSION_ID}-LinUwUx"
-LOG_DIR="${SCRIPT_DIR}/logs/${VERSION_ID}"
+BUILD_FLAVOR=""
+if [[ $LEGACY_REFLEX -eq 1 ]]; then
+    BUILD_FLAVOR="-Legacy-Reflex"
+fi
+SRC_DIR="${SCRIPT_DIR}/${VERSION_ID}${BUILD_FLAVOR}-src"
+BUILD_DIR="${SCRIPT_DIR}/${VERSION_ID}${BUILD_FLAVOR}-build"
+BUILD_NAME="${VERSION_ID}-LinUwUx${BUILD_FLAVOR}"
+LOG_DIR="${SCRIPT_DIR}/logs/${VERSION_ID}${BUILD_FLAVOR}"
 
 info "Building version : $BRANCH"
 info "Source folder    : $SRC_DIR"
@@ -567,10 +576,16 @@ apply_cpuid_spoof_handler_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local handler_file="${PATCHES_DIR}/base/cpuid_spoof_handler.c"
+    local handler_label="CPUID spoof"
 
-    info "Applying CPUID spoof handler logic to $target ..."
+    if [[ $LEGACY_REFLEX -eq 1 ]]; then
+        handler_file="${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_handler.c"
+        handler_label="legacy Reflex CPUID"
+    fi
+
+    info "Applying $handler_label handler logic to $target ..."
     [[ -f "$target" ]]       || die "$target not found - wine's layout may have changed upstream"
-    [[ -f "$handler_file" ]] || die "$handler_file not found - expected under patches/base/"
+    [[ -f "$handler_file" ]] || die "$handler_file not found - expected for $handler_label"
 
     # Already present?
     if grep -q 'Spoofing CPUID leaf' "$target"; then
@@ -603,6 +618,69 @@ apply_cpuid_spoof_handler_fix() {
     ' "$target" > "$tmp" && mv "$tmp" "$target"
 
     info "  Inserted handler logic before line $anchor_line (start of executable part of segv_handler)"
+}
+
+# f) Insert legacy protocol globals at file scope when requested.
+apply_legacy_reflex_definitions_fix() {
+    local wine_dir="$1"
+    local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local defs_file="${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_defs.c"
+
+    [[ $LEGACY_REFLEX -eq 1 ]] || return 0
+
+    info "Applying legacy Reflex definitions to $target ..."
+    [[ -f "$target" ]] || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$defs_file" ]] || die "$defs_file not found - expected for legacy Reflex"
+
+    if grep -q '^uint64_t LegacyQuerySystemInformationHandler' "$target"; then
+        info "  Already present"
+        return
+    fi
+
+    local anchor_line
+    anchor_line=$(file_scope_anchor "$target")
+
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="$anchor_line" -v defs_file="$defs_file" '
+        NR == line { print; while ((getline l < defs_file) > 0) print l; next }
+        { print }
+    ' "$target" > "$tmp" && mv "$tmp" "$target"
+    info "  Inserted legacy Reflex definitions after line $anchor_line (file scope)"
+}
+
+# g) Overlay legacy SIGSYS routing after the common SIGSYS patch has applied.
+apply_legacy_reflex_sigsys_fix() {
+    local wine_dir="$1"
+    local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
+    local handler_file="${PATCHES_DIR}/legacy-reflex/base/legacy_reflex_sigsys_handler.c"
+    local count tmp
+
+    [[ $LEGACY_REFLEX -eq 1 ]] || return 0
+
+    info "Applying legacy Reflex SIGSYS routing to $target ..."
+    [[ -f "$target" ]] || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$handler_file" ]] || die "$handler_file not found - expected for legacy Reflex"
+
+    if grep -q 'LegacyQuerySystemInformationId &&' "$target"; then
+        info "  Already present"
+        return
+    fi
+
+    count=$(grep -c 'if (TargetSysHandler != 0 &&' "$target" || true)
+    [[ "$count" -eq 1 ]] || die "Expected one common SIGSYS routing block in $target, found $count"
+
+    tmp=$(mktemp)
+    awk -v handler="$handler_file" '
+        /if \(TargetSysHandler != 0 &&/ && !inserted {
+            while ((getline l < handler) > 0) print l
+            inserted = 1
+        }
+        { print }
+        END { if (!inserted) exit 1 }
+    ' "$target" > "$tmp" || { rm -f "$tmp"; die "Could not insert legacy SIGSYS routing"; }
+    mv "$tmp" "$target"
+    info "  Inserted legacy SIGSYS routing"
 }
 
 # Helper: apply a single .patch file, log the result, return status
@@ -699,7 +777,9 @@ apply_faketime_protocol_fix "wine"
 apply_cpuid_spoof_definitions_fix "wine"
 apply_kuser_shared_data_patch_fix "wine"
 apply_cpuid_spoof_handler_fix "wine"
+apply_legacy_reflex_definitions_fix "wine"
 apply_linuwux_patches "wine"
+apply_legacy_reflex_sigsys_fix "wine"
 
 # We've already applied these patches to the wine tree above, so the staged
 # .patch copies are just clutter for the container build – remove them.
@@ -725,6 +805,14 @@ user_settings_src="${PATCHES_DIR}/base/user_settings.py"
     || die "kuser_shared_data_patch.c not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/cpuid_spoof_handler.c" ]] \
     || die "cpuid_spoof_handler.c not found under ${PATCHES_DIR}/base/ – required"
+if [[ $LEGACY_REFLEX -eq 1 ]]; then
+    [[ -f "${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_defs.c" ]] \
+        || die "cpuid_legacy_reflex_defs.c not found – required for legacy Reflex"
+    [[ -f "${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_handler.c" ]] \
+        || die "cpuid_legacy_reflex_handler.c not found – required for legacy Reflex"
+    [[ -f "${PATCHES_DIR}/legacy-reflex/base/legacy_reflex_sigsys_handler.c" ]] \
+        || die "legacy_reflex_sigsys_handler.c not found – required for legacy Reflex"
+fi
 [[ -f "${PATCHES_DIR}/base/hwprofile_guid.reg" ]] \
     || die "hwprofile_guid.reg not found under ${PATCHES_DIR}/base/ – required"
 [[ -f "${PATCHES_DIR}/base/set_faketime.protocol" ]] \
