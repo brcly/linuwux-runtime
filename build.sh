@@ -33,7 +33,6 @@ FORCE=0
 CLEAN=1
 UPDATE_PATCHES=0
 
-# Colour output only when running on a real terminal
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -56,9 +55,6 @@ pause(){ [[ "${SLOW:-0}" == "1" ]] && sleep 1.2; return 0; }
 
 HR="$(printf '=%.0s' {1..60})"
 
-# This trap only prints a reminder on failure. Leaving the trees in place is
-# structural: a failed run exits before the step-10 cleanup, so -src/-build
-# survive for inspection. Successful runs clean up by default.
 trap 'echo -e "\n${RED}[$(ts)] Build failed – source/build trees left in place for debugging${RESET}" >&2' ERR
 
 usage() {
@@ -110,9 +106,6 @@ EOF
     exit 0
 }
 
-# ------------------------------------------------------------
-# Argument parsing
-# ------------------------------------------------------------
 VARIANT="cachyos"
 BRANCH=""
 
@@ -127,10 +120,8 @@ while [[ $# -gt 0 ]]; do
             [[ -n "$CONTAINER_ENGINE" ]] || die "--container-engine requires a value (e.g. --container-engine=docker)"
             shift
             ;;
-        # Accept a few common aliases for each variant
         cachyos|cachy|ge|proton-ge|eggroll)
             VARIANT="$1"; shift
-            # Optional branch/tag may follow immediately
             [[ $# -gt 0 && ! "$1" =~ ^- ]] && { BRANCH="$1"; shift; }
             ;;
         valve|proton)
@@ -142,15 +133,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ------------------------------------------------------------
-# Resolve variant → upstream repo + default branch/tag
-# When no explicit branch/tag is given, auto-detect the latest.
-# ------------------------------------------------------------
 detect_latest_cachyos_branch() {
     local fallback="$1" latest
     command -v git >/dev/null 2>&1 || { echo "$fallback"; return; }
-    # CachyOS names branches like cachyos_11.0_20260702/main
-    # Sort by the date field and take the newest /main branch
     latest=$(git ls-remote --heads "$REPO" 'refs/heads/cachyos_*' 2>/dev/null \
         | sed 's|.*refs/heads/||' \
         | grep '/main$' \
@@ -162,7 +147,6 @@ detect_latest_cachyos_branch() {
 detect_latest_ge_tag() {
     local fallback="master" latest
     command -v git >/dev/null 2>&1 || { echo "$fallback"; return; }
-    # Prefer the newest numbered GE-ProtonN-M release tag
     latest=$(git ls-remote --tags "$REPO" 'refs/tags/GE-Proton*' 2>/dev/null \
         | sed 's|.*refs/tags/||' \
         | grep -E '^GE-Proton[0-9]+-[0-9]+$' \
@@ -197,9 +181,6 @@ if [[ -z "$BRANCH" ]]; then
 fi
 BRANCH="${BRANCH:-$DEFAULT_BRANCH}"
 
-# ------------------------------------------------------------
-# Dependency + free-space checks
-# ------------------------------------------------------------
 need git
 need "$CONTAINER_ENGINE"
 need make
@@ -212,7 +193,6 @@ if ! command -v xz >/dev/null 2>&1; then
     warn "xz not found – CachyOS packages will fall back to .tar.gz"
 fi
 
-# Proton builds need a lot of disk; warn early if space is tight
 FREE_GB=$(df -BG --output=avail "$SCRIPT_DIR" 2>/dev/null | tail -1 | tr -dc '0-9' || echo 0)
 if [[ "$FREE_GB" -gt 0 && "$FREE_GB" -lt 35 ]]; then
     warn "Only ~${FREE_GB} GB free under $SCRIPT_DIR – a full build typically needs 30-40 GB"
@@ -220,11 +200,6 @@ elif [[ "$FREE_GB" -gt 0 ]]; then
     info "Free space: ~${FREE_GB} GB"
 fi
 
-# ------------------------------------------------------------
-# Script version check against upstream GitHub
-# Exits if this copy is older than the published one.
-# Network failure is non-fatal (offline builds still work).
-# ------------------------------------------------------------
 check_script_version() {
     local remote_version=""
     local raw_url="https://raw.githubusercontent.com/brcly/proton-LinUwUx-patch/main/build.sh"
@@ -247,14 +222,12 @@ check_script_version() {
         return 0
     fi
 
-    # sort -V works for both numeric (1.17) and date (26.07.29) schemes
     if printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | head -1 | grep -qx "$VERSION"; then
         die "This script is outdated (v${VERSION}). Latest is v${remote_version}.
   Update with:  git -C \"$(dirname "$0")\" pull
   or re-download from: https://github.com/brcly/proton-LinUwUx-patch"
     fi
 
-    # Local is newer than published – likely a development copy
     info "Local script (v${VERSION}) is newer than published v${remote_version}"
 }
 
@@ -267,12 +240,6 @@ header "  Branch/Tag  : $BRANCH"
 header "$HR"
 pause
 
-# ------------------------------------------------------------
-# 1. Obtain LinUwUx patches
-#    Prefer the local patches/ folder (so you can edit and iterate).
-#    Only clone from GitHub when it is missing, or when
-#    --update-patches was passed.
-# ------------------------------------------------------------
 if [[ $UPDATE_PATCHES -eq 1 ]]; then
     info "--update-patches: removing existing patches/ so a fresh copy is fetched"
     rm -rf "$PATCHES_DIR"
@@ -292,20 +259,13 @@ else
 fi
 pause
 
-# ------------------------------------------------------------
-# 2. Compute versioned folder names + clone/reuse Proton source
-#    Folder names are derived from the branch/tag so multiple
-#    versions can sit side-by-side without colliding.
-# ------------------------------------------------------------
 compute_version_id() {
     local raw="$1" variant="$2" id
     case "$variant" in
         ge)
-            # GE-Proton11-3 → GE-Proton-11-3
             id=$(echo "$raw" | sed -E 's/^GE-Proton/GE-Proton-/; s/_/-/g; s|/|-|g')
             ;;
         *)
-            # cachyos_11.0_20260702/main → proton-cachyos-11.0-20260702-slr
             id=$(echo "$raw" | sed -E \
                 -e 's/^cachyos[_-]?/proton-cachyos-/' \
                 -e 's|/main_native$|-native|' \
@@ -316,9 +276,6 @@ compute_version_id() {
     echo "$id" | sed -E 's/-+/-/g; s/^-//; s/-$//'
 }
 
-# Proton's build reads its version from git history/tags, which a shallow
-# (--depth) clone lacks. Our clones use --filter=tree:0 (partial, but with
-# full history), so this normally only fires on a reused shallow tree.
 ensure_unshallow() {
     if git -C "$SRC_DIR" rev-parse --is-shallow-repository 2>/dev/null | grep -q true; then
         info "  Repo is shallow – fetching full history/tags..."
@@ -343,7 +300,6 @@ pause
 rm -rf "$LOG_DIR"
 mkdir -p "$LOG_DIR"
 
-# Reuse an existing source tree when possible (--force forces a clean clone)
 if [[ $FORCE -eq 0 && -d "$SRC_DIR/.git" ]]; then
     info "Reusing existing source tree (use --force to re-clone)"
     ensure_unshallow
@@ -356,7 +312,6 @@ if [[ $FORCE -eq 0 && -d "$SRC_DIR/.git" ]]; then
 else
     info "Cloning source..."
     rm -rf "$SRC_DIR"
-    # Try a direct branch clone first; fall back to clone-then-checkout
     if ! git clone --branch "$BRANCH" --filter=tree:0 "$REPO" "$SRC_DIR" 2>/dev/null; then
         info "Branch/tag not found on default clone attempt – retrying without --branch..."
         git clone --filter=tree:0 "$REPO" "$SRC_DIR" || die "Failed to clone $REPO"
@@ -366,11 +321,6 @@ else
 fi
 pause
 
-# ------------------------------------------------------------
-# 3. Update submodules
-#    Proton is a collection of many submodules (Wine, DXVK, etc.).
-#    --filter=tree:0 keeps the initial fetch lean.
-# ------------------------------------------------------------
 info "Updating submodules (this can take a while)..."
 if [[ $FORCE -eq 1 ]]; then
     info "  --force: deiniting submodules for a full clean update"
@@ -380,12 +330,6 @@ git -C "$SRC_DIR" submodule update --init --recursive --force --filter=tree:0 \
     || die "Submodule update failed"
 pause
 
-# ------------------------------------------------------------
-# 4. Install LinUwUx patch files into the source tree
-#    If an override set exists for this version (patches/overrides/<key>/wine/,
-#    where <key> is the branch/tag with CachyOS's trailing /main dropped) it is
-#    used exclusively. Otherwise the common patches/wine/ set is used.
-# ------------------------------------------------------------
 info "Installing LinUwUx patch files..."
 
 cd "$SRC_DIR"
@@ -393,9 +337,6 @@ cd "$SRC_DIR"
 rm -rf patches/wine
 mkdir -p patches/wine
 
-# CachyOS branches are named <version>/main (or /main_native), but the
-# override folders are keyed by the version alone – drop the trailing
-# path component so overrides/<version>/wine/ is found.
 override_key="$BRANCH"
 if [[ "$VARIANT" == "cachyos" ]]; then
     override_key="${BRANCH%/*}"
@@ -412,9 +353,6 @@ else
     fi
 fi
 
-# Drop any loader patches: the one loader-level change (the HwProfileGuid
-# registry line) is applied imperatively by apply_regedit_fix below, not as
-# a .patch, so a stale loader patch here would only cause a conflict.
 rm -rf patches/wine/loader
 
 [[ -n "$(find patches/wine -name '*.patch' 2>/dev/null)" ]] \
@@ -423,10 +361,8 @@ rm -rf patches/wine/loader
 info "Installed patches:"
 find patches/wine -name '*.patch' | sed 's|^|      |'
 
-# Guard against stale patches that still try to define symbols now
-# owned exclusively by the base content files
 STALE_DEF_PATCHES=$(grep -rl \
-    '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data\|^\+[[:space:]]*detect_cpu_vendor();' \
+    '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data\|^\+[[:space:]]*detect_cpu_vendor();\|^\+[[:space:]]*/\* linuwux-cpuid-handler' \
     patches/wine 2>/dev/null || true)
 if [[ -n "$STALE_DEF_PATCHES" ]]; then
     die "Patch(es) below still add content that now lives exclusively in patches/base/, remove it from: $STALE_DEF_PATCHES"
@@ -435,19 +371,8 @@ pause
 
 # ------------------------------------------------------------
 # 5. Apply LinUwUx fixes and patches
-#
-#    Classes of change:
-#      a) Hardware profile GUID  – appended to wine.inf.in
-#      b) Faketime protocol req  – appended to server/protocol.def
-#      c) CPUID spoof definitions – content-inserted at file scope
-#      d) KUSER_SHARED_DATA patch – content-inserted at file scope
-#      e) CPUID spoof handler logic – content-inserted at start of segv_handler
-#      f) signal_init_process hooks – content-inserted after SIGSEGV registration
-#      g) Remaining .patch files  – applied with patch(1), then
-#         server protocol is regenerated
 # ------------------------------------------------------------
 
-# Shared helper: locate a safe file-scope insertion point.
 # Prefer #include "dwarf.h" (unique, near the top, outside platform ifdefs).
 # Fall back to the last #include in the first 120 lines so we never land
 # inside a later #ifdef linux / #elif __APPLE__ block.
@@ -462,9 +387,28 @@ file_scope_anchor() {
     echo "$line"
 }
 
-# a) Fixed HwProfileGuid so games that fingerprint hardware profiles
-#    see a stable, known value instead of a random one each boot.
-#    Content is read from patches/base/hwprofile_guid.reg.
+# Insert contents of content_file after line N of target.
+insert_after_line() {
+    local target="$1" line="$2" content_file="$3"
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="$line" -v content="$content_file" '
+        NR == line { print; while ((getline l < content) > 0) print l; next }
+        { print }
+    ' "$target" > "$tmp" && mv "$tmp" "$target"
+}
+
+# Insert contents of content_file before line N of target.
+insert_before_line() {
+    local target="$1" line="$2" content_file="$3"
+    local tmp
+    tmp=$(mktemp)
+    awk -v line="$line" -v content="$content_file" '
+        NR == line { while ((getline l < content) > 0) print l; print; next }
+        { print }
+    ' "$target" > "$tmp" && mv "$tmp" "$target"
+}
+
 apply_regedit_fix() {
     local wine_dir="$1"
     local inf="${wine_dir}/loader/wine.inf.in"
@@ -478,14 +422,11 @@ apply_regedit_fix() {
         info "  HwProfileGuid already present"
     else
         cat "$content_file" >> "$inf"
-        echo >> "$inf"   # ensure the file ends with a newline
+        echo >> "$inf"
         info "  Appended HwProfileGuid line from $content_file"
     fi
 }
 
-# b) Declare the set_faketime server request so the faketime patch
-#    can talk to wineserver.
-#    Content is read from patches/base/set_faketime.protocol.
 apply_faketime_protocol_fix() {
     local wine_dir="$1"
     local proto="${wine_dir}/server/protocol.def"
@@ -498,22 +439,19 @@ apply_faketime_protocol_fix() {
     if grep -q '@REQ(set_faketime)' "$proto"; then
         info "  set_faketime request already present"
     else
-        # Leave a blank line before the new block for readability
         echo >> "$proto"
         cat "$content_file" >> "$proto"
         info "  Appended set_faketime request from $content_file"
     fi
 }
 
-# c) Insert the CPUID-spoofing helper functions and globals at file scope
-#    (after dwarf.h / top include block) so they stay outside platform ifdefs.
 apply_cpuid_spoof_definitions_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local defs_file="${PATCHES_DIR}/base/cpuid_spoof_defs.c"
 
     info "Applying CPUID spoof definitions to $target ..."
-    [[ -f "$target" ]] || die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$target" ]]    || die "$target not found - wine's layout may have changed upstream"
     [[ -f "$defs_file" ]] || die "$defs_file not found - patch repo structure may have changed"
 
     if grep -q '^uint64_t TargetSysHandler' "$target"; then
@@ -523,18 +461,10 @@ apply_cpuid_spoof_definitions_fix() {
 
     local anchor_line
     anchor_line=$(file_scope_anchor "$target")
-
-    local tmp
-    tmp=$(mktemp)
-    awk -v line="$anchor_line" -v defs_file="$defs_file" '
-        NR == line { print; while ((getline l < defs_file) > 0) print l; next }
-        { print }
-    ' "$target" > "$tmp" && mv "$tmp" "$target"
+    insert_after_line "$target" "$anchor_line" "$defs_file"
     info "  Inserted definitions after line $anchor_line (file scope, outside platform ifdefs)"
 }
 
-# d) Insert the KUSER_SHARED_DATA patching function at file scope
-#    (same robust anchor as the definitions).
 apply_kuser_shared_data_patch_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
@@ -551,20 +481,10 @@ apply_kuser_shared_data_patch_fix() {
 
     local anchor_line
     anchor_line=$(file_scope_anchor "$target")
-
-    local tmp
-    tmp=$(mktemp)
-    awk -v line="$anchor_line" -v patch="$patch_file" '
-        NR == line { print; while ((getline l < patch) > 0) print l; next }
-        { print }
-    ' "$target" > "$tmp" && mv "$tmp" "$target"
-
+    insert_after_line "$target" "$anchor_line" "$patch_file"
     info "  Inserted KUSER_SHARED_DATA patch function after line $anchor_line (file scope, outside platform ifdefs)"
 }
 
-# e) Insert the CPUID handling logic at the start of the executable part of
-#    segv_handler. We deliberately insert *before* the first real statement
-#    so that all original local declarations stay together (C90 rule).
 apply_cpuid_spoof_handler_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
@@ -574,41 +494,26 @@ apply_cpuid_spoof_handler_fix() {
     [[ -f "$target" ]]       || die "$target not found - wine's layout may have changed upstream"
     [[ -f "$handler_file" ]] || die "$handler_file not found - expected under patches/base/"
 
-    # Already present?
-    if grep -q 'Spoofing CPUID leaf' "$target"; then
+    # Stable marker embedded in the base content file
+    if grep -q 'linuwux-cpuid-handler' "$target"; then
         info "  Handler logic already present"
         return
     fi
 
-    # Step 1: find the unique function start
     local func_line
     func_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
     [[ -n "$func_line" ]] || die "Could not find 'static void segv_handler' in $target"
 
-    # Step 2: from that point forward, find the first real statement of the
-    # function. Inserting *before* this line keeps every original local
-    # declaration together and places our early-return block at the very
-    # start of the executable section (C90-safe).
     local anchor_line
     anchor_line=$(awk -v start="$func_line" '
         NR >= start && /rec\.ExceptionAddress = \(void \*\)RIP_sig\(ucontext\);/ { print NR; exit }
     ' "$target")
-
     [[ -n "$anchor_line" ]] || die "Could not find 'rec.ExceptionAddress = ...' inside segv_handler after line $func_line"
 
-    # Insert *before* the anchor line
-    local tmp
-    tmp=$(mktemp)
-    awk -v line="$anchor_line" -v handler="$handler_file" '
-        NR == line { while ((getline l < handler) > 0) print l; print; next }
-        { print }
-    ' "$target" > "$tmp" && mv "$tmp" "$target"
-
+    insert_before_line "$target" "$anchor_line" "$handler_file"
     info "  Inserted handler logic before line $anchor_line (start of executable part of segv_handler)"
 }
 
-# f) Insert detect_cpu_vendor() + ARCH_SET_CPUID disable after SIGSEGV is
-#    registered in signal_init_process (was 0003-signal_init_process.patch).
 apply_signal_init_process_hooks() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
@@ -618,7 +523,6 @@ apply_signal_init_process_hooks() {
     [[ -f "$target" ]]     || die "$target not found - wine's layout may have changed upstream"
     [[ -f "$hooks_file" ]] || die "$hooks_file not found - expected under patches/base/"
 
-    # Already present? (the call, not the function definition)
     if grep -q 'detect_cpu_vendor();' "$target"; then
         info "  signal_init_process hooks already present"
         return
@@ -634,17 +538,10 @@ apply_signal_init_process_hooks() {
     ' "$target")
     [[ -n "$anchor_line" ]] || die "Could not find SIGSEGV sigaction inside signal_init_process"
 
-    local tmp
-    tmp=$(mktemp)
-    awk -v line="$anchor_line" -v hooks="$hooks_file" '
-        NR == line { print; while ((getline l < hooks) > 0) print l; next }
-        { print }
-    ' "$target" > "$tmp" && mv "$tmp" "$target"
-
+    insert_after_line "$target" "$anchor_line" "$hooks_file"
     info "  Inserted init hooks after line $anchor_line (after SIGSEGV registration)"
 }
 
-# Helper: apply a single .patch file, log the result, return status
 apply_patch_file() {
     local patch_file="$1" label="$2" log="$3"
     {
@@ -653,8 +550,6 @@ apply_patch_file() {
         echo "$HR"
     } >> "$log" 2>&1
 
-    # --fuzz=0: require exact context (fail rather than mis-place a hunk).
-    # --forward: skip hunks that are already applied, so re-runs are safe.
     if patch -Np1 --forward --fuzz=0 < "$patch_file" >> "$log" 2>&1; then
         info "  $label applied"
         return 0
@@ -664,9 +559,6 @@ apply_patch_file() {
     fi
 }
 
-# g) Apply every remaining .patch under patches/wine/, then regenerate the
-#    wineserver protocol headers. This regen (tools/make_requests) reads
-#    protocol.def, so it picks up the set_faketime request appended in step (b).
 apply_linuwux_patches() {
     local wine_dir="$1"
     local patch_log="${LOG_DIR}/linuwux-patches.log"
@@ -682,11 +574,10 @@ apply_linuwux_patches() {
             || failures=$((failures+1))
     done < <(find "$SRC_DIR/patches/wine" -name '*.patch' | sort)
 
-    # Sanity check that the key CPUID leaf handler made it in
-    if grep -q "0x336933\|Spoofing CPUID" dlls/ntdll/unix/signal_x86_64.c; then
+    if grep -q 'linuwux-cpuid-handler\|0x336933' dlls/ntdll/unix/signal_x86_64.c; then
         info "  CPUID leaf handling is present"
     else
-        warn "  CPUID leaf handling (0x336933) is missing"
+        warn "  CPUID leaf handling is missing"
         failures=$((failures+1))
     fi
 
@@ -699,13 +590,11 @@ apply_linuwux_patches() {
 
     popd > /dev/null
 
-    # Fail closed: never ship a Proton that is silently missing patches
     if [[ $failures -gt 0 ]]; then
         die "$failures LinUwUx patch step(s) failed - see $patch_log (stopping rather than shipping a build silently missing them)"
     fi
 }
 
-# GE runs its own protonprep script first (applies GE's staging patches)
 ge_protonprep() {
     local prep_script
     prep_script=$(find patches -maxdepth 1 -name 'protonprep*.sh' | head -1)
@@ -741,19 +630,11 @@ apply_cpuid_spoof_handler_fix "wine"
 apply_signal_init_process_hooks "wine"
 apply_linuwux_patches "wine"
 
-# We've already applied these patches to the wine tree above, so the staged
-# .patch copies are just clutter for the container build – remove them.
-# (CachyOS's wine is a pre-patched fork; it does not re-apply from patches/wine.)
 if [[ "$VARIANT" == "cachyos" ]]; then
     find patches/wine -name '*.patch' -delete
 fi
 pause
 
-# ------------------------------------------------------------
-# 6. Install user_settings.py + verify all required base files
-#    Must be provided under patches/base/ (DLL overrides +
-#    PROTON_DISABLE_LSTEAMCLIENT=1, etc.).
-# ------------------------------------------------------------
 info "Installing user_settings.py and checking required base files..."
 
 user_settings_src="${PATCHES_DIR}/base/user_settings.py"
@@ -776,19 +657,11 @@ cp "$user_settings_src" user_settings.py
 info "  Installed from $user_settings_src"
 pause
 
-# ------------------------------------------------------------
-# 7. Wire user_settings.py into the package (Makefile.in)
-#    Proton only ships user_settings.sample.py by default.
-#    We add rules so the real user_settings.py is copied into
-#    the redistributable as well.
-# ------------------------------------------------------------
 info "Ensuring user_settings.py is included in the package..."
 
 if grep -q 'USER_SETTINGS_REAL_TARGET' Makefile.in; then
     info "Makefile.in already contains the rule"
 else
-    # These three anchors have been stable for a long time.
-    # If upstream moves them the die() messages surface it immediately.
     anchor_dst='USER_SETTINGS_PY_TARGET := $(addprefix $(DST_BASE)/,user_settings.sample.py)'
     anchor_src='$(USER_SETTINGS_PY_TARGET): $(addprefix $(SRCDIR)/,user_settings.sample.py)'
     anchor_dist='DIST_COPY_TARGETS := $(FILELOCK_TARGET) $(PROTON_PY_TARGET) \'
@@ -811,7 +684,6 @@ USER_SETTINGS_REAL_TARGET := \$(addprefix \$(DST_BASE)\/,user_settings.py)' \
         -e 's|DIST_COPY_TARGETS := \$(FILELOCK_TARGET) \$(PROTON_PY_TARGET) \\|DIST_COPY_TARGETS := \$(FILELOCK_TARGET) \$(PROTON_PY_TARGET) \$(USER_SETTINGS_REAL_TARGET) \\|' \
         Makefile.in
 
-    # Verify the three edits landed correctly
     grep -qF 'USER_SETTINGS_REAL_TARGET := $(addprefix $(DST_BASE)/,user_settings.py)' Makefile.in \
         || die "Makefile.in edit failed: DST_BASE rule not inserted"
     grep -qF '$(USER_SETTINGS_REAL_TARGET): $(addprefix $(SRCDIR)/,user_settings.py)' Makefile.in \
@@ -822,11 +694,6 @@ USER_SETTINGS_REAL_TARGET := \$(addprefix \$(DST_BASE)\/,user_settings.py)' \
 fi
 pause
 
-# ------------------------------------------------------------
-# 8. Configure and build the redistributable
-#    configure.sh sets up the Steam Runtime container build;
-#    make redist does the actual compilation (long-running).
-# ------------------------------------------------------------
 info "Preparing build directory..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
@@ -847,11 +714,6 @@ pause
 info "Building redist (this will take a long time)..."
 make redist 2>&1 | tee "$LOG_DIR/build.log" || die "make redist failed – see $LOG_DIR/build.log"
 
-# ------------------------------------------------------------
-# 9. Locate / create the tarball and verify contents
-#    Prefer an archive already produced by make redist; if only
-#    a directory exists, pack it ourselves.
-# ------------------------------------------------------------
 info "Verifying / packaging output..."
 
 TARBALL=$(find . -maxdepth 3 \( -name "${BUILD_NAME}*.tar.gz" -o -name "${BUILD_NAME}*.tar.xz" \) | head -1)
@@ -860,7 +722,6 @@ if [[ -z "$TARBALL" ]]; then
     TARBALL=$(find . -maxdepth 3 \( -name '*.tar.gz' -o -name '*.tar.xz' \) | head -1)
 fi
 
-# No archive found – look for a redist directory and pack it
 if [[ -z "$TARBALL" ]]; then
     REDIST_DIR=""
     for candidate in redist dist "${BUILD_NAME}" *; do
@@ -879,7 +740,6 @@ if [[ -z "$TARBALL" ]]; then
             REDIST_DIR="$BUILD_NAME"
         fi
 
-        # Match CachyOS's preferred .tar.xz; fall back to .tar.gz
         if [[ "$VARIANT" == "cachyos" ]] && command -v xz >/dev/null 2>&1; then
             tar -c "$REDIST_DIR" | xz -T0 > "${BUILD_NAME}.tar.xz"
             TARBALL="${BUILD_NAME}.tar.xz"
@@ -897,7 +757,6 @@ fi
 
 info "Found package: $TARBALL"
 
-# Hard fail if critical files are missing from the archive
 MISSING=0
 listing=$(tar -tf "$TARBALL" 2>/dev/null || true)
 if grep -q 'user_settings.py' <<<"$listing"; then
@@ -921,11 +780,6 @@ fi
 
 [[ $MISSING -eq 0 ]] || die "Package failed verification (missing user_settings.py or core files) – see warnings above"
 
-# ------------------------------------------------------------
-# 10. Move tarball to dist/ and clean up
-#     By default the large -src/-build trees are removed so the
-#     next run starts clean. Pass --no-clean to keep them.
-# ------------------------------------------------------------
 mkdir -p "$DIST_DIR"
 FINAL_TARBALL="${DIST_DIR}/$(basename "$TARBALL")"
 mv -f "$TARBALL" "$FINAL_TARBALL"
