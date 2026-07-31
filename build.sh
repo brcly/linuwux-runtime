@@ -5,11 +5,11 @@ set -euo pipefail
 # Proton + LinUwUx Builder
 #
 # Thin orchestrator. Implementation lives under lib/:
-#   lib/common.sh         – logging, insert helpers
-#   lib/source.sh         – clone, submodules, patch staging
-#   lib/apply-content.sh  – content-based inserts (patches/base/)
-#   lib/apply-patches.sh  – traditional .patch apply + GE prep
-#   lib/package.sh        – user_settings, configure, redist, verify
+#   common.sh         – logging, line-insert helpers
+#   source.sh         – clone, submodules, stage patches/wine
+#   apply-content.sh  – hooks install + content inserts
+#   apply-patches.sh  – traditional .patch apply + GE protonprep
+#   package.sh        – user_settings, configure, redist, verify
 # ============================================================
 
 VERSION="26.07.31"
@@ -44,44 +44,55 @@ usage() {
     cat << EOF
 Proton + LinUwUx Builder v${VERSION}
 
+Build CachyOS or GE Proton from source with LinUwUx hooks applied.
+
 Usage:
   $(basename "$0") [OPTIONS] [VARIANT] [BRANCH/TAG]
 
 Variants:
-  cachyos (default)   Build CachyOS Proton
-  ge                  Build GloriousEggroll Proton
+  cachyos (default)   CachyOS Proton (latest cachyos_*/main if no branch)
+  ge                  GloriousEggroll Proton (latest GE-ProtonN-M tag if no tag)
 
 Examples:
-  $(basename "$0")                          # latest CachyOS
+  $(basename "$0")
   $(basename "$0") cachyos <branch>
-  $(basename "$0") ge                       # latest GE tag (or master)
+  $(basename "$0") ge
   $(basename "$0") ge GE-Proton11-3
   $(basename "$0") --legacy-reflex ge GE-Proton11-3
+  $(basename "$0") --force --no-clean cachyos
   $(basename "$0") --update-patches
+  $(basename "$0") --container-engine=docker ge
 
 Options:
-  -f, --force               Force full re-clone and clean rebuild
-  -k, --no-clean            Keep -src/-build trees after success
-  --legacy-reflex           Use linuwux_hooks_legacy.c (older Reflex protocol)
-  --update-patches          Re-clone the patches/ folder from upstream
-  --container-engine=<name> Container engine (default: podman)
-  -h, --help                Show this help
+  -f, --force                 Full re-clone and clean rebuild
+  -k, --no-clean              Keep -src/-build trees after a successful build
+  --legacy-reflex             Use patches/legacy-reflex/linuwux_hooks_legacy.c
+                              (older Reflex dual-trampoline protocol)
+  --update-patches            Delete and re-clone patches/ from this repo
+  --container-engine=<name>   Container engine (default: podman)
+  -h, --help                  Show this help
 
 Environment:
-  SLOW=1                     Pause between steps
-  PATCH_BRANCH=<name>        Patch repo branch when patches/ is missing (default: main)
-  LINUWUX_DEBUG=1            Runtime event tracing from hooks
+  SLOW=1                      Pause ~1.2s between major steps
+  PATCH_BRANCH=<name>         Branch of this repo to clone when patches/ is
+                              missing (default: main)
+  LINUWUX_DEBUG=1             Runtime: event tracing from linuwux_hooks*.c
+  PROTON_AVX=1                Runtime: AVX/XSAVE in spoofed CPUID/KUSER data
 
-Notes:
-  Bulk logic: patches/base/linuwux_hooks.c (or legacy-reflex/linuwux_hooks_legacy.c).
-  Copied to ntdll/unix as linuwux_hooks.c and #include'd into signal_x86_64.c.
-  Signal file only gets tiny call stubs.
+How hooks land:
+  Bulk logic lives in patches/base/linuwux_hooks.c (or the legacy file).
+  It is copied to dlls/ntdll/unix/linuwux_hooks.c and #include'd into
+  signal_x86_64.c. Only tiny call stubs are pasted into the signal file.
 
-  Required under patches/base/:
-    linuwux_hooks.c, user_settings.py, hwprofile_guid.reg, set_faketime.protocol
+Required files:
+  patches/base/linuwux_hooks.c
+  patches/base/user_settings.py
+  patches/base/hwprofile_guid.reg
+  patches/base/set_faketime.protocol
+  patches/wine/server/0001-apply_faketime.patch
 
-  With --legacy-reflex:
-    patches/legacy-reflex/linuwux_hooks_legacy.c
+  With --legacy-reflex also:
+  patches/legacy-reflex/linuwux_hooks_legacy.c
 
 EOF
     exit 0
@@ -171,7 +182,7 @@ if [[ "$VARIANT" == "ge" ]]; then
     ge_protonprep
     pause
 else
-    info "CachyOS – applying LinUwUx patches directly rather than trusting CachyOS's own auto-apply"
+    info "CachyOS – applying LinUwUx patches on the host (not relying on upstream auto-apply)"
 fi
 
 apply_regedit_fix "wine"
@@ -183,6 +194,7 @@ apply_sigsys_handler_fix "wine"
 apply_linuwux_patches "wine"
 
 if [[ "$VARIANT" == "cachyos" ]]; then
+    # Avoid CachyOS's own patch pass re-applying staged files after we already did.
     find patches/wine -name '*.patch' -delete
 fi
 pause
