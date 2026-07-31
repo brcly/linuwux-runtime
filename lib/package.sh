@@ -20,6 +20,8 @@ install_user_settings_and_check_base() {
         || die "signal_init_process_hooks.c not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/sigsys_handler.c" ]] \
         || die "sigsys_handler.c not found under ${PATCHES_DIR}/base/ – required"
+    [[ -f "${PATCHES_DIR}/base/sigsys_handler_fn.c" ]] \
+        || die "sigsys_handler_fn.c not found under ${PATCHES_DIR}/base/ – required"
     if [[ $LEGACY_REFLEX -eq 1 ]]; then
         [[ -f "${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_defs.c" ]] \
             || die "cpuid_legacy_reflex_defs.c not found – required for legacy Reflex"
