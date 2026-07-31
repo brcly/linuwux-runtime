@@ -49,7 +49,7 @@ ensure_unshallow() {
     fi
 }
 
-# Compare local VERSION to main/build.sh on GitHub. Non-main PATCH_BRANCH only warns.
+# Compare local VERSION to main/build.sh on GitHub. Always warn-only (never abort).
 check_script_version() {
     local remote_version=""
     local raw_url="https://raw.githubusercontent.com/brcly/proton-LinUwUx-patch/main/build.sh"
@@ -73,13 +73,8 @@ check_script_version() {
     fi
 
     if printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | head -1 | grep -Fqx "$VERSION"; then
-        if [[ "${PATCH_BRANCH:-main}" != "main" ]]; then
-            warn "Script is older than main (v${VERSION} < v${remote_version}) – continuing because PATCH_BRANCH=${PATCH_BRANCH}"
-        else
-            die "This script is outdated (v${VERSION}). Latest is v${remote_version}.
-  Update with:  git -C \"$(dirname "$0")\" pull
-  or re-download from: https://github.com/brcly/proton-LinUwUx-patch"
-        fi
+        warn "Script is older than main (v${VERSION} < v${remote_version}). Consider: git pull"
+        return 0
     fi
 
     info "Local script (v${VERSION}) is newer than published v${remote_version}"
@@ -207,13 +202,13 @@ stage_wine_patches() {
     info "Installed patches:"
     find patches/wine -name '*.patch' | sed 's|^|      |'
 
-    # Refuse stale .patch files that still try to inject content now owned by hooks.
+    # Refuse .patch files that still inject content now owned by linuwux_hooks*.c.
     local STALE_DEF_PATCHES
-    STALE_DEF_PATCHES=$(grep -rl \
-        '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data\|^\+[[:space:]]*detect_cpu_vendor();\|^\+[[:space:]]*/\* linuwux-cpuid-handler\|^\+[[:space:]]*/\* linuwux-sigsys-handler\|^\+[[:space:]]*if (TargetSysHandler != 0 &&' \
+    STALE_DEF_PATCHES=$(grep -rlE \
+        '\+uint64_t TargetSysHandler|\+static void detect_cpu_vendor|\+static void patch_kuser|\+linuwux_cpuid_spoof|\+linuwux_sigsys_route|\+linuwux-hooks-include|\+linuwux-cpuid-handler|\+linuwux-sigsys-handler' \
         patches/wine 2>/dev/null || true)
     if [[ -n "$STALE_DEF_PATCHES" ]]; then
-        die "Patch(es) below still add content that now lives in linuwux_hooks*.c, remove it from: $STALE_DEF_PATCHES"
+        die "Patch(es) below still add content that lives in linuwux_hooks*.c – remove it from: $STALE_DEF_PATCHES"
     fi
 }
 
