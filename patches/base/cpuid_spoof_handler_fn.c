@@ -31,8 +31,6 @@ static int linuwux_cpuid_spoof(siginfo_t *siginfo, void *sigcontext, ucontext_t 
           spoof_rip[0] == 0x0F && spoof_rip[1] == 0xA2))
         return 0;
 
-    linuwux_log("cpuid handle leaf=0x%x sub=0x%x\n", spoof_leaf, spoof_subleaf);
-
     switch (spoof_leaf) {
         case 1:
             spoof_uc->uc_mcontext.gregs[REG_RAX] = spoof_leaf1_eax;
@@ -104,7 +102,6 @@ static int linuwux_cpuid_spoof(siginfo_t *siginfo, void *sigcontext, ucontext_t 
             break;
 
         default:
-            linuwux_log("cpuid native leaf=0x%x sub=0x%x\n", spoof_leaf, spoof_subleaf);
             /* Disable CPUID faulting for real CPUID call */
             syscall(SYS_arch_prctl, ARCH_SET_CPUID, 1);
             __asm__ volatile(
