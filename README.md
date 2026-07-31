@@ -87,7 +87,6 @@ Uses `linuwux_hooks_legacy.c` instead of the modern file (same symbols, same stu
 
 | Environment | Effect |
 |-------------|--------|
-| `SLOW=1` | Pause between steps |
 | `PATCH_BRANCH=<name>` | Branch for patch clone when `patches/` is missing |
 | `LINUWUX_DEBUG=1` | Runtime hook tracing |
 | `PROTON_AVX=1` | AVX/XSAVE in spoofed CPUID/KUSER |
@@ -113,3 +112,4 @@ Restart Steam and select the tool under the game’s *Compatibility* settings.
 - Local `patches/` is reused unless `--update-patches`.
 - Success leaves only the tarball in `dist/`; failure keeps trees for debugging.
 - SIGSYS stubs target Linux/`HAVE_SECCOMP` only (Apple handler untouched).
+- Startup version check is warn-only (never aborts the build).
