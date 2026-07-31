@@ -15,6 +15,6 @@
             ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
             ctx->uc_mcontext.gregs[REG_RCX] = target;
             ctx->uc_mcontext.gregs[REG_RIP] = target;
-            return;
+            return 1;
         }
     } else
