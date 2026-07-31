@@ -1,23 +1,43 @@
 # Proton + LinUwUx Builder
 
-A single, carefully structured Bash script (`build.sh`) that builds **proton-cachyos** or **proton-ge-custom** from source with the **LinUwUx** patch set applied, then packages a ready-to-install Steam Play compatibility tool.
+A carefully structured Bash build system that builds **proton-cachyos** or **proton-ge-custom** from source with the **LinUwUx** patch set applied, then packages a ready-to-install Steam Play compatibility tool.
 
 Other projects offer pre-built tarballs. This one gives you a reproducible, maintainable *build system* so you can generate the latest patched Proton yourself whenever upstream moves — without waiting for someone else to upload a release.
 
+## Layout
+
+```
+build.sh                 # thin orchestrator
+lib/
+  common.sh              # logging, insert helpers
+  source.sh              # clone, submodules, patch staging
+  apply-content.sh       # content-based inserts (patches/base/)
+  apply-patches.sh       # traditional .patch apply + GE protonprep
+  package.sh             # user_settings, configure, redist, verify
+patches/
+  base/                  # additive .c / .reg / .protocol fragments
+  wine/                  # remaining traditional .patch files
+  legacy-reflex/base/    # optional --legacy-reflex overlays
+  overrides/<key>/wine/  # version-specific full replacements
+```
+
 ## Why this structure is different (and better)
 
-Most LinUwUx Proton repos simply ship pre-patched binaries. That’s convenient for “download and go”, but it doesn’t scale and it hides how the patches were applied.
+Most LinUwUx Proton repos simply ship pre-patched binaries. That's convenient for "download and go", but it doesn't scale and it hides how the patches were applied.
 
 This project is built differently on purpose:
 
-- **Version-isolated trees** — every branch/tag gets its own `-src` / `-build` / `logs/` directories. Multiple builds never clobber each other.
-- **Host-side, fail-loud patching** — LinUwUx patches are applied *before* the container ever sees the tree. If a patch or a required `Makefile.in` anchor fails, the build stops. You never ship a silently broken Proton.
-- **Clean layering** — LinUwUx is applied *on top of* upstream (GE’s `protonprep` or CachyOS’s already-patched wine-cachyos fork). We don’t replace their work.
-- **Version-specific overrides** — drop a complete set under `patches/overrides/<branch-or-tag>/wine/` and it fully replaces the common set for that version. Perfect for when a new Proton needs adjusted context.
+- **Version-isolated trees** — every branch/tag gets its own `-src` / `-build` / `logs/` directories. Multiple builds never clobber each other. `--legacy-reflex` adds a `-Legacy-Reflex` suffix so normal and legacy builds never share trees.
+- **Host-side, fail-loud patching** — LinUwUx changes are applied *before* the container ever sees the tree. If an insert, `.patch`, or `Makefile.in` anchor fails, the build stops.
+- **Content-based inserts for additive code** — CPUID defs, KUSER patch, segv/SIGSYS handlers, and `signal_init` hooks live under `patches/base/` as plain fragments and are injected by stable anchors (not fragile context diffs). Large upstream rearrangements are less likely to break the build.
+- **Modular scripts** — logic lives under `lib/` so each concern stays small and reviewable; `build.sh` only orchestrates.
+- **Unified patch log** — console messages from content inserts and traditional `.patch` applies both land in `logs/<version>/linuwux-patches.log`.
+- **Clean layering** — LinUwUx sits *on top of* upstream (GE's `protonprep` or CachyOS's already-patched wine-cachyos fork).
+- **Version-specific overrides** — drop a complete set under `patches/overrides/<branch-or-tag>/wine/` and it fully replaces the common set for that version.
 - **Local patch iteration** — the `patches/` folder is preferred over a fresh clone. Edit, re-run with `--no-clean`, iterate. Pass `--update-patches` only when you want upstream again.
 - **Live latest resolution** — no branch/tag given? It queries the remote for the newest `cachyos_*/main` or `GE-ProtonN-M` tag.
-- **Self-updating awareness** — the script checks its own version against GitHub and refuses to run if you’re on an outdated copy (offline builds still work).
-- **Proper packaging of `user_settings.py`** — the real file (not just the sample) is wired into the redist via targeted `Makefile.in` edits that die if the anchors move upstream.
+- **Self-updating awareness** — the script checks its own version against GitHub (warns instead of dying when you intentionally build from a non-`main` `PATCH_BRANCH`).
+- **Proper packaging of `user_settings.py`** — wired into the redist via targeted `Makefile.in` edits that die if the anchors move upstream.
 - **Clean on success, keep on failure** — successful builds leave only the tarball in `dist/`. Failed builds leave the trees for debugging. `--no-clean` for a fast patch-dev loop.
 
 You still get pre-built releases for convenience, but the primary deliverable is the builder itself.
@@ -28,15 +48,13 @@ You still get pre-built releases for convenience, but the primary deliverable is
 
 ## What it produces
 
-A compressed redistributable in `dist/`:
-
 ```
-dist/<version>-LinUwUx.tar.xz                   # CachyOS (xz when available)
-dist/<version>-LinUwUx.tar.gz                   # GE, or when xz is unavailable
+dist/<version>-LinUwUx.tar.xz                    # CachyOS (xz when available)
+dist/<version>-LinUwUx.tar.gz                    # GE, or when xz is unavailable
 dist/<version>-LinUwUx-Legacy-Reflex.tar.{xz,gz} # only with --legacy-reflex
 ```
 
-Install it into Steam:
+Install into Steam:
 
 ```bash
 mkdir -p ~/.steam/root/compatibilitytools.d/<version>-LinUwUx
@@ -50,34 +68,113 @@ Then restart Steam and pick the tool under a game's *Compatibility* settings.
 
 ## What the patches do
 
-The LinUwUx set layers three targeted additive changes onto Wine, plus a set of `.patch` files:
+LinUwUx is a set of ntdll/server hooks that make Wine look more like a “normal” Windows box to anti-cheat and games that fingerprint the environment. The pieces work together at runtime roughly like this:
 
-- **HwProfileGuid** — adds a stable hardware-profile GUID to the registry
-  (`wine.inf.in`) so the guest presents a consistent machine identity.
-  Content lives in `patches/base/hwprofile_guid.reg`.
-- **faketime request** — adds a `set_faketime` request to the Wine server protocol
-  (`protocol.def`), used to spoof the reported time.
-  Content lives in `patches/base/set_faketime.protocol`.
-- **CPUID spoofing** — injects `cpuid_spoof_defs.c` into the ntdll unix signal handler
-  and adds handling for CPUID leaf `0x336933`, so the guest sees a spoofed CPU identity.
+1. Process start → `detect_cpu_vendor()` fills spoof tables; `ARCH_SET_CPUID` makes guest `CPUID` fault.
+2. Guest `CPUID` → `segv_handler` rewrites registers (identity spoof, or special control leaves).
+3. Special leaf arms a trampoline address and patches `KUSER_SHARED_DATA`.
+4. Later blocked syscalls → `sigsys_handler` can redirect into that trampoline.
 
-A `user_settings.py` — supplied in the patch repo at `patches/base/` — is copied into
-the redist, typically setting `winmm`/`version`/`reflex` DLL overrides and
-`PROTON_DISABLE_LSTEAMCLIENT=1`. The build fails if that file is missing.
+### File / symbol inventory (`patches/base/`)
 
-The patch repo is expected to provide these required files under `patches/base/`:
+#### `cpuid_spoof_defs.c` (file-scope insert)
 
-- `user_settings.py`
-- `cpuid_spoof_defs.c`
-- `hwprofile_guid.reg`
-- `set_faketime.protocol`
+| Symbol | Kind | Purpose |
+|--------|------|--------|
+| `TargetSysHandler` | `uint64_t` global | Guest trampoline address for syscall redirection; set by CPUID leaf `0x336933`. |
+| `SyscallBypassMagic` | `uint64_t` global | `0x1337133713371337` — magic used with XMM state so selected paths can bypass trampoline routing. |
+| `spoof_leaf1_*` | `unsigned int` globals | Spoofed EAX/EBX/ECX/EDX for CPUID leaf 1. |
+| `spoof_leaf40000000_*` | globals | Spoofed hypervisor leaf `0x40000000` (vendor-shaped strings). |
+| `spoof_leaf40000001_*` | globals | Spoofed hypervisor leaf `0x40000001`. |
+| `detect_cpu_vendor()` | `static void` | Runs once at init: real CPUID(0), then fills the spoof tables for GenuineIntel or AuthenticAMD. Honours `PROTON_AVX=1` for AVX-capable feature bits. |
 
-plus the common `patches/wine/` set, and optionally
-`patches/overrides/<branch-or-tag>/wine/` for version-specific patch sets.
+#### `kuser_shared_data_patch.c` (file-scope insert)
 
-`--legacy-reflex` additionally selects the legacy CPUID handler and SIGSYS
-routing content under `patches/legacy-reflex/base/`. This is opt-in: normal
-builds do not contain the legacy Reflex protocol.
+| Symbol | Kind | Purpose |
+|--------|------|--------|
+| `patch_kuser_shared_data()` | `static void` | `mprotect`s `0x7FFE0000`, forces `NtSystemRoot` to `C:\Windows`, writes a fixed OS/feature layout, clears MONITORX / RDTSCP / RDPID / RDRAND (and AVX/XSAVE unless `PROTON_AVX=1`). Called from the `0x336933` handler path. |
+
+#### `signal_init_process_hooks.c` (insert after SIGSEGV registration)
+
+Not a named function file — two statements injected into `signal_init_process`:
+
+| Statement | Purpose |
+|-----------|--------|
+| `detect_cpu_vendor();` | Fill spoof tables before any guest code runs. |
+| `syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);` | Enable CPUID faulting so guest `CPUID` enters `segv_handler`. |
+
+#### `cpuid_spoof_handler.c` (insert inside `segv_handler`)
+
+Marked `/* linuwux-cpuid-handler */`. Intercepts real `CPUID` (`0F A2`) when `si_code == SI_KERNEL` or leaf is the control leaf:
+
+| Leaf | Behaviour |
+|------|-----------|
+| `1` | Return spoofed leaf-1 registers; sets hypervisor bit in ECX unless `TargetSysHandler` is already armed. |
+| `0x40000000` / `0x40000001` | Return spoofed hypervisor vendor / interface leaves. |
+| `0x80000002`–`0x80000004` | Spoofed processor brand string. |
+| `0x336933` | Register `TargetSysHandler` from RCX, call `patch_kuser_shared_data()`, zero result regs. |
+| `0x336967` | `SERVER_START_REQ(set_faketime)` with RCX as timestamp. |
+| default | Briefly `ARCH_SET_CPUID=1`, execute real CPUID, re-enable faulting. |
+
+Always advances RIP by 2 (skip the `CPUID` opcode) and returns from the signal handler.
+
+#### `sigsys_handler.c` (insert inside Linux `sigsys_handler` only)
+
+Marked `/* linuwux-sigsys-handler */`:
+
+| Logic | Purpose |
+|-------|--------|
+| If `TargetSysHandler != 0` and XMM[5] low half ≠ bypass magic | Save syscall id into XMM[4], set RAX←RCX, RCX/RIP←`TargetSysHandler`, return — guest trampoline handles the call. |
+| If XMM[5] holds the bypass magic | Clear XMM[5] (one-shot bypass). |
+
+Anchored on the seccomp `0xffff` self-test so the Apple `sigsys_handler` is never modified.
+
+#### `hwprofile_guid.reg`
+
+Appends a fixed `HwProfileGuid` under
+`HKLM\System\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001`
+in `wine.inf.in`, so software that keys off that GUID always sees the same value.
+
+#### `set_faketime.protocol`
+
+Adds the wineserver request definition:
+
+```text
+@REQ(set_faketime)
+    timeout_t faketime;
+@REPLY
+@END
+```
+
+Paired with `patches/wine/server/0001-apply_faketime.patch` (server implementation) and the `0x336967` guest path above.
+
+#### `user_settings.py`
+
+Shipped in every redist via `Makefile.in` wiring:
+
+```python
+user_settings = {
+    "WINEDLLOVERRIDES": "winmm=n,b;version=n,b;reflex=n,b",
+    "PROTON_DISABLE_LSTEAMCLIENT": "1",
+}
+```
+
+### Traditional `.patch` (`patches/wine/`)
+
+| File | Purpose |
+|------|--------|
+| `server/0001-apply_faketime.patch` | Implements `set_faketime` inside wineserver so the protocol request actually changes server time. |
+
+### Optional legacy Reflex (`--legacy-reflex`)
+
+Compared to a normal build, this flag mainly changes:
+
+- **Isolated output** — source/build/log trees and the package name get a `-Legacy-Reflex` suffix so they never collide with a normal build of the same Proton version.
+- **Different CPUID handler** — uses the legacy Reflex body instead of the modern one (extra control leaves to arm the protocol and register two syscall trampolines).
+- **Extra SIGSYS routing** — after the protocol is armed, matching syscalls can be redirected to those legacy trampolines *before* the normal `TargetSysHandler` path runs.
+- **Alternate KUSER profile** — once armed, a separate legacy KUSER write path can be triggered (SimpleSvm-style layout) instead of only the modern `patch_kuser_shared_data()`.
+
+Everything else (CPUID identity spoof tables, faketime, HwProfileGuid, `user_settings.py`, server faketime patch) stays the same. Normal builds never include the legacy fragments.
 
 > Valve's official Proton is intentionally **not** supported (debugger-detection issues).
 > Use `cachyos` or `ge`.
@@ -131,69 +228,33 @@ offline, that check is skipped).
 
 ### Environment
 
-| Variable | Effect                                                     |
-|----------|------------------------------------------------------------|
-| `SLOW=1` | Restore the 1.2s pauses between steps (off by default).    |
+| Variable | Effect |
+|----------|--------|
+| `SLOW=1` | Restore the 1.2s pauses between steps (off by default). |
+| `PATCH_BRANCH=<name>` | Branch of this repo to clone when `patches/` is missing (default: `main`). |
+| `PROTON_AVX=1` | At runtime in the built Proton: include AVX/XSAVE in spoofed CPUID / KUSER features. |
 
 ---
 
 ## How it works
 
-The script runs a preflight (dependency + free-space checks and a startup version
-check — see Behaviour notes), then a numbered pipeline:
-
-1. **Obtain LinUwUx patches** — reuses the local `patches/` folder if present,
-   otherwise clones the patch repo. Pass `--update-patches` to force a fresh clone.
-2. **Resolve version & clone/reuse source** — derives a version id from the branch/tag,
-   then clones the Proton source (or reuses an existing tree unless `--force`).
-3. **Update submodules** — recursive and tree-filtered (Wine, DXVK, etc.); deinit +
-   re-init on `--force`.
-4. **Install patch files** — populates a fresh `patches/wine` staging directory in the
-   source tree from your LinUwUx repo: the common `wine` set, or a version-specific
-   `overrides/<branch>/wine` set if one exists.
-5. **Apply the patches** — applies the targeted fixes (HwProfileGuid, faketime,
-   CPUID definitions, KUSER data, and CPUID handler) and the `.patch` set on the host,
-   then regenerates the Wine server protocol. `--legacy-reflex` selects legacy handler
-   content and adds legacy SIGSYS routing after the common SIGSYS patch. For GE,
-   `protonprep` runs first so LinUwUx layers on top; for CachyOS the staged `.patch`
-   files are removed afterward as cleanup.
-6. **Install `user_settings.py`** — copies `patches/base/user_settings.py` into the
-   source tree; the build stops with an error if any of the required base files are missing.
-7. **Wire `user_settings.py` into the package** — patches `Makefile.in` so the file
-   ships in the redist, and fails loudly if the expected anchors have moved upstream.
-8. **Configure & build** — runs `configure.sh` (ccache enabled for CachyOS) and
-   `make redist` inside the container.
-9. **Package & verify** — finds or creates the `*-LinUwUx.*` archive, then fails the
-   build if `user_settings.py` or the core `proton`/`version` files are missing (and
-   warns on a suspiciously small archive).
-10. **Move to `dist/` & clean up** — moves the tarball to `dist/` and, unless
-    `--no-clean`, removes the `-src`/`-build` trees.
+1. **Obtain LinUwUx patches** — reuses local `patches/` if present, otherwise clones `PATCH_BRANCH` from the patch repo.
+2. **Resolve version & clone/reuse source** — version id (+ optional `-Legacy-Reflex` flavor).
+3. **Update submodules** — recursive; deinit + re-init on `--force`.
+4. **Install patch files** — stage `patches/wine` (or a version override).
+5. **Apply content inserts + `.patch`es** — host-side, fail-loud; regenerate server protocol. `--legacy-reflex` swaps the CPUID handler and adds legacy defs/SIGSYS overlay.
+6. **Install `user_settings.py`** and verify required base (and legacy) files.
+7. **Wire `user_settings.py` into `Makefile.in`**.
+8. **Configure & build** — `configure.sh` + `make redist`.
+9. **Package & verify** — archive must contain `user_settings.py` and core files.
+10. **Move to `dist/` & clean up** unless `--no-clean`.
 
 ---
 
 ## Behaviour notes
 
-- **Latest version is resolved live.** With no branch/tag given, `cachyos` queries the
-  remote for the newest `cachyos_*/main` branch and `ge` for the newest `GE-ProtonN-M`
-  tag, each falling back to a pinned default if the lookup fails.
-- **Startup version check.** On each run the script compares its own `VERSION` against
-  the copy published on GitHub. If the local script is older it stops and asks you to
-  update; if you're offline (or `curl`/`wget` are absent) the check is skipped with a
-  warning.
-- **Clean on success, keep on failure.** A successful build leaves only the tarball in
-  `dist/`; the `-src`/`-build` trees are removed so the next run starts fresh. A
-  *failed* build leaves its trees in place for debugging. Pass `--no-clean` to always
-  keep them (faster patch-development loop).
-- **LinUwUx layers on top of upstream — it doesn't replace it.** The `patches/wine`
-  directory the script wipes and repopulates is a private staging area; neither CachyOS
-  nor GE ships wine patches there. CachyOS's wine patches come pre-applied via its
-  `wine-cachyos` fork submodule, and GE's are applied by `protonprep`. LinUwUx patches
-  apply on top of that already-patched wine tree, so both sets end up in the build.
-- **Patches are applied on the host, and fail loudly.** They're applied before the
-  container ever sees the source, so a build can't silently ship without them. If a
-  patch or a required `Makefile.in` anchor doesn't apply, the script stops rather than
-  producing a quietly-broken build.
-- **Versioned folders.** Source, build, and log folders are named per version, so
-  multiple builds never clobber each other.
-- **Logs** are written to `logs/<version>/` (`build.log`, `linuwux-patches.log`, and
-  `prep.log` for GE).
+- **Content inserts prefer stable anchors** (`#include "dwarf.h"`, `void *steamclient_addr = NULL`, `sigaction(SIGSEGV, …)`, seccomp `0xffff` test inside Linux `sigsys_handler`).
+- **Idempotent markers** — e.g. `/* linuwux-cpuid-handler */`, `/* linuwux-sigsys-handler */` so re-runs skip already-applied inserts.
+- **SIGSYS targets Linux only** — the Apple `sigsys_handler` is never touched.
+- **LinUwUx layers on top of upstream** — CachyOS wine patches come pre-applied; GE's via `protonprep`.
+- **Logs** — `logs/<version>/` holds `build.log`, `linuwux-patches.log`, and `prep.log` (GE).
