@@ -14,6 +14,8 @@ install_user_settings_and_check_base() {
         || die "kuser_shared_data_patch.c not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/cpuid_spoof_handler.c" ]] \
         || die "cpuid_spoof_handler.c not found under ${PATCHES_DIR}/base/ – required"
+    [[ -f "${PATCHES_DIR}/base/cpuid_spoof_handler_fn.c" ]] \
+        || die "cpuid_spoof_handler_fn.c not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/signal_init_process_hooks.c" ]] \
         || die "signal_init_process_hooks.c not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/sigsys_handler.c" ]] \
