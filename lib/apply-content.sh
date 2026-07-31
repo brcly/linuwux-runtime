@@ -212,6 +212,7 @@ apply_legacy_reflex_definitions_fix() {
 }
 
 # g) Overlay legacy SIGSYS routing after the common SIGSYS patch has applied.
+# Splices into linuwux_sigsys_route() ahead of the modern TargetSysHandler check.
 apply_legacy_reflex_sigsys_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
@@ -246,34 +247,49 @@ apply_legacy_reflex_sigsys_fix() {
     mv "$tmp" "$target"
     grep -q 'LegacyQuerySystemInformationId &&' "$target" \
         || plog_die "legacy SIGSYS insert produced no change"
-    plog "  Inserted legacy SIGSYS routing"
+    plog "  Inserted legacy SIGSYS routing into linuwux_sigsys_route()"
 }
 
 apply_sigsys_handler_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local content_file="${PATCHES_DIR}/base/sigsys_handler.c"
+    local fn_file="${PATCHES_DIR}/base/sigsys_handler_fn.c"
 
     plog "Applying SIGSYS handler logic to $target ..."
     [[ -f "$target" ]]       || plog_die "$target not found - wine's layout may have changed upstream"
     [[ -f "$content_file" ]] || plog_die "$content_file not found - expected under patches/base/"
-
-    if grep -q 'linuwux-sigsys-handler' "$target"; then
-        plog "  SIGSYS handler logic already present"
-        return
-    fi
+    [[ -f "$fn_file" ]]      || plog_die "$fn_file not found - expected under patches/base/"
 
     # Linux/HAVE_SECCOMP handler is the one that contains the 0xffff seccomp self-test.
-    local test_line
+    local test_line func_line
     test_line=$(grep -n '0xffff' "$target" | head -1 | cut -d: -f1)
     [[ -n "$test_line" ]] || plog_die "Could not find seccomp 0xffff test (Linux sigsys_handler) in $target"
 
-    local func_line
     func_line=$(awk -v end="$test_line" '
         NR <= end && /^static void sigsys_handler/ { line = NR }
         END { if (line) print line }
     ' "$target")
     [[ -n "$func_line" ]] || plog_die "Could not find 'static void sigsys_handler' above 0xffff test"
+
+    if ! grep -qF 'linuwux-sigsys-handler-fn' "$target"; then
+        insert_before_line "$target" "$func_line" "$fn_file"
+        grep -qF 'linuwux-sigsys-handler-fn' "$target" || plog_die "sigsys fn insert produced no change"
+        plog "  Inserted linuwux_sigsys_route() before Linux sigsys_handler (line $func_line)"
+        # Re-resolve anchors after the insert shifted lines
+        test_line=$(grep -n '0xffff' "$target" | head -1 | cut -d: -f1)
+        func_line=$(awk -v end="$test_line" '
+            NR <= end && /^static void sigsys_handler/ { line = NR }
+            END { if (line) print line }
+        ' "$target")
+    else
+        plog "  SIGSYS route function already present"
+    fi
+
+    if grep -qF 'linuwux-sigsys-handler-call' "$target"; then
+        plog "  SIGSYS call stub already present"
+        return
+    fi
 
     local anchor_line
     anchor_line=$(awk -v start="$func_line" -v end="$test_line" '
@@ -284,6 +300,6 @@ apply_sigsys_handler_fix() {
     [[ -n "$anchor_line" ]] || plog_die "Could not find get_syscall_frame() inside Linux sigsys_handler"
 
     insert_after_line "$target" "$anchor_line" "$content_file"
-    grep -q 'linuwux-sigsys-handler' "$target" || plog_die "sigsys insert produced no change"
-    plog "  Inserted SIGSYS logic after line $anchor_line (Linux/HAVE_SECCOMP sigsys_handler only)"
+    grep -qF 'linuwux-sigsys-handler-call' "$target" || plog_die "sigsys call stub insert produced no change"
+    plog "  Inserted call stub after line $anchor_line (Linux/HAVE_SECCOMP sigsys_handler only)"
 }
