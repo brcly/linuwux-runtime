@@ -74,6 +74,7 @@ Environment:
   SLOW=1                     Restore the 1.2s pauses between steps (off by default)
   PATCH_BRANCH=<name>        Branch of the patch repo to clone when patches/ is missing
                              (default: main). Useful while developing on a non-main branch.
+  LINUWUX_DEBUG=1            At runtime: event-level tracing from linuwux_hooks.c
 
 Notes:
   Versioned folders are used so multiple builds never overwrite each other.
@@ -84,12 +85,15 @@ Notes:
   removed, so each run starts from a fresh clone. A failed build leaves its trees
   in place for debugging. Pass --no-clean to keep them (faster patch-dev loop).
 
-  Required additive content lives under patches/base/:
-    user_settings.py, cpuid_spoof_defs.c, kuser_shared_data_patch.c,
-    cpuid_spoof_handler.c, signal_init_process_hooks.c, sigsys_handler.c,
-    hwprofile_guid.reg, set_faketime.protocol
+  Bulk LinUwUx logic: patches/base/linuwux_hooks.c (copied into ntdll/unix,
+  #include'd into signal_x86_64.c). Signal file only gets tiny call stubs.
 
-  With --legacy-reflex, also required under patches/legacy-reflex/base/:
+  Required under patches/base/:
+    linuwux_hooks.c, linuwux_hooks_include.c,
+    cpuid_spoof_handler.c, sigsys_handler.c, signal_init_process_hooks.c,
+    user_settings.py, hwprofile_guid.reg, set_faketime.protocol
+
+  With --legacy-reflex, also under patches/legacy-reflex/base/:
     cpuid_legacy_reflex_defs.c, cpuid_legacy_reflex_handler.c,
     legacy_reflex_sigsys_handler.c
 
@@ -186,8 +190,7 @@ fi
 
 apply_regedit_fix "wine"
 apply_faketime_protocol_fix "wine"
-apply_cpuid_spoof_definitions_fix "wine"
-apply_kuser_shared_data_patch_fix "wine"
+apply_linuwux_hooks "wine"
 apply_cpuid_spoof_handler_fix "wine"
 apply_legacy_reflex_definitions_fix "wine"
 apply_signal_init_process_hooks "wine"
