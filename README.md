@@ -68,71 +68,143 @@ Then restart Steam and pick the tool under a game's *Compatibility* settings.
 
 ## What the patches do
 
-LinUwUx is a set of ntdll/server hooks that make Wine look more like a “normal” Windows box to anti-cheat and games that fingerprint the environment. The pieces work together:
+LinUwUx is a set of ntdll/server hooks that make Wine look more like a “normal” Windows box to anti-cheat and games that fingerprint the environment. The pieces work together at runtime roughly like this:
 
-### CPUID spoofing
+1. Process start → `detect_cpu_vendor()` fills spoof tables; `ARCH_SET_CPUID` makes guest `CPUID` fault.
+2. Guest `CPUID` → `segv_handler` rewrites registers (identity spoof, or special control leaves).
+3. Special leaf arms a trampoline address and patches `KUSER_SHARED_DATA`.
+4. Later blocked syscalls → `sigsys_handler` can redirect into that trampoline.
 
-Games (and some anti-cheats) call `CPUID` to fingerprint the host CPU. With `ARCH_SET_CPUID` faulting enabled, those instructions trap into `segv_handler`, where we rewrite the returned registers before the guest continues.
+### File / symbol inventory (`patches/base/`)
 
-| Piece | What it does |
-|-------|----------------|
-| `cpuid_spoof_defs.c` | Declares spoof tables + `TargetSysHandler`, and `detect_cpu_vendor()` which picks Intel- or AMD-shaped leaf values at process start (optional AVX via `PROTON_AVX=1`). |
-| `signal_init_process_hooks.c` | After SIGSEGV is registered: run `detect_cpu_vendor()`, then `ARCH_SET_CPUID = 0` so guest `CPUID` faults into our handler. |
-| `cpuid_spoof_handler.c` | In `segv_handler`, after the steamclient trampoline local: intercept real `CPUID` (`0F A2`). Spoofs leaf 1 / hypervisor leaves / brand string; special leaves `0x336933` (arm syscall routing + patch KUSER) and `0x336967` (set server faketime). Unhandled leaves briefly re-enable real CPUID, execute, then fault again. |
+#### `cpuid_spoof_defs.c` (file-scope insert)
 
-Result: the guest sees a consistent Windows-on-bare-metal style CPU identity instead of a hypervisor / Wine-telltale signature.
+| Symbol | Kind | Purpose |
+|--------|------|--------|
+| `TargetSysHandler` | `uint64_t` global | Guest trampoline address for syscall redirection; set by CPUID leaf `0x336933`. |
+| `SyscallBypassMagic` | `uint64_t` global | `0x1337133713371337` — magic used with XMM state so selected paths can bypass trampoline routing. |
+| `spoof_leaf1_*` | `unsigned int` globals | Spoofed EAX/EBX/ECX/EDX for CPUID leaf 1. |
+| `spoof_leaf40000000_*` | globals | Spoofed hypervisor leaf `0x40000000` (vendor-shaped strings). |
+| `spoof_leaf40000001_*` | globals | Spoofed hypervisor leaf `0x40000001`. |
+| `detect_cpu_vendor()` | `static void` | Runs once at init: real CPUID(0), then fills the spoof tables for GenuineIntel or AuthenticAMD. Honours `PROTON_AVX=1` for AVX-capable feature bits. |
 
-### Syscall routing (SIGSYS)
+#### `kuser_shared_data_patch.c` (file-scope insert)
 
-Once the game’s own trampoline is registered via the special CPUID leaf, blocked or interesting syscalls can be redirected into that guest code instead of Wine’s normal path.
+| Symbol | Kind | Purpose |
+|--------|------|--------|
+| `patch_kuser_shared_data()` | `static void` | `mprotect`s `0x7FFE0000`, forces `NtSystemRoot` to `C:\Windows`, writes a fixed OS/feature layout, clears MONITORX / RDTSCP / RDPID / RDRAND (and AVX/XSAVE unless `PROTON_AVX=1`). Called from the `0x336933` handler path. |
 
-| Piece | What it does |
-|-------|----------------|
-| `sigsys_handler.c` | In the **Linux / `HAVE_SECCOMP`** `sigsys_handler` only: if `TargetSysHandler` is set and the XMM “bypass magic” is not active, rewrite RIP/RCX to the game trampoline and return. Clears the magic marker when present. The Apple `sigsys_handler` is never touched. |
+#### `signal_init_process_hooks.c` (insert after SIGSEGV registration)
 
-`TargetSysHandler` is filled when the guest issues CPUID leaf `0x336933` (see handler above).
+Not a named function file — two statements injected into `signal_init_process`:
 
-### KUSER_SHARED_DATA hardening
+| Statement | Purpose |
+|-----------|--------|
+| `detect_cpu_vendor();` | Fill spoof tables before any guest code runs. |
+| `syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);` | Enable CPUID faulting so guest `CPUID` enters `segv_handler`. |
 
-Windows exposes a fixed page at `0x7FFE0000` (`KUSER_SHARED_DATA`) that many games read for OS version, features, and system root. We overwrite the important fields so those probes stay stable.
+#### `cpuid_spoof_handler.c` (insert inside `segv_handler`)
 
-| Piece | What it does |
-|-------|----------------|
-| `kuser_shared_data_patch.c` | `patch_kuser_shared_data()`: `mprotect` the page, force `NtSystemRoot` to `C:\Windows`, write a fixed feature/version layout, and clear noisy bits (MONITORX, RDTSCP, RDPID, RDRAND; AVX/XSAVE unless `PROTON_AVX=1`). Called from the `0x336933` path. |
+Marked `/* linuwux-cpuid-handler */`. Intercepts real `CPUID` (`0F A2`) when `si_code == SI_KERNEL` or leaf is the control leaf:
 
-### Hardware profile GUID
+| Leaf | Behaviour |
+|------|-----------|
+| `1` | Return spoofed leaf-1 registers; sets hypervisor bit in ECX unless `TargetSysHandler` is already armed. |
+| `0x40000000` / `0x40000001` | Return spoofed hypervisor vendor / interface leaves. |
+| `0x80000002`–`0x80000004` | Spoofed processor brand string. |
+| `0x336933` | Register `TargetSysHandler` from RCX, call `patch_kuser_shared_data()`, zero result regs. |
+| `0x336967` | `SERVER_START_REQ(set_faketime)` with RCX as timestamp. |
+| default | Briefly `ARCH_SET_CPUID=1`, execute real CPUID, re-enable faulting. |
 
-| Piece | What it does |
-|-------|----------------|
-| `hwprofile_guid.reg` | Appends a fixed `HwProfileGuid` under the hardware profile key in `wine.inf.in`, so installs that key off the GUID always see the same value. |
+Always advances RIP by 2 (skip the `CPUID` opcode) and returns from the signal handler.
 
-### Faketime
+#### `sigsys_handler.c` (insert inside Linux `sigsys_handler` only)
 
-Some titles / anti-cheats care about wall-clock consistency. LinUwUx can push a faketime into the wineserver.
+Marked `/* linuwux-sigsys-handler */`:
 
-| Piece | What it does |
-|-------|----------------|
-| `set_faketime.protocol` | Adds the `@REQ(set_faketime)` request definition so clients can talk to the server. |
-| `server/0001-apply_faketime.patch` | Server-side implementation of that request (the one remaining traditional `.patch`). |
-| CPUID leaf `0x336967` (in the handler) | Guest path that issues `SERVER_START_REQ(set_faketime)` with the desired timestamp. |
+| Logic | Purpose |
+|-------|--------|
+| If `TargetSysHandler != 0` and XMM[5] low half ≠ bypass magic | Save syscall id into XMM[4], set RAX←RCX, RCX/RIP←`TargetSysHandler`, return — guest trampoline handles the call. |
+| If XMM[5] holds the bypass magic | Clear XMM[5] (one-shot bypass). |
 
-### Proton user settings shipped in the redist
+Anchored on the seccomp `0xffff` self-test so the Apple `sigsys_handler` is never modified.
 
-| Piece | What it does |
-|-------|----------------|
-| `user_settings.py` | Default overrides: `winmm` / `version` / `reflex` native,buitin, and `PROTON_DISABLE_LSTEAMCLIENT=1`. Wired into the package via `Makefile.in` so every build ships them. |
+#### `hwprofile_guid.reg`
 
-### Optional legacy Reflex (`--legacy-reflex`)
+Appends a fixed `HwProfileGuid` under
+`HKLM\System\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001`
+in `wine.inf.in`, so software that keys off that GUID always sees the same value.
 
-Extra protocol for older Reflex-style flows. Isolated build flavor (`-Legacy-Reflex` trees and package name):
+#### `set_faketime.protocol`
 
-| File | Role |
-|------|------|
-| `cpuid_legacy_reflex_defs.c` | Legacy handler globals + legacy KUSER patch helper |
-| `cpuid_legacy_reflex_handler.c` | Alternate CPUID handler body (same insert marker / contract) |
-| `legacy_reflex_sigsys_handler.c` | Extra SIGSYS routing layered on the common `TargetSysHandler` block |
+Adds the wineserver request definition:
 
-Normal builds never include these paths.
+```text
+@REQ(set_faketime)
+    timeout_t faketime;
+@REPLY
+@END
+```
+
+Paired with `patches/wine/server/0001-apply_faketime.patch` (server implementation) and the `0x336967` guest path above.
+
+#### `user_settings.py`
+
+Shipped in every redist via `Makefile.in` wiring:
+
+```python
+user_settings = {
+    "WINEDLLOVERRIDES": "winmm=n,b;version=n,b;reflex=n,b",
+    "PROTON_DISABLE_LSTEAMCLIENT": "1",
+}
+```
+
+### Traditional `.patch` (`patches/wine/`)
+
+| File | Purpose |
+|------|--------|
+| `server/0001-apply_faketime.patch` | Implements `set_faketime` inside wineserver so the protocol request actually changes server time. |
+
+### Optional legacy Reflex (`patches/legacy-reflex/base/`, `--legacy-reflex`)
+
+Isolated build flavor (`-Legacy-Reflex` trees and package name). Replaces the normal CPUID handler body and adds extra globals + SIGSYS routing.
+
+#### `cpuid_legacy_reflex_defs.c`
+
+| Symbol | Kind | Purpose |
+|--------|------|--------|
+| `LegacyQuerySystemInformationHandler` | `uint64_t` | Trampoline for legacy QuerySystemInformation-style calls. |
+| `LegacyQueryFullAttributesFileHandler` | `uint64_t` | Trampoline for legacy QueryFullAttributesFile-style calls. |
+| `LegacyQuerySystemInformationId` | `uint32_t` | Syscall id that should route to the first trampoline (`0xffffffff` until set). |
+| `LegacyQueryFullAttributesFileId` | `uint32_t` | Syscall id for the second trampoline. |
+| `LegacyTargetInitialized` | `int` | Set when the guest arms the legacy protocol. |
+| `patch_legacy_kuser_shared_data()` | `static void` | SimpleSvm-ordered KUSER writes (intentional overlapping stores). |
+
+#### `cpuid_legacy_reflex_handler.c`
+
+Same insert site/marker as the modern handler, with extra leaves:
+
+| Leaf | Behaviour |
+|------|-----------|
+| `1`, brand string | After legacy init, return the legacy fixed identity; otherwise same as modern spoof tables. |
+| `0x69696969` | Set `LegacyTargetInitialized = 1`. |
+| `0x336933` | If legacy armed: register `LegacyQuerySystemInformationHandler`; else modern `TargetSysHandler` + `patch_kuser_shared_data()`. |
+| `0x336943` | Register `LegacyQuerySystemInformationId` from RCX. |
+| `0x336934` | Register `LegacyQueryFullAttributesFileHandler`. |
+| `0x336944` | Register `LegacyQueryFullAttributesFileId`. |
+| `0x1337` | If legacy armed: `patch_legacy_kuser_shared_data()`; else fall through to native CPUID. |
+| `0x336967` | Same faketime server request as modern. |
+
+#### `legacy_reflex_sigsys_handler.c`
+
+Inserted **in front of** the common `if (TargetSysHandler != 0 && …)` block:
+
+| Logic | Purpose |
+|-------|--------|
+| If `LegacyTargetInitialized` and RAX matches a registered legacy syscall id (with address checks on RCX/R10) | Redirect RIP to the matching legacy trampoline. |
+| Else | Fall through into the normal `TargetSysHandler` SIGSYS path. |
+
+Normal (non-`--legacy-reflex`) builds never load these three files.
 
 > Valve's official Proton is intentionally **not** supported (debugger-detection issues).
 > Use `cachyos` or `ge`.
