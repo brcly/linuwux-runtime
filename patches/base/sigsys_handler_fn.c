@@ -1,4 +1,18 @@
 /* linuwux-sigsys-handler-fn */
+#ifndef LINUWUX_LOG_DEFINED
+#define LINUWUX_LOG_DEFINED
+static void linuwux_log(const char *fmt, ...)
+{
+    va_list ap;
+    if (!getenv("LINUWUX_DEBUG"))
+        return;
+    fprintf(stderr, "[linuwux] ");
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+#endif
+
 /* Returns 1 if sigsys_handler should return immediately. */
 static int linuwux_sigsys_route(void *sigcontext)
 {
@@ -7,6 +21,9 @@ static int linuwux_sigsys_route(void *sigcontext)
 
     if (TargetSysHandler != 0 &&
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) != 0x1337133713371337) {
+        linuwux_log("sigsys redirect rax=%llx → TargetSysHandler=%p\n",
+                    (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX],
+                    (void *)TargetSysHandler);
         xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
         ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
         ctx->uc_mcontext.gregs[REG_RCX] = TargetSysHandler;
@@ -14,8 +31,10 @@ static int linuwux_sigsys_route(void *sigcontext)
         return 1;
     }
 
-    if ((xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) == 0x1337133713371337)
+    if ((xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) == 0x1337133713371337) {
+        linuwux_log("sigsys clear bypass magic\n");
         xmm_regs[5] = 0;
+    }
 
     return 0;
 }
