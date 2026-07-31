@@ -7,6 +7,21 @@ unsigned int spoof_leaf1_eax, spoof_leaf1_ebx, spoof_leaf1_ecx, spoof_leaf1_edx;
 unsigned int spoof_leaf40000000_eax, spoof_leaf40000000_ebx, spoof_leaf40000000_ecx, spoof_leaf40000000_edx;
 unsigned int spoof_leaf40000001_eax, spoof_leaf40000001_ebx, spoof_leaf40000001_ecx, spoof_leaf40000001_edx;
 
+#ifndef LINUWUX_LOG_DEFINED
+#define LINUWUX_LOG_DEFINED
+/* Opt-in tracing: set LINUWUX_DEBUG=1 in the environment. */
+static void linuwux_log(const char *fmt, ...)
+{
+    va_list ap;
+    if (!getenv("LINUWUX_DEBUG"))
+        return;
+    fprintf(stderr, "[linuwux] ");
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+#endif
+
 // Function to detect CPU vendor at startup
 static void detect_cpu_vendor(void) {
     unsigned int eax, ebx, ecx, edx;
@@ -43,6 +58,8 @@ static void detect_cpu_vendor(void) {
         spoof_leaf40000001_ecx = 0;
         spoof_leaf40000001_edx = 0;
 
+        linuwux_log("detect_cpu_vendor: Intel (avx=%d)\n", avx);
+
     } else if (ebx == 0x68747541 && edx == 0x69746E65 && ecx == 0x444D4163) {
         // "AuthenticAMD" - AMD CPU
 
@@ -63,6 +80,11 @@ static void detect_cpu_vendor(void) {
         spoof_leaf40000001_ebx = 0;
         spoof_leaf40000001_ecx = 0;
         spoof_leaf40000001_edx = 0;
+
+        linuwux_log("detect_cpu_vendor: AMD (avx=%d)\n", avx);
+    } else {
+        linuwux_log("detect_cpu_vendor: unknown vendor ebx=%08x edx=%08x ecx=%08x\n",
+                    ebx, edx, ecx);
     }
     // Sorry Zhaoxin/Hygon CPU owners :(
 }
