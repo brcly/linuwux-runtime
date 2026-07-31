@@ -56,46 +56,32 @@ Examples:
   $(basename "$0") cachyos <branch>
   $(basename "$0") ge                       # latest GE tag (or master)
   $(basename "$0") ge GE-Proton11-3
-  $(basename "$0") ge GE-Proton9-4
-  $(basename "$0") --container-engine=docker ge
   $(basename "$0") --legacy-reflex ge GE-Proton11-3
-  $(basename "$0") --update-patches         # force re-download of patches/
+  $(basename "$0") --update-patches
 
 Options:
-  -f, --force               Force full re-clone and clean rebuild of the Proton source
-  -k, --no-clean            Keep the -src/-build trees after a successful build
-                            (default: they're removed, leaving only the tarball)
-  --legacy-reflex           Include the legacy Reflex compatibility protocol
-  --update-patches          Delete and re-clone the patches/ folder from upstream
-  --container-engine=<name> Container engine to build with (default: podman)
+  -f, --force               Force full re-clone and clean rebuild
+  -k, --no-clean            Keep -src/-build trees after success
+  --legacy-reflex           Use linuwux_hooks_legacy.c (older Reflex protocol)
+  --update-patches          Re-clone the patches/ folder from upstream
+  --container-engine=<name> Container engine (default: podman)
   -h, --help                Show this help
 
 Environment:
-  SLOW=1                     Restore the 1.2s pauses between steps (off by default)
-  PATCH_BRANCH=<name>        Branch of the patch repo to clone when patches/ is missing
-                             (default: main). Useful while developing on a non-main branch.
-  LINUWUX_DEBUG=1            At runtime: event-level tracing from linuwux_hooks.c
+  SLOW=1                     Pause between steps
+  PATCH_BRANCH=<name>        Patch repo branch when patches/ is missing (default: main)
+  LINUWUX_DEBUG=1            Runtime event tracing from hooks
 
 Notes:
-  Versioned folders are used so multiple builds never overwrite each other.
-  With no branch given:
-    - cachyos resolves the latest cachyos_*/main branch from the remote
-    - ge resolves the newest GE-ProtonN-M tag (falls back to master)
-  On success the finished tarball is moved to dist/ and the -src/-build trees are
-  removed, so each run starts from a fresh clone. A failed build leaves its trees
-  in place for debugging. Pass --no-clean to keep them (faster patch-dev loop).
-
-  Bulk LinUwUx logic: patches/base/linuwux_hooks.c (copied into ntdll/unix,
-  #include'd into signal_x86_64.c). Signal file only gets tiny call stubs.
+  Bulk logic: patches/base/linuwux_hooks.c (or legacy-reflex/linuwux_hooks_legacy.c).
+  Copied to ntdll/unix as linuwux_hooks.c and #include'd into signal_x86_64.c.
+  Signal file only gets tiny call stubs.
 
   Required under patches/base/:
-    linuwux_hooks.c, linuwux_hooks_include.c,
-    cpuid_spoof_handler.c, sigsys_handler.c, signal_init_process_hooks.c,
-    user_settings.py, hwprofile_guid.reg, set_faketime.protocol
+    linuwux_hooks.c, user_settings.py, hwprofile_guid.reg, set_faketime.protocol
 
-  With --legacy-reflex, also under patches/legacy-reflex/base/:
-    cpuid_legacy_reflex_defs.c, cpuid_legacy_reflex_handler.c,
-    legacy_reflex_sigsys_handler.c
+  With --legacy-reflex:
+    patches/legacy-reflex/linuwux_hooks_legacy.c
 
 EOF
     exit 0
@@ -113,7 +99,7 @@ while [[ $# -gt 0 ]]; do
         --update-patches) UPDATE_PATCHES=1; shift ;;
         --container-engine=*)
             CONTAINER_ENGINE="${1#--container-engine=}"
-            [[ -n "$CONTAINER_ENGINE" ]] || die "--container-engine requires a value (e.g. --container-engine=docker)"
+            [[ -n "$CONTAINER_ENGINE" ]] || die "--container-engine requires a value"
             shift
             ;;
         cachyos|cachy|ge|proton-ge|eggroll)
@@ -121,7 +107,7 @@ while [[ $# -gt 0 ]]; do
             [[ $# -gt 0 && ! "$1" =~ ^- ]] && { BRANCH="$1"; shift; }
             ;;
         valve|proton)
-            die "Valve/official Proton builds are not currently supported (debugger detection issues). Use cachyos or ge."
+            die "Valve/official Proton builds are not currently supported. Use cachyos or ge."
             ;;
         *)
             die "Unknown argument: $1  (use --help)"
@@ -192,11 +178,9 @@ apply_regedit_fix "wine"
 apply_faketime_protocol_fix "wine"
 apply_linuwux_hooks "wine"
 apply_cpuid_spoof_handler_fix "wine"
-apply_legacy_reflex_definitions_fix "wine"
 apply_signal_init_process_hooks "wine"
 apply_sigsys_handler_fix "wine"
 apply_linuwux_patches "wine"
-apply_legacy_reflex_sigsys_fix "wine"
 
 if [[ "$VARIANT" == "cachyos" ]]; then
     find patches/wine -name '*.patch' -delete
