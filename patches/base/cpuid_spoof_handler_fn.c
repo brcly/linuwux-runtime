@@ -1,4 +1,18 @@
 /* linuwux-cpuid-handler-fn */
+#ifndef LINUWUX_LOG_DEFINED
+#define LINUWUX_LOG_DEFINED
+static void linuwux_log(const char *fmt, ...)
+{
+    va_list ap;
+    if (!getenv("LINUWUX_DEBUG"))
+        return;
+    fprintf(stderr, "[linuwux] ");
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+#endif
+
 /* Returns 1 if the fault was handled and segv_handler should return. */
 static int linuwux_cpuid_spoof(siginfo_t *siginfo, void *sigcontext, ucontext_t *ucontext)
 {
@@ -16,6 +30,8 @@ static int linuwux_cpuid_spoof(siginfo_t *siginfo, void *sigcontext, ucontext_t 
     if (!((siginfo->si_code == SI_KERNEL || spoof_leaf == 0x336933) &&
           spoof_rip[0] == 0x0F && spoof_rip[1] == 0xA2))
         return 0;
+
+    linuwux_log("cpuid handle leaf=0x%x sub=0x%x\n", spoof_leaf, spoof_subleaf);
 
     switch (spoof_leaf) {
         case 1:
@@ -63,6 +79,7 @@ static int linuwux_cpuid_spoof(siginfo_t *siginfo, void *sigcontext, ucontext_t 
         case 0x336933:
             MESSAGE("Spoofing CPUID leaf %x\n", spoof_leaf);
             TargetSysHandler = spoof_uc->uc_mcontext.gregs[REG_RCX];
+            linuwux_log("cpuid 0x336933 TargetSysHandler=%p\n", (void *)TargetSysHandler);
             patch_kuser_shared_data();
             spoof_uc->uc_mcontext.gregs[REG_RAX] = 0x0;
             spoof_uc->uc_mcontext.gregs[REG_RBX] = 0x0;
@@ -72,6 +89,8 @@ static int linuwux_cpuid_spoof(siginfo_t *siginfo, void *sigcontext, ucontext_t 
 
         case 0x336967:
             MESSAGE("Setting Faketime to %llx... \n", spoof_uc->uc_mcontext.gregs[REG_RCX]);
+            linuwux_log("cpuid 0x336967 faketime=%llx\n",
+                        (unsigned long long)spoof_uc->uc_mcontext.gregs[REG_RCX]);
             SERVER_START_REQ( set_faketime )
             {
                 req->faketime = spoof_uc->uc_mcontext.gregs[REG_RCX];
@@ -85,6 +104,7 @@ static int linuwux_cpuid_spoof(siginfo_t *siginfo, void *sigcontext, ucontext_t 
             break;
 
         default:
+            linuwux_log("cpuid native leaf=0x%x sub=0x%x\n", spoof_leaf, spoof_subleaf);
             /* Disable CPUID faulting for real CPUID call */
             syscall(SYS_arch_prctl, ARCH_SET_CPUID, 1);
             __asm__ volatile(
