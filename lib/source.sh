@@ -194,22 +194,8 @@ stage_wine_patches() {
     rm -rf patches/wine
     mkdir -p patches/wine
 
-    local override_key="$BRANCH"
-    if [[ "$VARIANT" == "cachyos" ]]; then
-        override_key="${BRANCH%/*}"
-    fi
-
-    if [[ -d "$PATCHES_DIR/overrides/$override_key/wine" ]]; then
-        info "Using version-specific overrides for '$override_key'"
-        info "  (common patches under patches/wine/ are NOT applied when an override exists)"
-        cp -r "$PATCHES_DIR/overrides/$override_key/wine/." patches/wine/
-    else
-        info "No version-specific overrides for '$override_key' – using common patches"
-        if [[ -d "$PATCHES_DIR/wine" ]]; then
-            cp -r "$PATCHES_DIR/wine/." patches/wine/
-        fi
-    fi
-
+    [[ -d "$PATCHES_DIR/wine" ]] || die "No patches/wine/ under $PATCHES_DIR"
+    cp -r "$PATCHES_DIR/wine/." patches/wine/
     rm -rf patches/wine/loader
 
     [[ -n "$(find patches/wine -name '*.patch' 2>/dev/null)" ]] \
@@ -223,7 +209,7 @@ stage_wine_patches() {
         '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data\|^\+[[:space:]]*detect_cpu_vendor();\|^\+[[:space:]]*/\* linuwux-cpuid-handler\|^\+[[:space:]]*/\* linuwux-sigsys-handler\|^\+[[:space:]]*if (TargetSysHandler != 0 &&' \
         patches/wine 2>/dev/null || true)
     if [[ -n "$STALE_DEF_PATCHES" ]]; then
-        die "Patch(es) below still add content that now lives exclusively in patches/base/, remove it from: $STALE_DEF_PATCHES"
+        die "Patch(es) below still add content that now lives in linuwux_hooks*.c, remove it from: $STALE_DEF_PATCHES"
     fi
 }
 
