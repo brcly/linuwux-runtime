@@ -8,20 +8,16 @@ install_user_settings_and_check_base() {
     local user_settings_src="${PATCHES_DIR}/base/user_settings.py"
     [[ -f "$user_settings_src" ]] \
         || die "user_settings.py not found at $user_settings_src – obtain it and place it there before building"
-    [[ -f "${PATCHES_DIR}/base/cpuid_spoof_defs.c" ]] \
-        || die "cpuid_spoof_defs.c not found under ${PATCHES_DIR}/base/ – required"
-    [[ -f "${PATCHES_DIR}/base/kuser_shared_data_patch.c" ]] \
-        || die "kuser_shared_data_patch.c not found under ${PATCHES_DIR}/base/ – required"
+    [[ -f "${PATCHES_DIR}/base/linuwux_hooks.c" ]] \
+        || die "linuwux_hooks.c not found under ${PATCHES_DIR}/base/ – required"
+    [[ -f "${PATCHES_DIR}/base/linuwux_hooks_include.c" ]] \
+        || die "linuwux_hooks_include.c not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/cpuid_spoof_handler.c" ]] \
         || die "cpuid_spoof_handler.c not found under ${PATCHES_DIR}/base/ – required"
-    [[ -f "${PATCHES_DIR}/base/cpuid_spoof_handler_fn.c" ]] \
-        || die "cpuid_spoof_handler_fn.c not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/signal_init_process_hooks.c" ]] \
         || die "signal_init_process_hooks.c not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/sigsys_handler.c" ]] \
         || die "sigsys_handler.c not found under ${PATCHES_DIR}/base/ – required"
-    [[ -f "${PATCHES_DIR}/base/sigsys_handler_fn.c" ]] \
-        || die "sigsys_handler_fn.c not found under ${PATCHES_DIR}/base/ – required"
     if [[ $LEGACY_REFLEX -eq 1 ]]; then
         [[ -f "${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_defs.c" ]] \
             || die "cpuid_legacy_reflex_defs.c not found – required for legacy Reflex"
