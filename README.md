@@ -1,8 +1,25 @@
 # Proton + LinUwUx Builder
 
-A single, carefully structured Bash script (`build.sh`) that builds **proton-cachyos** or **proton-ge-custom** from source with the **LinUwUx** patch set applied, then packages a ready-to-install Steam Play compatibility tool.
+A carefully structured Bash build system that builds **proton-cachyos** or **proton-ge-custom** from source with the **LinUwUx** patch set applied, then packages a ready-to-install Steam Play compatibility tool.
 
 Other projects offer pre-built tarballs. This one gives you a reproducible, maintainable *build system* so you can generate the latest patched Proton yourself whenever upstream moves — without waiting for someone else to upload a release.
+
+## Layout
+
+```
+build.sh                 # thin orchestrator
+lib/
+  common.sh              # logging, insert helpers
+  source.sh              # clone, submodules, patch staging
+  apply-content.sh       # content-based inserts (patches/base/)
+  apply-patches.sh       # traditional .patch apply + GE protonprep
+  package.sh             # user_settings, configure, redist, verify
+patches/
+  base/                  # additive .c / .reg / .protocol fragments
+  wine/                  # remaining traditional .patch files
+  legacy-reflex/base/    # optional --legacy-reflex overlays
+  overrides/<key>/wine/  # version-specific full replacements
+```
 
 ## Why this structure is different (and better)
 
@@ -12,7 +29,8 @@ This project is built differently on purpose:
 
 - **Version-isolated trees** — every branch/tag gets its own `-src` / `-build` / `logs/` directories. Multiple builds never clobber each other. `--legacy-reflex` adds a `-Legacy-Reflex` suffix so normal and legacy builds never share trees.
 - **Host-side, fail-loud patching** — LinUwUx changes are applied *before* the container ever sees the tree. If an insert, `.patch`, or `Makefile.in` anchor fails, the build stops.
-- **Content-based inserts for additive code** — CPUID defs, KUSER patch, handler body, and `signal_init` hooks live under `patches/base/` as plain `.c` fragments and are injected by stable anchors (not fragile context diffs). Large upstream rearrangements are less likely to break the build.
+- **Content-based inserts for additive code** — CPUID defs, KUSER patch, segv/SIGSYS handlers, and `signal_init` hooks live under `patches/base/` as plain fragments and are injected by stable anchors (not fragile context diffs). Large upstream rearrangements are less likely to break the build.
+- **Modular scripts** — logic lives under `lib/` so each concern stays small and reviewable; `build.sh` only orchestrates.
 - **Unified patch log** — console messages from content inserts and traditional `.patch` applies both land in `logs/<version>/linuwux-patches.log`.
 - **Clean layering** — LinUwUx sits *on top of* upstream (GE's `protonprep` or CachyOS's already-patched wine-cachyos fork).
 - **Version-specific overrides** — drop a complete set under `patches/overrides/<branch-or-tag>/wine/` and it fully replaces the common set for that version.
@@ -60,12 +78,14 @@ Then restart Steam and pick the tool under a game's *Compatibility* settings.
 | `kuser_shared_data_patch.c` | `patch_kuser_shared_data()` at file scope |
 | `cpuid_spoof_handler.c` | CPUID spoof body inserted after `steamclient_addr` in `segv_handler` |
 | `signal_init_process_hooks.c` | `detect_cpu_vendor()` + `ARCH_SET_CPUID` after SIGSEGV registration |
+| `sigsys_handler.c` | `TargetSysHandler` routing inserted in the Linux/`HAVE_SECCOMP` `sigsys_handler` only |
 | `user_settings.py` | Shipped in the redist (`winmm`/`version`/`reflex` overrides, etc.) |
 
 ### Traditional `.patch` files (`patches/wine/`)
 
-- `dlls/ntdll/unix/0001-sigsys_handler.patch` — SIGSYS routing for `TargetSysHandler`
 - `server/0001-apply_faketime.patch` — server-side faketime handling
+
+(SIGSYS was previously a `.patch`; it is now a content insert so only the Linux handler is touched.)
 
 ### Optional legacy Reflex (`--legacy-reflex`)
 
@@ -156,7 +176,8 @@ PATCH_BRANCH=dev/content-based-handler ./build.sh --update-patches
 
 ## Behaviour notes
 
-- **Content inserts prefer stable anchors** (`#include "dwarf.h"`, `void *steamclient_addr = NULL`, `sigaction(SIGSEGV, …)`).
-- **Idempotent markers** — e.g. `/* linuwux-cpuid-handler */` so re-runs skip already-applied inserts.
+- **Content inserts prefer stable anchors** (`#include "dwarf.h"`, `void *steamclient_addr = NULL`, `sigaction(SIGSEGV, …)`, seccomp `0xffff` test inside Linux `sigsys_handler`).
+- **Idempotent markers** — e.g. `/* linuwux-cpuid-handler */`, `/* linuwux-sigsys-handler */` so re-runs skip already-applied inserts.
+- **SIGSYS targets Linux only** — the Apple `sigsys_handler` is never touched.
 - **LinUwUx layers on top of upstream** — CachyOS wine patches come pre-applied; GE's via `protonprep`.
 - **Logs** — `logs/<version>/` holds `build.log`, `linuwux-patches.log`, and `prep.log` (GE).
