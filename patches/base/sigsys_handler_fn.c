@@ -31,10 +31,8 @@ static int linuwux_sigsys_route(void *sigcontext)
         return 1;
     }
 
-    if ((xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) == 0x1337133713371337) {
-        linuwux_log("sigsys clear bypass magic\n");
+    if ((xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) == 0x1337133713371337)
         xmm_regs[5] = 0;
-    }
 
     return 0;
 }
