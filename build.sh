@@ -73,7 +73,6 @@ Options:
   -h, --help                  Show this help
 
 Environment:
-  SLOW=1                      Pause ~1.2s between major steps
   PATCH_BRANCH=<name>         Branch of this repo to clone when patches/ is
                               missing (default: main)
   LINUWUX_DEBUG=1             Runtime: event tracing from linuwux_hooks*.c
@@ -156,22 +155,12 @@ header "  Variant     : $VARIANT"
 header "  Branch/Tag  : $BRANCH"
 header "  Legacy Reflex: $([[ $LEGACY_REFLEX -eq 1 ]] && echo enabled || echo disabled)"
 header "$HR"
-pause
 
 ensure_patches_dir
-pause
-
 setup_paths
-pause
-
 clone_or_reuse_source
-pause
-
 update_submodules
-pause
-
 stage_wine_patches
-pause
 
 # ------------------------------------------------------------
 # Apply LinUwUx fixes and patches
@@ -180,7 +169,6 @@ init_patch_log
 
 if [[ "$VARIANT" == "ge" ]]; then
     ge_protonprep
-    pause
 else
     info "CachyOS – applying LinUwUx patches on the host (not relying on upstream auto-apply)"
 fi
@@ -197,17 +185,10 @@ if [[ "$VARIANT" == "cachyos" ]]; then
     # Avoid CachyOS's own patch pass re-applying staged files after we already did.
     find patches/wine -name '*.patch' -delete
 fi
-pause
 
 install_user_settings_and_check_base
-pause
-
 wire_makefile_user_settings
-pause
-
 run_configure_and_build
-pause
-
 package_and_verify
 cleanup_trees
 print_success
