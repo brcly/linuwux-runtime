@@ -84,27 +84,64 @@ apply_cpuid_spoof_handler_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local handler_file="${PATCHES_DIR}/base/cpuid_spoof_handler.c"
+    local handler_fn_file="${PATCHES_DIR}/base/cpuid_spoof_handler_fn.c"
     local handler_label="CPUID spoof"
 
     if [[ $LEGACY_REFLEX -eq 1 ]]; then
         handler_file="${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_handler.c"
         handler_label="legacy Reflex CPUID"
+        handler_fn_file=""
     fi
 
     plog "Applying $handler_label handler logic to $target ..."
     [[ -f "$target" ]]       || plog_die "$target not found - wine's layout may have changed upstream"
     [[ -f "$handler_file" ]] || plog_die "$handler_file not found - expected for $handler_label"
 
+    # Modern path: file-scope function + small call stub in segv_handler.
+    # Legacy path: keep the full inline block (unchanged for this experiment).
+    if [[ -n "$handler_fn_file" ]]; then
+        [[ -f "$handler_fn_file" ]] || plog_die "$handler_fn_file not found - expected under patches/base/"
+
+        if ! grep -q 'linuwux-cpuid-handler-fn' "$target"; then
+            local segv_line
+            segv_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
+            [[ -n "$segv_line" ]] || plog_die "Could not find 'static void segv_handler' in $target"
+            insert_before_line "$target" "$segv_line" "$handler_fn_file"
+            grep -q 'linuwux-cpuid-handler-fn' "$target" || plog_die "handler fn insert produced no change"
+            plog "  Inserted linuwux_cpuid_spoof() before segv_handler (line $segv_line)"
+        else
+            plog "  Handler function already present"
+        fi
+
+        if grep -q 'linuwux-cpuid-handler' "$target"; then
+            plog "  Handler call stub already present"
+            return
+        fi
+
+        local func_line anchor_line
+        func_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
+        [[ -n "$func_line" ]] || plog_die "Could not find 'static void segv_handler' in $target"
+        anchor_line=$(awk -v start="$func_line" '
+            NR >= start && /void[[:space:]]*\*[[:space:]]*steamclient_addr[[:space:]]*=[[:space:]]*NULL/ { print NR; exit }
+        ' "$target")
+        [[ -n "$anchor_line" ]] || plog_die "Could not find 'void *steamclient_addr = NULL' inside segv_handler after line $func_line"
+
+        insert_after_line "$target" "$anchor_line" "$handler_file"
+        grep -q 'linuwux-cpuid-handler' "$target" || plog_die "handler call stub insert produced no change"
+        plog "  Inserted call stub after line $anchor_line (after steamclient_addr in segv_handler)"
+        return
+    fi
+
+    # Legacy: single inline block after steamclient_addr
     if grep -q 'linuwux-cpuid-handler' "$target"; then
         plog "  Handler logic already present"
         return
     fi
 
-    local func_line
+    local func_line anchor_line
     func_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
     [[ -n "$func_line" ]] || plog_die "Could not find 'static void segv_handler' in $target"
 
-    local anchor_line
     anchor_line=$(awk -v start="$func_line" '
         NR >= start && /void[[:space:]]*\*[[:space:]]*steamclient_addr[[:space:]]*=[[:space:]]*NULL/ { print NR; exit }
     ' "$target")
