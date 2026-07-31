@@ -165,46 +165,16 @@ user_settings = {
 |------|--------|
 | `server/0001-apply_faketime.patch` | Implements `set_faketime` inside wineserver so the protocol request actually changes server time. |
 
-### Optional legacy Reflex (`patches/legacy-reflex/base/`, `--legacy-reflex`)
+### Optional legacy Reflex (`--legacy-reflex`)
 
-Isolated build flavor (`-Legacy-Reflex` trees and package name). Replaces the normal CPUID handler body and adds extra globals + SIGSYS routing.
+Compared to a normal build, this flag mainly changes:
 
-#### `cpuid_legacy_reflex_defs.c`
+- **Isolated output** — source/build/log trees and the package name get a `-Legacy-Reflex` suffix so they never collide with a normal build of the same Proton version.
+- **Different CPUID handler** — uses the legacy Reflex body instead of the modern one (extra control leaves to arm the protocol and register two syscall trampolines).
+- **Extra SIGSYS routing** — after the protocol is armed, matching syscalls can be redirected to those legacy trampolines *before* the normal `TargetSysHandler` path runs.
+- **Alternate KUSER profile** — once armed, a separate legacy KUSER write path can be triggered (SimpleSvm-style layout) instead of only the modern `patch_kuser_shared_data()`.
 
-| Symbol | Kind | Purpose |
-|--------|------|--------|
-| `LegacyQuerySystemInformationHandler` | `uint64_t` | Trampoline for legacy QuerySystemInformation-style calls. |
-| `LegacyQueryFullAttributesFileHandler` | `uint64_t` | Trampoline for legacy QueryFullAttributesFile-style calls. |
-| `LegacyQuerySystemInformationId` | `uint32_t` | Syscall id that should route to the first trampoline (`0xffffffff` until set). |
-| `LegacyQueryFullAttributesFileId` | `uint32_t` | Syscall id for the second trampoline. |
-| `LegacyTargetInitialized` | `int` | Set when the guest arms the legacy protocol. |
-| `patch_legacy_kuser_shared_data()` | `static void` | SimpleSvm-ordered KUSER writes (intentional overlapping stores). |
-
-#### `cpuid_legacy_reflex_handler.c`
-
-Same insert site/marker as the modern handler, with extra leaves:
-
-| Leaf | Behaviour |
-|------|-----------|
-| `1`, brand string | After legacy init, return the legacy fixed identity; otherwise same as modern spoof tables. |
-| `0x69696969` | Set `LegacyTargetInitialized = 1`. |
-| `0x336933` | If legacy armed: register `LegacyQuerySystemInformationHandler`; else modern `TargetSysHandler` + `patch_kuser_shared_data()`. |
-| `0x336943` | Register `LegacyQuerySystemInformationId` from RCX. |
-| `0x336934` | Register `LegacyQueryFullAttributesFileHandler`. |
-| `0x336944` | Register `LegacyQueryFullAttributesFileId`. |
-| `0x1337` | If legacy armed: `patch_legacy_kuser_shared_data()`; else fall through to native CPUID. |
-| `0x336967` | Same faketime server request as modern. |
-
-#### `legacy_reflex_sigsys_handler.c`
-
-Inserted **in front of** the common `if (TargetSysHandler != 0 && …)` block:
-
-| Logic | Purpose |
-|-------|--------|
-| If `LegacyTargetInitialized` and RAX matches a registered legacy syscall id (with address checks on RCX/R10) | Redirect RIP to the matching legacy trampoline. |
-| Else | Fall through into the normal `TargetSysHandler` SIGSYS path. |
-
-Normal (non-`--legacy-reflex`) builds never load these three files.
+Everything else (CPUID identity spoof tables, faketime, HwProfileGuid, `user_settings.py`, server faketime patch) stays the same. Normal builds never include the legacy fragments.
 
 > Valve's official Proton is intentionally **not** supported (debugger-detection issues).
 > Use `cachyos` or `ge`.
