@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Source tree management: version detection, clone, submodules, patch staging.
+# Source tree management: version resolution, clone, submodules, patch staging.
 # Sourced by build.sh — requires lib/common.sh already loaded.
 
 detect_latest_cachyos_branch() {
@@ -49,6 +49,7 @@ ensure_unshallow() {
     fi
 }
 
+# Compare local VERSION to main/build.sh on GitHub. Always warn-only (never abort).
 check_script_version() {
     local remote_version=""
     local raw_url="https://raw.githubusercontent.com/brcly/proton-LinUwUx-patch/main/build.sh"
@@ -72,13 +73,8 @@ check_script_version() {
     fi
 
     if printf '%s\n%s\n' "$VERSION" "$remote_version" | sort -V | head -1 | grep -Fqx "$VERSION"; then
-        if [[ "${PATCH_BRANCH:-main}" != "main" ]]; then
-            warn "Script is older than main (v${VERSION} < v${remote_version}) – continuing because PATCH_BRANCH=${PATCH_BRANCH}"
-        else
-            die "This script is outdated (v${VERSION}). Latest is v${remote_version}.
-  Update with:  git -C \"$(dirname "$0")\" pull
-  or re-download from: https://github.com/brcly/proton-LinUwUx-patch"
-        fi
+        warn "Script is older than main (v${VERSION} < v${remote_version}). Consider: git pull"
+        return 0
     fi
 
     info "Local script (v${VERSION}) is newer than published v${remote_version}"
@@ -131,6 +127,7 @@ setup_paths() {
     info "Package name     : $BUILD_NAME"
 }
 
+# Prefer an existing local patches/ tree; clone only when missing (or --update-patches).
 ensure_patches_dir() {
     if [[ $UPDATE_PATCHES -eq 1 ]]; then
         info "--update-patches: removing existing patches/ so a fresh copy is fetched"
@@ -187,6 +184,7 @@ update_submodules() {
         || die "Submodule update failed"
 }
 
+# Stage traditional .patch files from patches/wine into the Proton source tree.
 stage_wine_patches() {
     info "Installing LinUwUx patch files..."
     cd "$SRC_DIR"
@@ -194,22 +192,8 @@ stage_wine_patches() {
     rm -rf patches/wine
     mkdir -p patches/wine
 
-    local override_key="$BRANCH"
-    if [[ "$VARIANT" == "cachyos" ]]; then
-        override_key="${BRANCH%/*}"
-    fi
-
-    if [[ -d "$PATCHES_DIR/overrides/$override_key/wine" ]]; then
-        info "Using version-specific overrides for '$override_key'"
-        info "  (common patches under patches/wine/ are NOT applied when an override exists)"
-        cp -r "$PATCHES_DIR/overrides/$override_key/wine/." patches/wine/
-    else
-        info "No version-specific overrides for '$override_key' – using common patches"
-        if [[ -d "$PATCHES_DIR/wine" ]]; then
-            cp -r "$PATCHES_DIR/wine/." patches/wine/
-        fi
-    fi
-
+    [[ -d "$PATCHES_DIR/wine" ]] || die "No patches/wine/ under $PATCHES_DIR"
+    cp -r "$PATCHES_DIR/wine/." patches/wine/
     rm -rf patches/wine/loader
 
     [[ -n "$(find patches/wine -name '*.patch' 2>/dev/null)" ]] \
@@ -218,12 +202,13 @@ stage_wine_patches() {
     info "Installed patches:"
     find patches/wine -name '*.patch' | sed 's|^|      |'
 
+    # Refuse .patch files that still inject content now owned by linuwux_hooks*.c.
     local STALE_DEF_PATCHES
-    STALE_DEF_PATCHES=$(grep -rl \
-        '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data\|^\+[[:space:]]*detect_cpu_vendor();\|^\+[[:space:]]*/\* linuwux-cpuid-handler\|^\+[[:space:]]*/\* linuwux-sigsys-handler\|^\+[[:space:]]*if (TargetSysHandler != 0 &&' \
+    STALE_DEF_PATCHES=$(grep -rlE \
+        '\+uint64_t TargetSysHandler|\+static void detect_cpu_vendor|\+static void patch_kuser|\+linuwux_cpuid_spoof|\+linuwux_sigsys_route|\+linuwux-hooks-include|\+linuwux-cpuid-handler|\+linuwux-sigsys-handler' \
         patches/wine 2>/dev/null || true)
     if [[ -n "$STALE_DEF_PATCHES" ]]; then
-        die "Patch(es) below still add content that now lives exclusively in patches/base/, remove it from: $STALE_DEF_PATCHES"
+        die "Patch(es) below still add content that lives in linuwux_hooks*.c – remove it from: $STALE_DEF_PATCHES"
     fi
 }
 

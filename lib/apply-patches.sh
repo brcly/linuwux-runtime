@@ -32,10 +32,12 @@ apply_linuwux_patches() {
             || failures=$((failures+1))
     done < <(find "$SRC_DIR/patches/wine" -name '*.patch' | sort)
 
-    if grep -q 'linuwux-cpuid-handler\|0x336933' dlls/ntdll/unix/signal_x86_64.c; then
-        plog "  CPUID leaf handling is present"
+    # Sanity-check that content inserts already landed (hooks + call stub).
+    if grep -qF 'linuwux-hooks-include' dlls/ntdll/unix/signal_x86_64.c &&
+       grep -qF 'linuwux-cpuid-handler-call' dlls/ntdll/unix/signal_x86_64.c; then
+        plog "  Hooks include and CPUID call stub are present"
     else
-        plog_warn "  CPUID leaf handling is missing"
+        plog_warn "  Missing linuwux hooks include and/or CPUID call stub"
         failures=$((failures+1))
     fi
 
@@ -52,7 +54,7 @@ apply_linuwux_patches() {
     popd > /dev/null
 
     if [[ $failures -gt 0 ]]; then
-        plog_die "$failures LinUwUx patch step(s) failed - see $patch_log (stopping rather than shipping a build silently missing them)"
+        plog_die "$failures LinUwUx patch step(s) failed - see $patch_log (stopping rather than shipping a broken build)"
     fi
     plog "LinUwUx patch session complete"
 }
