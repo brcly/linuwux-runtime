@@ -2,8 +2,8 @@
 # Content-based inserts (additive LinUwUx fragments under patches/base/).
 # Sourced by build.sh — requires lib/common.sh already loaded.
 #
-# Bulk logic lives in patches/base/linuwux_hooks.c (copied into ntdll/unix and
-# #include'd into signal_x86_64.c). Only tiny call stubs are pasted into Wine.
+# Bulk logic: patches/base/linuwux_hooks.c (copied into ntdll/unix, #include'd).
+# Tiny Wine call sites are written inline here — no one-line fragment files.
 
 apply_regedit_fix() {
     local wine_dir="$1"
@@ -49,12 +49,11 @@ apply_linuwux_hooks() {
     local target="${unix_dir}/signal_x86_64.c"
     local hooks_src="${PATCHES_DIR}/base/linuwux_hooks.c"
     local hooks_dst="${unix_dir}/linuwux_hooks.c"
-    local include_file="${PATCHES_DIR}/base/linuwux_hooks_include.c"
+    local stub tmp
 
     plog "Installing linuwux_hooks.c into $unix_dir ..."
-    [[ -f "$target" ]]       || plog_die "$target not found - wine's layout may have changed upstream"
-    [[ -f "$hooks_src" ]]    || plog_die "$hooks_src not found - expected under patches/base/"
-    [[ -f "$include_file" ]] || plog_die "$include_file not found - expected under patches/base/"
+    [[ -f "$target" ]]    || plog_die "$target not found - wine's layout may have changed upstream"
+    [[ -f "$hooks_src" ]] || plog_die "$hooks_src not found - expected under patches/base/"
 
     cp "$hooks_src" "$hooks_dst"
     plog "  Copied linuwux_hooks.c"
@@ -64,7 +63,6 @@ apply_linuwux_hooks() {
         return
     fi
 
-    # Place include before Linux sigsys_handler (REG_* defined above it).
     local test_line func_line
     test_line=$(grep -n '0xffff' "$target" | head -1 | cut -d: -f1)
     [[ -n "$test_line" ]] || plog_die "Could not find seccomp 0xffff test (Linux sigsys_handler) in $target"
@@ -75,36 +73,31 @@ apply_linuwux_hooks() {
     ' "$target")
     [[ -n "$func_line" ]] || plog_die "Could not find 'static void sigsys_handler' above 0xffff test"
 
-    insert_before_line "$target" "$func_line" "$include_file"
+    stub=$(mktemp -p "$(dirname "$target")")
+    cat > "$stub" <<'EOF'
+/* linuwux-hooks-include */
+#include "linuwux_hooks.c"
+
+EOF
+    insert_before_line "$target" "$func_line" "$stub"
+    rm -f "$stub"
     grep -qF 'linuwux-hooks-include' "$target" || plog_die "hooks include insert produced no change"
     plog "  Inserted #include \"linuwux_hooks.c\" before Linux sigsys_handler (line $func_line)"
-}
-
-# Legacy no-ops: bulk logic is in linuwux_hooks.c now.
-apply_cpuid_spoof_definitions_fix() {
-    plog "CPUID spoof definitions: provided by linuwux_hooks.c (skipped separate insert)"
-}
-
-apply_kuser_shared_data_patch_fix() {
-    plog "KUSER_SHARED_DATA patch: provided by linuwux_hooks.c (skipped separate insert)"
 }
 
 apply_cpuid_spoof_handler_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
-    local handler_file="${PATCHES_DIR}/base/cpuid_spoof_handler.c"
     local handler_label="CPUID spoof"
+    local stub
 
     if [[ $LEGACY_REFLEX -eq 1 ]]; then
-        handler_file="${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_handler.c"
+        local handler_file="${PATCHES_DIR}/legacy-reflex/base/cpuid_legacy_reflex_handler.c"
         handler_label="legacy Reflex CPUID"
-    fi
+        plog "Applying $handler_label call site to $target ..."
+        [[ -f "$target" ]]       || plog_die "$target not found - wine's layout may have changed upstream"
+        [[ -f "$handler_file" ]] || plog_die "$handler_file not found - expected for $handler_label"
 
-    plog "Applying $handler_label call site to $target ..."
-    [[ -f "$target" ]]       || plog_die "$target not found - wine's layout may have changed upstream"
-    [[ -f "$handler_file" ]] || plog_die "$handler_file not found - expected for $handler_label"
-
-    if [[ $LEGACY_REFLEX -eq 1 ]]; then
         if grep -qF 'linuwux-cpuid-handler' "$target" && ! grep -qF 'linuwux-cpuid-handler-call' "$target"; then
             plog "  Handler logic already present"
             return
@@ -122,6 +115,9 @@ apply_cpuid_spoof_handler_fix() {
         return
     fi
 
+    plog "Applying $handler_label call stub to $target ..."
+    [[ -f "$target" ]] || plog_die "$target not found - wine's layout may have changed upstream"
+
     if grep -qF 'linuwux-cpuid-handler-call' "$target"; then
         plog "  Handler call stub already present"
         return
@@ -135,7 +131,14 @@ apply_cpuid_spoof_handler_fix() {
     ' "$target")
     [[ -n "$anchor_line" ]] || plog_die "Could not find steamclient_addr inside segv_handler"
 
-    insert_after_line "$target" "$anchor_line" "$handler_file"
+    stub=$(mktemp -p "$(dirname "$target")")
+    cat > "$stub" <<'EOF'
+    /* linuwux-cpuid-handler-call */
+    if (linuwux_cpuid_spoof(siginfo, sigcontext, ucontext))
+        return;
+EOF
+    insert_after_line "$target" "$anchor_line" "$stub"
+    rm -f "$stub"
     grep -qF 'linuwux-cpuid-handler-call' "$target" || plog_die "handler call stub insert produced no change"
     plog "  Inserted call stub after line $anchor_line (after steamclient_addr in segv_handler)"
 }
@@ -143,11 +146,10 @@ apply_cpuid_spoof_handler_fix() {
 apply_signal_init_process_hooks() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
-    local hooks_file="${PATCHES_DIR}/base/signal_init_process_hooks.c"
+    local stub
 
     plog "Applying signal_init_process hooks to $target ..."
-    [[ -f "$target" ]]     || plog_die "$target not found - wine's layout may have changed upstream"
-    [[ -f "$hooks_file" ]] || plog_die "$hooks_file not found - expected under patches/base/"
+    [[ -f "$target" ]] || plog_die "$target not found - wine's layout may have changed upstream"
 
     if grep -q 'detect_cpu_vendor();' "$target"; then
         plog "  signal_init_process hooks already present"
@@ -164,7 +166,13 @@ apply_signal_init_process_hooks() {
     ' "$target")
     [[ -n "$anchor_line" ]] || plog_die "Could not find SIGSEGV sigaction inside signal_init_process"
 
-    insert_after_line "$target" "$anchor_line" "$hooks_file"
+    stub=$(mktemp -p "$(dirname "$target")")
+    cat > "$stub" <<'EOF'
+    detect_cpu_vendor();
+    syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);
+EOF
+    insert_after_line "$target" "$anchor_line" "$stub"
+    rm -f "$stub"
     grep -q 'detect_cpu_vendor();' "$target" || plog_die "signal_init hooks insert produced no change"
     plog "  Inserted init hooks after line $anchor_line (after SIGSEGV registration)"
 }
@@ -234,11 +242,10 @@ apply_legacy_reflex_sigsys_fix() {
 apply_sigsys_handler_fix() {
     local wine_dir="$1"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
-    local content_file="${PATCHES_DIR}/base/sigsys_handler.c"
+    local stub
 
     plog "Applying SIGSYS call stub to $target ..."
-    [[ -f "$target" ]]       || plog_die "$target not found - wine's layout may have changed upstream"
-    [[ -f "$content_file" ]] || plog_die "$content_file not found - expected under patches/base/"
+    [[ -f "$target" ]] || plog_die "$target not found - wine's layout may have changed upstream"
 
     if grep -qF 'linuwux-sigsys-handler-call' "$target"; then
         plog "  SIGSYS call stub already present"
@@ -263,7 +270,14 @@ apply_sigsys_handler_fix() {
     ' "$target")
     [[ -n "$anchor_line" ]] || plog_die "Could not find get_syscall_frame() inside Linux sigsys_handler"
 
-    insert_after_line "$target" "$anchor_line" "$content_file"
+    stub=$(mktemp -p "$(dirname "$target")")
+    cat > "$stub" <<'EOF'
+    /* linuwux-sigsys-handler-call */
+    if (linuwux_sigsys_route(sigcontext))
+        return;
+EOF
+    insert_after_line "$target" "$anchor_line" "$stub"
+    rm -f "$stub"
     grep -qF 'linuwux-sigsys-handler-call' "$target" || plog_die "sigsys call stub insert produced no change"
     plog "  Inserted call stub after line $anchor_line (Linux/HAVE_SECCOMP sigsys_handler only)"
 }
