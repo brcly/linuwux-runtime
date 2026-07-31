@@ -20,7 +20,6 @@ info() { echo -e "${GREEN}[$(ts)] ==> $*${RESET}"; }
 warn() { echo -e "${YELLOW}[$(ts)] WARNING: $*${RESET}" >&2; }
 header(){ echo -e "\n${CYAN}${BOLD}$*${RESET}"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found"; }
-pause(){ [[ "${SLOW:-0}" == "1" ]] && sleep 1.2; return 0; }
 
 # Mirror console output into the patch session log when PATCH_LOG is set.
 plog() {
@@ -37,19 +36,6 @@ plog_die() {
 }
 
 HR="$(printf '=%.0s' {1..60})"
-
-# Prefer the line after #include "dwarf.h", else the last #include in the first
-# 120 lines — a safe file-scope insertion point in signal_x86_64.c.
-file_scope_anchor() {
-    local target="$1"
-    local line
-    line=$(grep -n '^#include "dwarf.h"' "$target" | head -1 | cut -d: -f1)
-    if [[ -z "$line" ]]; then
-        line=$(head -n 120 "$target" | grep -n '^#include' | tail -1 | cut -d: -f1)
-    fi
-    [[ -n "$line" ]] || plog_die "No safe file-scope insertion point found in $target"
-    echo "$line"
-}
 
 # Insert the contents of content_file after line N of target (1-based).
 insert_after_line() {
