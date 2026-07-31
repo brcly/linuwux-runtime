@@ -2,6 +2,20 @@
  * Patch KUSER_SHARED_DATA with spoofed values.
  * Called from the special CPUID leaf 0x336933 path.
  */
+#ifndef LINUWUX_LOG_DEFINED
+#define LINUWUX_LOG_DEFINED
+static void linuwux_log(const char *fmt, ...)
+{
+    va_list ap;
+    if (!getenv("LINUWUX_DEBUG"))
+        return;
+    fprintf(stderr, "[linuwux] ");
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+#endif
+
 static void patch_kuser_shared_data(void) {
     UINT8 *kuser = (UINT8 *)0x000000007FFE0000UL;
 
@@ -11,6 +25,7 @@ static void patch_kuser_shared_data(void) {
 
     if (mprotect(page_start, page_size, PROT_READ | PROT_WRITE) == -1) {
         MESSAGE("Failed to make kuser_shared_data writable: %s\n", strerror(errno));
+        linuwux_log("kuser_shared_data: mprotect failed: %s\n", strerror(errno));
         return;
     }
 
@@ -85,4 +100,6 @@ static void patch_kuser_shared_data(void) {
     // 0 = syscalls take slow route, everything gets hooked
     // 1 = syscalls take fast route unless ntdll.dll gets modified (default)
     //user_shared_data[0x308] = 1;
+
+    linuwux_log("kuser_shared_data: patched\n");
 }
