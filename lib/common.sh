@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for Proton + LinUwUx builder.
+# Shared helpers for the Proton + LinUwUx builder.
 # Sourced by build.sh — do not execute directly.
 
 if [[ -t 1 ]]; then
@@ -22,7 +22,7 @@ header(){ echo -e "\n${CYAN}${BOLD}$*${RESET}"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found"; }
 pause(){ [[ "${SLOW:-0}" == "1" ]] && sleep 1.2; return 0; }
 
-# Mirror console messages into the patch session log when it is open.
+# Mirror console output into the patch session log when PATCH_LOG is set.
 plog() {
     info "$@"
     [[ -n "${PATCH_LOG:-}" ]] && echo "[$(ts)] ==> $*" >> "$PATCH_LOG"
@@ -38,6 +38,8 @@ plog_die() {
 
 HR="$(printf '=%.0s' {1..60})"
 
+# Prefer the line after #include "dwarf.h", else the last #include in the first
+# 120 lines — a safe file-scope insertion point in signal_x86_64.c.
 file_scope_anchor() {
     local target="$1"
     local line
@@ -49,6 +51,7 @@ file_scope_anchor() {
     echo "$line"
 }
 
+# Insert the contents of content_file after line N of target (1-based).
 insert_after_line() {
     local target="$1" line="$2" content_file="$3"
     [[ -r "$content_file" ]] || plog_die "insert_after_line: unreadable $content_file"
@@ -63,6 +66,7 @@ insert_after_line() {
     mv "$tmp" "$target"
 }
 
+# Insert the contents of content_file before line N of target (1-based).
 insert_before_line() {
     local target="$1" line="$2" content_file="$3"
     [[ -r "$content_file" ]] || plog_die "insert_before_line: unreadable $content_file"
