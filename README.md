@@ -28,7 +28,7 @@ patches/
     server/0001-apply_faketime.patch
 ```
 
-## How LinUwUx is applied
+## How LinUwUx is applied (This script runs these steps automatically).
 
 1. Copy `linuwux_hooks.c` (or `linuwux_hooks_legacy.c`) into `dlls/ntdll/unix/` as `linuwux_hooks.c`.
 2. `#include "linuwux_hooks.c"` into `signal_x86_64.c` (before Linux `sigsys_handler`, after `REG_*` macros).
