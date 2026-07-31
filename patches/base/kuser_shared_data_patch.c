@@ -81,8 +81,7 @@ static void patch_kuser_shared_data(void) {
 
     *(UINT32*)(kuser + 0xFFC) = 0x13371337;
 
-    // Patch usage of syscalls
-    // 0 = syscalls take slow route, everything gets hooked
-    // 1 = syscalls take fast route unless ntdll.dll gets modified (default)
-    //user_shared_data[0x308] = 1;
+    /* Keep generated ntdll stubs on the syscall/SIGSYS route. Wine's
+     * default value of 1 selects int 0x2e, which cannot be redirected. */
+    *(UINT32 *)(kuser + 0x308) = 0;
 }
