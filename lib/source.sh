@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Source tree management: version detection, clone, submodules, patch staging.
+# Source tree management: version resolution, clone, submodules, patch staging.
 # Sourced by build.sh — requires lib/common.sh already loaded.
 
 detect_latest_cachyos_branch() {
@@ -49,6 +49,7 @@ ensure_unshallow() {
     fi
 }
 
+# Compare local VERSION to main/build.sh on GitHub. Non-main PATCH_BRANCH only warns.
 check_script_version() {
     local remote_version=""
     local raw_url="https://raw.githubusercontent.com/brcly/proton-LinUwUx-patch/main/build.sh"
@@ -131,6 +132,7 @@ setup_paths() {
     info "Package name     : $BUILD_NAME"
 }
 
+# Prefer an existing local patches/ tree; clone only when missing (or --update-patches).
 ensure_patches_dir() {
     if [[ $UPDATE_PATCHES -eq 1 ]]; then
         info "--update-patches: removing existing patches/ so a fresh copy is fetched"
@@ -187,6 +189,7 @@ update_submodules() {
         || die "Submodule update failed"
 }
 
+# Stage traditional .patch files from patches/wine into the Proton source tree.
 stage_wine_patches() {
     info "Installing LinUwUx patch files..."
     cd "$SRC_DIR"
@@ -204,6 +207,7 @@ stage_wine_patches() {
     info "Installed patches:"
     find patches/wine -name '*.patch' | sed 's|^|      |'
 
+    # Refuse stale .patch files that still try to inject content now owned by hooks.
     local STALE_DEF_PATCHES
     STALE_DEF_PATCHES=$(grep -rl \
         '^\+u\?int64_t TargetSysHandler\|^\+static void detect_cpu_vendor\|^\+void detect_cpu_vendor\|^\+static void patch_kuser_shared_data\|^\+[[:space:]]*detect_cpu_vendor();\|^\+[[:space:]]*/\* linuwux-cpuid-handler\|^\+[[:space:]]*/\* linuwux-sigsys-handler\|^\+[[:space:]]*if (TargetSysHandler != 0 &&' \
