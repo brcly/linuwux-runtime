@@ -6,18 +6,20 @@ Other projects offer pre-built tarballs. This one gives you a reproducible, main
 
 ## Why this structure is different (and better)
 
-Most LinUwUx Proton repos simply ship pre-patched binaries. That’s convenient for “download and go”, but it doesn’t scale and it hides how the patches were applied.
+Most LinUwUx Proton repos simply ship pre-patched binaries. That's convenient for "download and go", but it doesn't scale and it hides how the patches were applied.
 
 This project is built differently on purpose:
 
-- **Version-isolated trees** — every branch/tag gets its own `-src` / `-build` / `logs/` directories. Multiple builds never clobber each other.
-- **Host-side, fail-loud patching** — LinUwUx patches are applied *before* the container ever sees the tree. If a patch or a required `Makefile.in` anchor fails, the build stops. You never ship a silently broken Proton.
-- **Clean layering** — LinUwUx is applied *on top of* upstream (GE’s `protonprep` or CachyOS’s already-patched wine-cachyos fork). We don’t replace their work.
-- **Version-specific overrides** — drop a complete set under `patches/overrides/<branch-or-tag>/wine/` and it fully replaces the common set for that version. Perfect for when a new Proton needs adjusted context.
+- **Version-isolated trees** — every branch/tag gets its own `-src` / `-build` / `logs/` directories. Multiple builds never clobber each other. `--legacy-reflex` adds a `-Legacy-Reflex` suffix so normal and legacy builds never share trees.
+- **Host-side, fail-loud patching** — LinUwUx changes are applied *before* the container ever sees the tree. If an insert, `.patch`, or `Makefile.in` anchor fails, the build stops.
+- **Content-based inserts for additive code** — CPUID defs, KUSER patch, handler body, and `signal_init` hooks live under `patches/base/` as plain `.c` fragments and are injected by stable anchors (not fragile context diffs). Large upstream rearrangements are less likely to break the build.
+- **Unified patch log** — console messages from content inserts and traditional `.patch` applies both land in `logs/<version>/linuwux-patches.log`.
+- **Clean layering** — LinUwUx sits *on top of* upstream (GE's `protonprep` or CachyOS's already-patched wine-cachyos fork).
+- **Version-specific overrides** — drop a complete set under `patches/overrides/<branch-or-tag>/wine/` and it fully replaces the common set for that version.
 - **Local patch iteration** — the `patches/` folder is preferred over a fresh clone. Edit, re-run with `--no-clean`, iterate. Pass `--update-patches` only when you want upstream again.
 - **Live latest resolution** — no branch/tag given? It queries the remote for the newest `cachyos_*/main` or `GE-ProtonN-M` tag.
-- **Self-updating awareness** — the script checks its own version against GitHub and refuses to run if you’re on an outdated copy (offline builds still work).
-- **Proper packaging of `user_settings.py`** — the real file (not just the sample) is wired into the redist via targeted `Makefile.in` edits that die if the anchors move upstream.
+- **Self-updating awareness** — the script checks its own version against GitHub (warns instead of dying when you intentionally build from a non-`main` `PATCH_BRANCH`).
+- **Proper packaging of `user_settings.py`** — wired into the redist via targeted `Makefile.in` edits that die if the anchors move upstream.
 - **Clean on success, keep on failure** — successful builds leave only the tarball in `dist/`. Failed builds leave the trees for debugging. `--no-clean` for a fast patch-dev loop.
 
 You still get pre-built releases for convenience, but the primary deliverable is the builder itself.
@@ -28,14 +30,13 @@ You still get pre-built releases for convenience, but the primary deliverable is
 
 ## What it produces
 
-A compressed redistributable in `dist/`:
-
 ```
-dist/<version>-LinUwUx.tar.xz      # CachyOS (xz when available)
-dist/<version>-LinUwUx.tar.gz      # GE, or when xz is unavailable
+dist/<version>-LinUwUx.tar.xz                    # CachyOS (xz when available)
+dist/<version>-LinUwUx.tar.gz                    # GE, or when xz is unavailable
+dist/<version>-LinUwUx-Legacy-Reflex.tar.{xz,gz} # only with --legacy-reflex
 ```
 
-Install it into Steam:
+Install into Steam:
 
 ```bash
 mkdir -p ~/.steam/root/compatibilitytools.d/<version>-LinUwUx
@@ -49,30 +50,34 @@ Then restart Steam and pick the tool under a game's *Compatibility* settings.
 
 ## What the patches do
 
-The LinUwUx set layers three targeted additive changes onto Wine, plus a set of `.patch` files:
+### Content inserts (`patches/base/`)
 
-- **HwProfileGuid** — adds a stable hardware-profile GUID to the registry
-  (`wine.inf.in`) so the guest presents a consistent machine identity.
-  Content lives in `patches/base/hwprofile_guid.reg`.
-- **faketime request** — adds a `set_faketime` request to the Wine server protocol
-  (`protocol.def`), used to spoof the reported time.
-  Content lives in `patches/base/set_faketime.protocol`.
-- **CPUID spoofing** — injects `cpuid_spoof_defs.c` into the ntdll unix signal handler
-  and adds handling for CPUID leaf `0x336933`, so the guest sees a spoofed CPU identity.
+| File | Role |
+|------|------|
+| `hwprofile_guid.reg` | Stable HwProfileGuid line appended to `wine.inf.in` |
+| `set_faketime.protocol` | `@REQ(set_faketime)` appended to `server/protocol.def` |
+| `cpuid_spoof_defs.c` | Globals + `detect_cpu_vendor()` at file scope |
+| `kuser_shared_data_patch.c` | `patch_kuser_shared_data()` at file scope |
+| `cpuid_spoof_handler.c` | CPUID spoof body inserted after `steamclient_addr` in `segv_handler` |
+| `signal_init_process_hooks.c` | `detect_cpu_vendor()` + `ARCH_SET_CPUID` after SIGSEGV registration |
+| `user_settings.py` | Shipped in the redist (`winmm`/`version`/`reflex` overrides, etc.) |
 
-A `user_settings.py` — supplied in the patch repo at `patches/base/` — is copied into
-the redist, typically setting `winmm`/`version`/`reflex` DLL overrides and
-`PROTON_DISABLE_LSTEAMCLIENT=1`. The build fails if that file is missing.
+### Traditional `.patch` files (`patches/wine/`)
 
-The patch repo is expected to provide these required files under `patches/base/`:
+- `dlls/ntdll/unix/0001-sigsys_handler.patch` — SIGSYS routing for `TargetSysHandler`
+- `server/0001-apply_faketime.patch` — server-side faketime handling
 
-- `user_settings.py`
-- `cpuid_spoof_defs.c`
-- `hwprofile_guid.reg`
-- `set_faketime.protocol`
+### Optional legacy Reflex (`--legacy-reflex`)
 
-plus the common `patches/wine/` set, and optionally
-`patches/overrides/<branch-or-tag>/wine/` for version-specific patch sets.
+Content under `patches/legacy-reflex/base/`:
+
+| File | Role |
+|------|------|
+| `cpuid_legacy_reflex_defs.c` | Legacy handler globals + `patch_legacy_kuser_shared_data()` |
+| `cpuid_legacy_reflex_handler.c` | Alternate CPUID handler (same insert contract / marker) |
+| `legacy_reflex_sigsys_handler.c` | Extra SIGSYS routing when legacy protocol is active |
+
+Normal builds never include these paths.
 
 > Valve's official Proton is intentionally **not** supported (debugger-detection issues).
 > Use `cachyos` or `ge`.
@@ -108,8 +113,10 @@ offline, that check is skipped).
 ./build.sh cachyos <branch>         # a specific CachyOS branch
 ./build.sh ge                       # latest GE
 ./build.sh ge GE-Proton11-3         # a specific GE tag
+./build.sh --legacy-reflex ge GE-Proton11-3
 ./build.sh --container-engine=docker ge
 ./build.sh --update-patches         # force a fresh clone of patches/
+PATCH_BRANCH=dev/content-based-handler ./build.sh --update-patches
 ```
 
 ### Options
@@ -118,73 +125,38 @@ offline, that check is skipped).
 |-----------------------------|-----------------------------------------------------------|
 | `-f`, `--force`             | Force a full re-clone and clean rebuild.                  |
 | `-k`, `--no-clean`          | Keep the `-src`/`-build` trees after a successful build.  |
+| `--legacy-reflex`           | Build an isolated legacy Reflex compatibility variant.    |
 | `--update-patches`          | Delete and re-clone the `patches/` folder from upstream.  |
 | `--container-engine=<name>` | Container engine to build with (default: `podman`).       |
 | `-h`, `--help`              | Show help.                                                |
 
 ### Environment
 
-| Variable | Effect                                                     |
-|----------|------------------------------------------------------------|
-| `SLOW=1` | Restore the 1.2s pauses between steps (off by default).    |
+| Variable | Effect |
+|----------|--------|
+| `SLOW=1` | Restore the 1.2s pauses between steps (off by default). |
+| `PATCH_BRANCH=<name>` | Branch of this repo to clone when `patches/` is missing (default: `main`). |
 
 ---
 
 ## How it works
 
-The script runs a preflight (dependency + free-space checks and a startup version
-check — see Behaviour notes), then a numbered pipeline:
-
-1. **Obtain LinUwUx patches** — reuses the local `patches/` folder if present,
-   otherwise clones the patch repo. Pass `--update-patches` to force a fresh clone.
-2. **Resolve version & clone/reuse source** — derives a version id from the branch/tag,
-   then clones the Proton source (or reuses an existing tree unless `--force`).
-3. **Update submodules** — recursive and tree-filtered (Wine, DXVK, etc.); deinit +
-   re-init on `--force`.
-4. **Install patch files** — populates a fresh `patches/wine` staging directory in the
-   source tree from your LinUwUx repo: the common `wine` set, or a version-specific
-   `overrides/<branch>/wine` set if one exists.
-5. **Apply the patches** — applies the three targeted fixes (HwProfileGuid, faketime
-   request, CPUID definitions) and the `.patch` set on the host, then regenerates the
-   Wine server protocol. For GE, `protonprep` runs first so LinUwUx layers on top; for
-   CachyOS the staged `.patch` files are removed afterward as cleanup.
-6. **Install `user_settings.py`** — copies `patches/base/user_settings.py` into the
-   source tree; the build stops with an error if any of the required base files are missing.
-7. **Wire `user_settings.py` into the package** — patches `Makefile.in` so the file
-   ships in the redist, and fails loudly if the expected anchors have moved upstream.
-8. **Configure & build** — runs `configure.sh` (ccache enabled for CachyOS) and
-   `make redist` inside the container.
-9. **Package & verify** — finds or creates the `*-LinUwUx.*` archive, then fails the
-   build if `user_settings.py` or the core `proton`/`version` files are missing (and
-   warns on a suspiciously small archive).
-10. **Move to `dist/` & clean up** — moves the tarball to `dist/` and, unless
-    `--no-clean`, removes the `-src`/`-build` trees.
+1. **Obtain LinUwUx patches** — reuses local `patches/` if present, otherwise clones `PATCH_BRANCH` from the patch repo.
+2. **Resolve version & clone/reuse source** — version id (+ optional `-Legacy-Reflex` flavor).
+3. **Update submodules** — recursive; deinit + re-init on `--force`.
+4. **Install patch files** — stage `patches/wine` (or a version override).
+5. **Apply content inserts + `.patch`es** — host-side, fail-loud; regenerate server protocol. `--legacy-reflex` swaps the CPUID handler and adds legacy defs/SIGSYS overlay.
+6. **Install `user_settings.py`** and verify required base (and legacy) files.
+7. **Wire `user_settings.py` into `Makefile.in`**.
+8. **Configure & build** — `configure.sh` + `make redist`.
+9. **Package & verify** — archive must contain `user_settings.py` and core files.
+10. **Move to `dist/` & clean up** unless `--no-clean`.
 
 ---
 
 ## Behaviour notes
 
-- **Latest version is resolved live.** With no branch/tag given, `cachyos` queries the
-  remote for the newest `cachyos_*/main` branch and `ge` for the newest `GE-ProtonN-M`
-  tag, each falling back to a pinned default if the lookup fails.
-- **Startup version check.** On each run the script compares its own `VERSION` against
-  the copy published on GitHub. If the local script is older it stops and asks you to
-  update; if you're offline (or `curl`/`wget` are absent) the check is skipped with a
-  warning.
-- **Clean on success, keep on failure.** A successful build leaves only the tarball in
-  `dist/`; the `-src`/`-build` trees are removed so the next run starts fresh. A
-  *failed* build leaves its trees in place for debugging. Pass `--no-clean` to always
-  keep them (faster patch-development loop).
-- **LinUwUx layers on top of upstream — it doesn't replace it.** The `patches/wine`
-  directory the script wipes and repopulates is a private staging area; neither CachyOS
-  nor GE ships wine patches there. CachyOS's wine patches come pre-applied via its
-  `wine-cachyos` fork submodule, and GE's are applied by `protonprep`. LinUwUx patches
-  apply on top of that already-patched wine tree, so both sets end up in the build.
-- **Patches are applied on the host, and fail loudly.** They're applied before the
-  container ever sees the source, so a build can't silently ship without them. If a
-  patch or a required `Makefile.in` anchor doesn't apply, the script stops rather than
-  producing a quietly-broken build.
-- **Versioned folders.** Source, build, and log folders are named per version, so
-  multiple builds never clobber each other.
-- **Logs** are written to `logs/<version>/` (`build.log`, `linuwux-patches.log`, and
-  `prep.log` for GE).
+- **Content inserts prefer stable anchors** (`#include "dwarf.h"`, `void *steamclient_addr = NULL`, `sigaction(SIGSEGV, …)`).
+- **Idempotent markers** — e.g. `/* linuwux-cpuid-handler */` so re-runs skip already-applied inserts.
+- **LinUwUx layers on top of upstream** — CachyOS wine patches come pre-applied; GE's via `protonprep`.
+- **Logs** — `logs/<version>/` holds `build.log`, `linuwux-patches.log`, and `prep.log` (GE).
