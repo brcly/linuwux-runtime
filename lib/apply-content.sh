@@ -102,18 +102,19 @@ apply_cpuid_spoof_handler_fix() {
     if [[ -n "$handler_fn_file" ]]; then
         [[ -f "$handler_fn_file" ]] || plog_die "$handler_fn_file not found - expected under patches/base/"
 
-        if ! grep -q 'linuwux-cpuid-handler-fn' "$target"; then
+        if ! grep -qF 'linuwux-cpuid-handler-fn' "$target"; then
             local segv_line
             segv_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
             [[ -n "$segv_line" ]] || plog_die "Could not find 'static void segv_handler' in $target"
             insert_before_line "$target" "$segv_line" "$handler_fn_file"
-            grep -q 'linuwux-cpuid-handler-fn' "$target" || plog_die "handler fn insert produced no change"
+            grep -qF 'linuwux-cpuid-handler-fn' "$target" || plog_die "handler fn insert produced no change"
             plog "  Inserted linuwux_cpuid_spoof() before segv_handler (line $segv_line)"
         else
             plog "  Handler function already present"
         fi
 
-        if grep -q 'linuwux-cpuid-handler' "$target"; then
+        # Must NOT match linuwux-cpuid-handler-fn (substring trap).
+        if grep -qF 'linuwux-cpuid-handler-call' "$target"; then
             plog "  Handler call stub already present"
             return
         fi
@@ -127,13 +128,17 @@ apply_cpuid_spoof_handler_fix() {
         [[ -n "$anchor_line" ]] || plog_die "Could not find 'void *steamclient_addr = NULL' inside segv_handler after line $func_line"
 
         insert_after_line "$target" "$anchor_line" "$handler_file"
-        grep -q 'linuwux-cpuid-handler' "$target" || plog_die "handler call stub insert produced no change"
+        grep -qF 'linuwux-cpuid-handler-call' "$target" || plog_die "handler call stub insert produced no change"
         plog "  Inserted call stub after line $anchor_line (after steamclient_addr in segv_handler)"
         return
     fi
 
     # Legacy: single inline block after steamclient_addr
-    if grep -q 'linuwux-cpuid-handler' "$target"; then
+    if grep -qF 'linuwux-cpuid-handler' "$target" && ! grep -qF 'linuwux-cpuid-handler-fn' "$target"; then
+        plog "  Handler logic already present"
+        return
+    fi
+    if grep -qF 'linuwux-cpuid-handler-call' "$target"; then
         plog "  Handler logic already present"
         return
     fi
@@ -148,7 +153,7 @@ apply_cpuid_spoof_handler_fix() {
     [[ -n "$anchor_line" ]] || plog_die "Could not find 'void *steamclient_addr = NULL' inside segv_handler after line $func_line"
 
     insert_after_line "$target" "$anchor_line" "$handler_file"
-    grep -q 'linuwux-cpuid-handler' "$target" || plog_die "handler insert produced no change"
+    grep -qF 'linuwux-cpuid-handler' "$target" || plog_die "handler insert produced no change"
     plog "  Inserted handler logic after line $anchor_line (after steamclient_addr in segv_handler)"
 }
 
