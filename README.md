@@ -2,7 +2,7 @@
 
 Build **proton-cachyos** or **proton-ge-custom** from source with the **LinUwUx** patch set applied, and package a Steam Play compatibility tool.
 
-Other projects ship pre-built tarballs. This one is a reproducible *builder* so you can regenerate the latest patched Proton yourself when upstream moves.
+Other projects ship pre-built tarballs or just apply a pre-made .patch file to wine, which can be volatile if Proton/Wine updates and decides to shift things around (such the case from Proton/Wine 10 -> 11). This one is a reproducible *builder* so you can regenerate the latest patched Proton yourself when upstream moves, which uses an external hook file and minimum wine intrusions, increasing the likely hood of cross-version compatibility.
 
 **Proton 11 only** (for now). Valve’s official Proton is not supported.
 
