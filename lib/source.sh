@@ -2,23 +2,26 @@
 # Source tree management: version resolution, clone, submodules, patch staging.
 # Sourced by build.sh — requires lib/common.sh already loaded.
 
-detect_latest_cachyos_branch() {
-    local fallback="$1" latest
-    command -v git >/dev/null 2>&1 || { echo "$fallback"; return; }
-    latest=$(git ls-remote --heads "$REPO" 'refs/heads/cachyos_*' 2>/dev/null \
-        | sed 's|.*refs/heads/||' \
-        | grep '/main$' \
-        | sort -t_ -k3 \
-        | tail -1)
-    [[ -n "$latest" ]] && echo "$latest" || echo "$fallback"
-}
-
 detect_latest_ge_tag() {
     local fallback="master" latest
     command -v git >/dev/null 2>&1 || { echo "$fallback"; return; }
     latest=$(git ls-remote --tags "$REPO" 'refs/tags/GE-Proton*' 2>/dev/null \
         | sed 's|.*refs/tags/||' \
         | grep -E '^GE-Proton[0-9]+-[0-9]+$' \
+        | sort -V \
+        | tail -1)
+    [[ -n "$latest" ]] && echo "$latest" || echo "$fallback"
+}
+
+detect_latest_cachyos_tag() {
+    local fallback="$1" latest
+    command -v git >/dev/null 2>&1 || { echo "$fallback"; return; }
+    # Stable release tags (cachyos-<ver>-<date>-slr / -native). The WIP
+    # cachyos_*/main branches are not consistently buildable (broken wine
+    # submodule URL, dropped seccomp rules), so prefer tagged releases.
+    latest=$(git ls-remote --tags "$REPO" 'refs/tags/cachyos-*' 2>/dev/null \
+        | sed 's|.*refs/tags/||' \
+        | grep -E '^cachyos-[0-9]+\.[0-9]+-[0-9]+-(slr|native)$' \
         | sort -V \
         | tail -1)
     [[ -n "$latest" ]] && echo "$latest" || echo "$fallback"
@@ -85,7 +88,7 @@ resolve_repo_and_branch() {
         cachyos|cachy)
             VARIANT="cachyos"
             REPO="https://github.com/CachyOS/proton-cachyos.git"
-            DEFAULT_BRANCH="cachyos_11.0_20260702/main"
+            DEFAULT_BRANCH="cachyos-11.0-20260703-slr"
             ;;
         ge|proton-ge|eggroll)
             VARIANT="ge"
@@ -96,9 +99,9 @@ resolve_repo_and_branch() {
 
     if [[ -z "$BRANCH" ]]; then
         if [[ "$VARIANT" == "cachyos" ]]; then
-            info "Resolving latest CachyOS branch from remote..."
-            DEFAULT_BRANCH=$(detect_latest_cachyos_branch "$DEFAULT_BRANCH")
-            info "  Using branch: $DEFAULT_BRANCH"
+            info "Resolving latest CachyOS stable release tag from remote..."
+            DEFAULT_BRANCH=$(detect_latest_cachyos_tag "$DEFAULT_BRANCH")
+            info "  Using tag: $DEFAULT_BRANCH"
         else
             info "Resolving latest GE-Proton tag from remote..."
             DEFAULT_BRANCH=$(detect_latest_ge_tag)

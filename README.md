@@ -65,7 +65,7 @@ Uses `linuwux_hooks_legacy.c` instead of the modern file (same symbols, same stu
 
 | Variant | Source | Default |
 |---------|--------|--------|
-| `cachyos` (default) | CachyOS/proton-cachyos | latest `cachyos_*/main` |
+| `cachyos` (default) | CachyOS/proton-cachyos | latest `cachyos-*-slr` / `-native` release tag |
 | `ge` | GloriousEggroll/proton-ge-custom | latest `GE-ProtonN-M` tag |
 
 ```bash

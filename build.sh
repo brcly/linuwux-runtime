@@ -50,7 +50,7 @@ Usage:
   $(basename "$0") [OPTIONS] [VARIANT] [BRANCH/TAG]
 
 Variants:
-  cachyos (default)   CachyOS Proton (latest cachyos_*/main if no branch)
+  cachyos (default)   CachyOS Proton (latest cachyos-*-slr/-native release tag if no branch)
   ge                  GloriousEggroll Proton (latest GE-ProtonN-M tag if no tag)
 
 Examples:
