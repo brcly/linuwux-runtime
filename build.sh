@@ -12,7 +12,7 @@ set -euo pipefail
 #   package.sh        – user_settings, configure, redist, verify
 # ============================================================
 
-VERSION="26.07.31"
+VERSION="26.08.03"
 CONTAINER_ENGINE="podman"
 PATCH_REPO="https://github.com/brcly/proton-LinUwUx-patch.git"
 PATCH_BRANCH="${PATCH_BRANCH:-main}"
@@ -50,12 +50,14 @@ Usage:
   $(basename "$0") [OPTIONS] [VARIANT] [BRANCH/TAG]
 
 Variants:
-  cachyos (default)   CachyOS Proton (latest cachyos_*/main if no branch)
-  ge                  GloriousEggroll Proton (latest GE-ProtonN-M tag if no tag)
+  cachyos (default)   CachyOS Proton (latest cachyos-*-slr release tag if none given)
+  ge                  GloriousEggroll Proton (latest GE-ProtonN-M tag if none given)
 
 Examples:
   $(basename "$0")
-  $(basename "$0") cachyos <branch>
+  $(basename "$0") cachyos
+  $(basename "$0") cachyos cachyos-11.0-20260703-slr
+  $(basename "$0") cachyos cachyos-11.0-20260703-native
   $(basename "$0") ge
   $(basename "$0") ge GE-Proton11-3
   $(basename "$0") --legacy-reflex ge GE-Proton11-3
