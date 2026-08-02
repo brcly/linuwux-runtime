@@ -65,16 +65,20 @@ Uses `linuwux_hooks_legacy.c` instead of the modern file (same symbols, same stu
 
 | Variant | Source | Default |
 |---------|--------|--------|
-| `cachyos` (default) | CachyOS/proton-cachyos | latest `cachyos_*/main` |
+| `cachyos` (default) | CachyOS/proton-cachyos | latest `cachyos-N.N-YYYYMMDD-slr` **release tag** |
 | `ge` | GloriousEggroll/proton-ge-custom | latest `GE-ProtonN-M` tag |
 
 ```bash
-./build.sh                          # latest CachyOS
+./build.sh                          # latest CachyOS SLR release tag
+./build.sh cachyos cachyos-11.0-20260703-slr
+./build.sh cachyos cachyos-11.0-20260703-native
 ./build.sh ge GE-Proton11-3
 ./build.sh --legacy-reflex ge GE-Proton11-3
 ./build.sh --force --no-clean cachyos
 ./build.sh --update-patches
 ```
+
+Pass any explicit branch or tag after the variant to override auto-resolution (including `cachyos_*/main` development branches if you really need them).
 
 | Flag | Effect |
 |------|--------|
@@ -113,3 +117,4 @@ Restart Steam and select the tool under the game’s *Compatibility* settings.
 - Success leaves only the tarball in `dist/`; failure keeps trees for debugging.
 - SIGSYS stubs target Linux/`HAVE_SECCOMP` only (Apple handler untouched).
 - Startup version check is warn-only (never aborts the build).
+- CachyOS defaults to a **published release tag** (`cachyos-*-slr`), not the newest development branch, so submodule pins match a known-good release.
