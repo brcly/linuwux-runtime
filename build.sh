@@ -186,6 +186,7 @@ if [[ "$VARIANT" == "cachyos" ]]; then
     find patches/wine -name '*.patch' -delete
 fi
 
+apply_proton_script_patches
 install_user_settings_and_check_base
 wire_makefile_user_settings
 run_configure_and_build

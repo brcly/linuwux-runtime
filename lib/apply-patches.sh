@@ -78,3 +78,21 @@ ge_protonprep() {
         info "protonprep log clean – no failures mentioned"
     fi
 }
+
+apply_proton_script_patches() {
+    local patch_log="${PATCH_LOG:-${LOG_DIR}/linuwux-patches.log}"
+    local failures=0
+    local proton_patch_dir="${PATCHES_DIR}/proton"
+
+    [[ -d "$proton_patch_dir" ]] || return 0
+
+    plog "Applying proton-script patches in $SRC_DIR ..."
+    pushd "$SRC_DIR" > /dev/null
+    while IFS= read -r patch_file; do
+        apply_patch_file "$patch_file" "$(basename "$patch_file")" "$patch_log" \
+            || failures=$((failures+1))
+    done < <(find "$proton_patch_dir" -name '*.patch' | sort)
+    popd > /dev/null
+
+    [[ $failures -eq 0 ]] || plog_die "$failures proton-script patch(es) failed – see $patch_log"
+}
