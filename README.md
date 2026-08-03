@@ -2,7 +2,13 @@
 
 Build **proton-cachyos** or **proton-ge-custom** from source with the **LinUwUx** patch set applied, and package a Steam Play compatibility tool.
 
-Other projects ship pre-built tarballs or just apply a pre-made .patch file to wine, which can be volatile if Proton/Wine updates and decides to shift things around (such the case from Proton/Wine 10 -> 11). This one is a reproducible *builder* so you can regenerate the latest patched Proton yourself when upstream moves, which uses an external hook file and minimum wine intrusions, increasing the likely hood of cross-version compatibility.
+Other projects ship pre-built tarballs or apply a pre-made .patch file to Wine, which can be volatile if Proton/Wine updates and decides to shift things around (such as the case from Proton/Wine 10 -> 11). This one is a reproducible *builder*, so you can regenerate the latest patched Proton yourself when upstream moves, using an external hook file and minimal Wine intrusions, increasing the likelihood of cross-version compatibility.
+
+This build script highly modifies and restructures LinUwUx's original patch code. Whether the changes made are better / worse is for you to decide. It doesn't claim to be superior, just restructured.
+The changes made don't affect the functionality of the DenuvOwO HV bypass (though a QoL update has been made to better support older DenuvOwO patches - Legacy Reflex Patches).
+This project has been structured this way to improve longevity. If the patch code needs to be changed or updated, then it's just the ```liuwux_hooks.c``` that needs to be modified, which is in 1 easy place.
+
+This project doesn't automatically set up other changes to your system that need to be made before you can use the bypass. It's purely to build the patched Proton build. Please check [cs.rin.ru](https://csrin.org) for UMIP + HV DKMS instructions.
 
 **Proton 11 only** (for now). Valve’s official Proton is not supported.
 
@@ -118,3 +124,8 @@ Restart Steam and select the tool under the game’s *Compatibility* settings.
 - SIGSYS stubs target Linux/`HAVE_SECCOMP` only (Apple handler untouched).
 - Startup version check is warn-only (never aborts the build).
 - CachyOS defaults to a **published release tag** (`cachyos-*-slr`), not the newest development branch, so submodule pins match a known-good release.
+
+## Credits
+- LinUwUx - Original Bypass creator
+- DenuvOwO - Hypervisor Bypass
+- [Kurt Himebauch](https://github.com/xXJSONDeruloXx) - Legacy Reflex Fix
