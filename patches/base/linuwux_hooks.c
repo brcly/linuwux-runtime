@@ -25,6 +25,14 @@
  * protocol, etc.) without dumping a large blob into the signal file itself.
  *
  * Enable tracing with LINUWUX_DEBUG=1.
+ *
+ * Redirect scope (dev/redirect-scope):
+ *   DenuvOwO only vectors the tracked process (DR3/DR7). Under Wine we approx
+ *   that by skipping TargetSysHandler when the fault RIP is in the Wine system
+ *   PE band [0x6FFFFF000000, 0x700000000000). 0x7fff… is NOT included — ACBFR
+ *   needs at least one redirect from that range (rax=0xffe).
+ *   Set LINUWUX_REDIRECT_ALL=1 to restore pre-scope behaviour.
+ *   Wine-system skips are intentional and not logged (too hot under DEBUG).
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
@@ -50,6 +58,30 @@ uint64_t SyscallBypassMagic = 0x1337133713371337;
 unsigned int spoof_leaf1_eax, spoof_leaf1_ebx, spoof_leaf1_ecx, spoof_leaf1_edx;
 unsigned int spoof_leaf40000000_eax, spoof_leaf40000000_ebx, spoof_leaf40000000_ecx, spoof_leaf40000000_edx;
 unsigned int spoof_leaf40000001_eax, spoof_leaf40000001_ebx, spoof_leaf40000001_ecx, spoof_leaf40000001_edx;
+
+/*
+ * Wine system PE band (64-bit Proton/GE observations):
+ *   ntdll/kernel32/kernelbase often sit in [0x6FFFFF000000, 0x700000000000).
+ * Game EXEs ~0x140000000; crack modules often under 0x6FFFFF000000.
+ * Do not treat 0x7fff… as Wine PE — some packs (ACBFR) redirect from there.
+ */
+#ifndef LINUWUX_WINE_SYSTEM_RIP_MIN
+#define LINUWUX_WINE_SYSTEM_RIP_MIN 0x00006FFFFF000000ULL
+#endif
+#ifndef LINUWUX_WINE_SYSTEM_RIP_MAX
+#define LINUWUX_WINE_SYSTEM_RIP_MAX 0x0000700000000000ULL
+#endif
+
+static int linuwux_rip_is_wine_system(unsigned long long rip)
+{
+    return rip >= LINUWUX_WINE_SYSTEM_RIP_MIN && rip < LINUWUX_WINE_SYSTEM_RIP_MAX;
+}
+
+static int linuwux_redirect_all_enabled(void)
+{
+    const char *env = getenv("LINUWUX_REDIRECT_ALL");
+    return env && env[0] == '1' && env[1] == '\0';
+}
 
 static void detect_cpu_vendor(void)
 {
@@ -297,12 +329,26 @@ static int linuwux_sigsys_route(void *sigcontext)
 {
     ucontext_t *ctx = sigcontext;
     __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
+    unsigned long long syscall_nr;
+    unsigned long long rip;
 
     if (TargetSysHandler != 0 &&
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) != 0x1337133713371337) {
-        linuwux_log("sigsys redirect rax=%llx → TargetSysHandler=%p\n",
-                    (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX],
-                    (void *)TargetSysHandler);
+        syscall_nr = (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX];
+        rip = (unsigned long long)ctx->uc_mcontext.gregs[REG_RIP];
+
+        /*
+         * Scope filter: approximate DenuvOwO "tracked process only" by not
+         * vectoring Wine system PE syscall sites into the usermode trampoline.
+         * Window is closed above so 0x7fff… still redirects (ACBFR 0xffe).
+         * Skips are silent — this path is too hot for LINUWUX_DEBUG.
+         */
+        if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system(rip))
+            return 0;
+
+        linuwux_log("sigsys redirect rax=%llx rip=%llx → TargetSysHandler=%p\n",
+                    syscall_nr, rip, (void *)TargetSysHandler);
+
         xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
         ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
         ctx->uc_mcontext.gregs[REG_RCX] = TargetSysHandler;
