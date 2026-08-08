@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2026 LinUwUx
  * Copyright (C) Kurt Himebauch (xXJSONDeruloXx)
  * Copyright (C) 2026 brcly (repository integration)
  *
