@@ -102,6 +102,7 @@ How hooks land:
   Bulk logic lives in patches/base/linuwux_hooks.c (or the legacy file).
   It is copied to dlls/ntdll/unix/linuwux_hooks.c and #include'd into
   signal_x86_64.c. Only tiny call stubs are pasted into the signal file.
+  Proton cold-start wineboot is a content insert after setup_prefix().
 
 Required files:
   patches/base/linuwux_hooks.c
@@ -206,6 +207,7 @@ if [[ "$VARIANT" == "cachyos" ]]; then
     find patches/wine -name '*.patch' -delete
 fi
 
+apply_force_wineboot_first_run
 apply_proton_script_patches
 install_user_settings_and_check_base
 wire_makefile_user_settings
