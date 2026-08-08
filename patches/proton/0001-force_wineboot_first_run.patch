@@ -1,3 +1,6 @@
+# Copyright (C) 2026 brcly
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
 diff --git a/proton b/proton
 index 187cdd9e6..f2128f7dd 100755
 --- a/proton
