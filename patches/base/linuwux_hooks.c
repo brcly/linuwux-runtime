@@ -32,6 +32,7 @@
  *   PE band [0x6FFFFF000000, 0x700000000000). 0x7fff… is NOT included — ACBFR
  *   needs at least one redirect from that range (rax=0xffe).
  *   Set LINUWUX_REDIRECT_ALL=1 to restore pre-scope behaviour.
+ *   Wine-system skips are intentional and not logged (too hot under DEBUG).
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
@@ -340,12 +341,10 @@ static int linuwux_sigsys_route(void *sigcontext)
          * Scope filter: approximate DenuvOwO "tracked process only" by not
          * vectoring Wine system PE syscall sites into the usermode trampoline.
          * Window is closed above so 0x7fff… still redirects (ACBFR 0xffe).
+         * Skips are silent — this path is too hot for LINUWUX_DEBUG.
          */
-        if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system(rip)) {
-            linuwux_log("sigsys skip scope rax=%llx rip=%llx (wine-system band)\n",
-                        syscall_nr, rip);
+        if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system(rip))
             return 0;
-        }
 
         linuwux_log("sigsys redirect rax=%llx rip=%llx → TargetSysHandler=%p\n",
                     syscall_nr, rip, (void *)TargetSysHandler);
