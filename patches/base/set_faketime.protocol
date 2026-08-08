@@ -1,5 +1,3 @@
-# Copyright (C) 2026 brcly
-# SPDX-License-Identifier: AGPL-3.0-or-later
 @REQ(set_faketime)
     timeout_t faketime;
 @REPLY
