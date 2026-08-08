@@ -29,7 +29,7 @@ set -euo pipefail
 #   package.sh        – user_settings, configure, redist, verify
 # ============================================================
 
-VERSION="26.08.03"
+VERSION="26.08.08"
 CONTAINER_ENGINE="podman"
 PATCH_REPO="https://github.com/brcly/proton-LinUwUx-patch.git"
 PATCH_BRANCH="${PATCH_BRANCH:-main}"
@@ -95,6 +95,7 @@ Environment:
   PATCH_BRANCH=<name>         Branch of this repo to clone when patches/ is
                               missing (default: main)
   LINUWUX_DEBUG=1             Runtime: event tracing from linuwux_hooks*.c
+  LINUWUX_REDIRECT_ALL=1      Runtime: disable SIGSYS Wine-PE scope filter
   PROTON_AVX=1                Runtime: AVX/XSAVE in spoofed CPUID/KUSER data
 
 How hooks land:
