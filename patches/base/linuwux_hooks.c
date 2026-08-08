@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2026 LinUwUx
  * Copyright (C) 2026 brcly
  *
  * This program is free software: you can redistribute it and/or modify
