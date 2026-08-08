@@ -125,6 +125,27 @@ Restart Steam and select the tool under the game’s *Compatibility* settings.
 - Startup version check is warn-only (never aborts the build).
 - CachyOS defaults to a **published release tag** (`cachyos-*-slr`), not the newest development branch, so submodule pins match a known-good release.
 
+
+## License
+
+This project is free software under the [GNU Affero General Public License v3](LICENSE)
+(or, at your option, any later version).
+
+Copyright (C) 2026 brcly, except where noted below.
+
+- `patches/legacy-reflex/linuwux_hooks_legacy.c` — primarily authored by
+  **Kurt Himebauch** ([xXJSONDeruloXx](https://github.com/xXJSONDeruloXx));
+  copyright held by Kurt Himebauch, with repository integration by brcly.
+- Upstream **Proton**, **Wine**, **CachyOS**, and **GE** sources retain their
+  own licenses (typically LGPL). This repository’s scripts, hooks, and patches
+  are AGPL-3.0; combining them with upstream trees does not relicense Valve’s
+  or Wine’s code.
+
+Please keep copyright notices intact when you redistribute or modify this work.
+Preferred credit line for derived builds:
+
+`LinUwUx Proton builder by brcly (https://github.com/brcly/proton-LinUwUx-patch)`
+
 ## Credits
 - LinUwUx - Original Bypass creator
 - DenuvOwO - Hypervisor Bypass
