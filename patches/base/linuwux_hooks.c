@@ -28,8 +28,9 @@
  *
  * Redirect scope (dev/redirect-scope):
  *   DenuvOwO only vectors the tracked process (DR3/DR7). Under Wine we approx
- *   that by skipping TargetSysHandler when the fault RIP looks like a Wine
- *   system PE (ntdll/kernel32/...). Game + crack modules still redirect.
+ *   that by skipping TargetSysHandler when the fault RIP is in the Wine system
+ *   PE band [0x6FFFFF000000, 0x700000000000). 0x7fff… is NOT included — ACBFR
+ *   needs at least one redirect from that range (rax=0xffe).
  *   Set LINUWUX_REDIRECT_ALL=1 to restore pre-scope behaviour.
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
@@ -58,21 +59,21 @@ unsigned int spoof_leaf40000000_eax, spoof_leaf40000000_ebx, spoof_leaf40000000_
 unsigned int spoof_leaf40000001_eax, spoof_leaf40000001_ebx, spoof_leaf40000001_ecx, spoof_leaf40000001_edx;
 
 /*
- * Coarse Wine-system PE band observed under Proton/GE (64-bit):
- *   ntdll/kernel32/kernelbase/... often land at or above 0x6fffff000000.
- * Game EXEs are typically ~0x140000000; reflex/coldloader/syscall_hack for
- * BL4-class packs were under 0x6fffff000000 (e.g. 0x6ffffc8b0000).
- *
- * Not a perfect module list — just enough to stop feeding Wine's own
- * syscall stubs into the usermode trampoline after arm.
+ * Wine system PE band (64-bit Proton/GE observations):
+ *   ntdll/kernel32/kernelbase often sit in [0x6FFFFF000000, 0x700000000000).
+ * Game EXEs ~0x140000000; crack modules often under 0x6FFFFF000000.
+ * Do not treat 0x7fff… as Wine PE — some packs (ACBFR) redirect from there.
  */
 #ifndef LINUWUX_WINE_SYSTEM_RIP_MIN
 #define LINUWUX_WINE_SYSTEM_RIP_MIN 0x00006FFFFF000000ULL
 #endif
+#ifndef LINUWUX_WINE_SYSTEM_RIP_MAX
+#define LINUWUX_WINE_SYSTEM_RIP_MAX 0x0000700000000000ULL
+#endif
 
 static int linuwux_rip_is_wine_system(unsigned long long rip)
 {
-    return rip >= LINUWUX_WINE_SYSTEM_RIP_MIN;
+    return rip >= LINUWUX_WINE_SYSTEM_RIP_MIN && rip < LINUWUX_WINE_SYSTEM_RIP_MAX;
 }
 
 static int linuwux_redirect_all_enabled(void)
@@ -338,6 +339,7 @@ static int linuwux_sigsys_route(void *sigcontext)
         /*
          * Scope filter: approximate DenuvOwO "tracked process only" by not
          * vectoring Wine system PE syscall sites into the usermode trampoline.
+         * Window is closed above so 0x7fff… still redirects (ACBFR 0xffe).
          */
         if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system(rip)) {
             linuwux_log("sigsys skip scope rax=%llx rip=%llx (wine-system band)\n",
