@@ -174,6 +174,10 @@ static void patch_kuser_shared_data(void)
     *(UINT64 *)(kuser + 0x374) = 0x0;
     *(UINT32 *)(kuser + 0x37C) = 0x1;
     *(UINT64 *)(kuser + 0x3C0) = 0x83000100000010;
+
+    /* SystemCall – force user-mode dispatch (same as syscall_hack.dll). */
+    *(UINT8 *)(kuser + 0x308) = 0;
+
     *(UINT32 *)(kuser + 0xFFC) = 0x13371337;
     linuwux_log("kuser_shared_data: patched\n");
 }
@@ -212,6 +216,9 @@ static void patch_legacy_kuser_shared_data(void)
     *(UINT32 *)(kuser + 0x2f4) = 0;
     *(UINT32 *)(kuser + 0x264) = 1;
     *(UINT32 *)(kuser + 0x270) = 0;
+
+    /* SystemCall – force user-mode dispatch (same as syscall_hack.dll). */
+    *(UINT8 *)(kuser + 0x308) = 0;
 
     MESSAGE("Initialized legacy Reflex KUSER_SHARED_DATA profile.\n");
     linuwux_log("kuser_shared_data: legacy profile patched\n");
@@ -423,7 +430,7 @@ static int linuwux_sigsys_route(void *sigcontext)
                     (void *)TargetSysHandler);
         xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
         ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
-        ctx->uc_mcontext.gregs[REG_RCX] = TargetSysHandler;
+        ctx->uc_mcontext.gregs[REG_RCX] = target;
         ctx->uc_mcontext.gregs[REG_RIP] = TargetSysHandler;
         return 1;
     }
