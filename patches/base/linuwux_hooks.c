@@ -33,6 +33,11 @@
  *   needs at least one redirect from that range (rax=0xffe).
  *   Set LINUWUX_REDIRECT_ALL=1 to restore pre-scope behaviour.
  *   Wine-system skips are intentional and not logged (too hot under DEBUG).
+ *
+ * Trampoline resume (dev/trampoline-resume-rip):
+ *   Default path in reflex does mov rcx,rax / sub rcx,2 / jmp rcx after
+ *   arming xmm5 bypass magic. RAX must be the re-entry code address
+ *   (SIGSYS RIP + 2), not a syscall argument.
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
@@ -352,10 +357,24 @@ static int linuwux_sigsys_route(void *sigcontext)
         linuwux_log("sigsys redirect rax=%llx rip=%llx → TargetSysHandler=%p\n",
                     syscall_nr, rip, (void *)TargetSysHandler);
 
-        xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
-        ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
-        ctx->uc_mcontext.gregs[REG_RCX] = TargetSysHandler;
-        ctx->uc_mcontext.gregs[REG_RIP] = TargetSysHandler;
+        /*
+         * Protocol match for current reflex trampoline (RVA 0x1000):
+         *   mov rcx, rax
+         *   … special cases …
+         *   movq xmm5, 0x1337133713371337   ; bypass on re-issue
+         *   mov eax, r11d                  ; syscall nr from xmm4
+         *   sub rcx, 2
+         *   jmp rcx
+         *
+         * Linux SIGSYS reports RIP at the syscall insn (0F 05). Pass
+         * rip+2 in RAX so after sub 2 the trampoline re-enters that insn.
+         * Old behaviour (rax = guest rcx) treated an argument as a code
+         * pointer and caused execute AVs (e.g. 0x225FF on BL4 1.9).
+         */
+        xmm_regs[4] = syscall_nr & 0xFFFFFFFF;
+        ctx->uc_mcontext.gregs[REG_RAX] = (long long)(rip + 2);
+        ctx->uc_mcontext.gregs[REG_RCX] = (long long)TargetSysHandler;
+        ctx->uc_mcontext.gregs[REG_RIP] = (long long)TargetSysHandler;
         return 1;
     }
 
