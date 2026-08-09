@@ -378,8 +378,11 @@ static int linuwux_sigsys_route(void *sigcontext)
         else
             resume = rip;
 
-        linuwux_log("sigsys redirect rax=%llx rip=%llx bytes=%02x %02x resume=%llx → TargetSysHandler=%p\n",
-                    syscall_nr, rip, b0, b1, resume, (void *)TargetSysHandler);
+        linuwux_log("sigsys redirect rax=%llx rip=%llx resume=%llx → %p\n",
+                    syscall_nr, rip, resume, (void *)TargetSysHandler);
+        /* Neighbourhood dump: confirm whether 0F 05 sits at rip-2 (syscall; ret). */
+        linuwux_log("sigsys near -4=%02x %02x -2=%02x %02x | %02x %02x +2=%02x %02x\n",
+                    ip[-4], ip[-3], ip[-2], ip[-1], b0, b1, ip[2], ip[3]);
 
         xmm_regs[4] = syscall_nr & 0xFFFFFFFF;
         ctx->uc_mcontext.gregs[REG_RAX] = (long long)resume;
