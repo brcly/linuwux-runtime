@@ -155,7 +155,7 @@ static void patch_kuser_shared_data(void)
         return;
     }
 
-    /* NtSystemRoot – stable "C:\Windows" (unsigned short, not WCHAR/L""). */
+    /* NtSystemRoot – stable "C:\\Windows" (unsigned short, not WCHAR/L""). */
     {
         static const unsigned short nt_system_root[] = {
             'C', ':', '\\', 'W', 'i', 'n', 'd', 'o', 'w', 's', 0
@@ -214,6 +214,9 @@ static void patch_kuser_shared_data(void)
     *(UINT64 *)(kuser + 0x374) = 0x0;
     *(UINT32 *)(kuser + 0x37C) = 0x1;
     *(UINT64 *)(kuser + 0x3C0) = 0x83000100000010;
+
+    /* SystemCall – force user-mode dispatch (same as syscall_hack.dll). */
+    *(UINT8 *)(kuser + 0x308) = 0;
 
     *(UINT32 *)(kuser + 0xFFC) = 0x13371337;
 
