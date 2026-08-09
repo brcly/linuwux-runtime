@@ -430,7 +430,7 @@ static int linuwux_sigsys_route(void *sigcontext)
                     (void *)TargetSysHandler);
         xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
         ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
-        ctx->uc_mcontext.gregs[REG_RCX] = target;
+        ctx->uc_mcontext.gregs[REG_RCX] = TargetSysHandler;
         ctx->uc_mcontext.gregs[REG_RIP] = TargetSysHandler;
         return 1;
     }
