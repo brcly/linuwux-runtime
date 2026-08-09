@@ -33,6 +33,11 @@
  *   needs at least one redirect from that range (rax=0xffe).
  *   Set LINUWUX_REDIRECT_ALL=1 to restore pre-scope behaviour.
  *   Wine-system skips are intentional and not logged (too hot under DEBUG).
+ *
+ * Trampoline resume (dev/trampoline-resume-rip):
+ *   Default path in reflex does mov rcx,rax / sub rcx,2 / jmp rcx after
+ *   arming xmm5 bypass magic. RAX must be a code address so after sub 2 we
+ *   land on the syscall insn — not a syscall argument.
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
@@ -334,6 +339,9 @@ static int linuwux_sigsys_route(void *sigcontext)
     __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
     unsigned long long syscall_nr;
     unsigned long long rip;
+    unsigned long long resume;
+    unsigned char *ip;
+    unsigned char b0 = 0, b1 = 0;
 
     if (TargetSysHandler != 0 &&
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFF) != 0x1337133713371337) {
@@ -349,13 +357,37 @@ static int linuwux_sigsys_route(void *sigcontext)
         if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system(rip))
             return 0;
 
-        linuwux_log("sigsys redirect rax=%llx rip=%llx → TargetSysHandler=%p\n",
-                    syscall_nr, rip, (void *)TargetSysHandler);
+        /*
+         * Protocol match for current reflex trampoline (RVA 0x1000):
+         *   mov rcx, rax
+         *   … special cases …
+         *   movq xmm5, 0x1337133713371337   ; bypass on re-issue
+         *   mov eax, r11d                  ; syscall nr from xmm4
+         *   sub rcx, 2
+         *   jmp rcx
+         *
+         * RAX must be a code address so after sub 2 we land on the syscall
+         * insn. If SIGSYS RIP is already at 0F 05, pass rip+2; if RIP is
+         * already past the insn, pass rip as-is.
+         */
+        ip = (unsigned char *)(uintptr_t)rip;
+        b0 = ip[0];
+        b1 = ip[1];
+        if (b0 == 0x0f && b1 == 0x05)
+            resume = rip + 2;
+        else
+            resume = rip;
 
-        xmm_regs[4] = ctx->uc_mcontext.gregs[REG_RAX] & 0xFFFFFFFF;
-        ctx->uc_mcontext.gregs[REG_RAX] = ctx->uc_mcontext.gregs[REG_RCX];
-        ctx->uc_mcontext.gregs[REG_RCX] = TargetSysHandler;
-        ctx->uc_mcontext.gregs[REG_RIP] = TargetSysHandler;
+        linuwux_log("sigsys redirect rax=%llx rip=%llx resume=%llx → %p\n",
+                    syscall_nr, rip, resume, (void *)TargetSysHandler);
+        /* Neighbourhood dump: confirm whether 0F 05 sits at rip-2 (syscall; ret). */
+        linuwux_log("sigsys near -4=%02x %02x -2=%02x %02x | %02x %02x +2=%02x %02x\n",
+                    ip[-4], ip[-3], ip[-2], ip[-1], b0, b1, ip[2], ip[3]);
+
+        xmm_regs[4] = syscall_nr & 0xFFFFFFFF;
+        ctx->uc_mcontext.gregs[REG_RAX] = (long long)resume;
+        ctx->uc_mcontext.gregs[REG_RCX] = (long long)TargetSysHandler;
+        ctx->uc_mcontext.gregs[REG_RIP] = (long long)TargetSysHandler;
         return 1;
     }
 
