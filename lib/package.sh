@@ -16,7 +16,8 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# user_settings wiring, configure, make redist, package, verify, cleanup.
+# Base file checks, configure, make redist, package, verify, cleanup.
+# DLL overrides live in the proton script (apply_proton_dll_overrides).
 # Sourced by build.sh — requires lib/common.sh already loaded.
 
 check_required_base_files() {
@@ -106,12 +107,6 @@ package_and_verify() {
 
     MISSING=0
     listing=$(tar -tf "$TARBALL" 2>/dev/null || true)
-    if grep -q 'user_settings.py' <<<"$listing"; then
-        info "user_settings.py is present in the package"
-    else
-        warn "user_settings.py was NOT found inside the archive"
-        MISSING=1
-    fi
     if grep -qE '(^|/)(proton|version)$' <<<"$listing"; then
         info "Core files (proton / version) look present"
     else
@@ -125,7 +120,7 @@ package_and_verify() {
         warn "Tarball is only ${SIZE_MB} MB – this is unusually small for a Proton redist"
     fi
 
-    [[ $MISSING -eq 0 ]] || die "Package failed verification (missing user_settings.py or core files) – see warnings above"
+    [[ $MISSING -eq 0 ]] || die "Package failed verification (missing core files) – see warnings above"
 
     mkdir -p "$DIST_DIR"
     FINAL_TARBALL="${DIST_DIR}/$(basename "$TARBALL")"
