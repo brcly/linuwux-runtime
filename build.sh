@@ -26,7 +26,8 @@ set -euo pipefail
 #   source.sh         – clone, submodules, stage patches/wine
 #   apply-content.sh  – hooks install + content inserts
 #   apply-patches.sh  – traditional .patch apply + GE protonprep
-#   package.sh        – user_settings, configure, redist, verify
+#   apply-proton-dll.sh – winmm/version/reflex + lsteamclient defaults
+#   package.sh        – base checks, configure, redist, verify
 # ============================================================
 
 VERSION="26.08.09"
@@ -111,6 +112,7 @@ Required files:
   patches/base/hwprofile_guid.reg
   patches/base/set_faketime.protocol
   patches/wine/server/0001-apply_faketime.patch
+  lib/apply-proton-dll.sh
 
   With --legacy-reflex also:
   patches/legacy-reflex/linuwux_hooks_legacy.c
