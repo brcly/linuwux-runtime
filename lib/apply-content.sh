@@ -24,7 +24,7 @@
 # Proton-script inserts (force wineboot) also live here.
 
 apply_regedit_fix() {
-    local wine_dir="$1"
+    local wine_dir="wine"
     local inf="${wine_dir}/loader/wine.inf.in"
     local content_file="${PATCHES_DIR}/base/hwprofile_guid.reg"
 
@@ -42,7 +42,7 @@ apply_regedit_fix() {
 }
 
 apply_faketime_protocol_fix() {
-    local wine_dir="$1"
+    local wine_dir="wine"
     local proto="${wine_dir}/server/protocol.def"
     local content_file="${PATCHES_DIR}/base/set_faketime.protocol"
 
@@ -63,7 +63,7 @@ apply_faketime_protocol_fix() {
 # sigsys_handler (so REG_* macros already exist).
 # --legacy-reflex uses linuwux_hooks_legacy.c; otherwise linuwux_hooks.c.
 apply_linuwux_hooks() {
-    local wine_dir="$1"
+    local wine_dir="wine"
     local unix_dir="${wine_dir}/dlls/ntdll/unix"
     local target="${unix_dir}/signal_x86_64.c"
     local hooks_src hooks_label
@@ -113,7 +113,7 @@ EOF
 }
 
 apply_cpuid_spoof_handler_fix() {
-    local wine_dir="$1"
+    local wine_dir="wine"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local stub
 
@@ -146,7 +146,7 @@ EOF
 }
 
 apply_signal_init_process_hooks() {
-    local wine_dir="$1"
+    local wine_dir="wine"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local stub
 
@@ -180,7 +180,7 @@ EOF
 }
 
 apply_sigsys_handler_fix() {
-    local wine_dir="$1"
+    local wine_dir="wine"
     local target="${wine_dir}/dlls/ntdll/unix/signal_x86_64.c"
     local stub
 
@@ -274,6 +274,3 @@ EOF
     grep -qF 'linuwux-force-wineboot' "$target" || plog_die "force-wineboot insert produced no change"
     plog "  Inserted cold-start wineboot gate after line $anchor_line (after setup_prefix())"
 }
-# Native DLL overrides (winmm/version/reflex) + lsteamclient default
-# shellcheck source=lib/apply-proton-dll.sh
-source "$LIB_DIR/apply-proton-dll.sh"

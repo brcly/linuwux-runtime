@@ -53,6 +53,8 @@ source "${LIB_DIR}/source.sh"
 source "${LIB_DIR}/apply-content.sh"
 # shellcheck source=lib/apply-patches.sh
 source "${LIB_DIR}/apply-patches.sh"
+# shellcheck source=lib/apply-proton-dll.sh
+source "${LIB_DIR}/apply-proton-dll.sh"
 # shellcheck source=lib/package.sh
 source "${LIB_DIR}/package.sh"
 
@@ -165,6 +167,7 @@ if ! command -v xz >/dev/null 2>&1; then
 fi
 
 FREE_GB=$(df -BG --output=avail "$SCRIPT_DIR" 2>/dev/null | tail -1 | tr -dc '0-9' || echo 0)
+: "${FREE_GB:=0}"
 if [[ "$FREE_GB" -gt 0 && "$FREE_GB" -lt 35 ]]; then
     warn "Only ~${FREE_GB} GB free under $SCRIPT_DIR – a full build typically needs 30-40 GB"
 elif [[ "$FREE_GB" -gt 0 ]]; then
@@ -198,13 +201,13 @@ else
     info "CachyOS – applying LinUwUx patches on the host (not relying on upstream auto-apply)"
 fi
 
-apply_regedit_fix "wine"
-apply_faketime_protocol_fix "wine"
-apply_linuwux_hooks "wine"
-apply_cpuid_spoof_handler_fix "wine"
-apply_signal_init_process_hooks "wine"
-apply_sigsys_handler_fix "wine"
-apply_linuwux_patches "wine"
+apply_regedit_fix
+apply_faketime_protocol_fix
+apply_linuwux_hooks
+apply_cpuid_spoof_handler_fix
+apply_signal_init_process_hooks
+apply_sigsys_handler_fix
+apply_linuwux_patches
 
 if [[ "$VARIANT" == "cachyos" ]]; then
     # Avoid CachyOS's own patch pass re-applying staged files after we already did.

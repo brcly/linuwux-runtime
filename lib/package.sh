@@ -33,6 +33,8 @@ check_required_base_files() {
         || die "hwprofile_guid.reg not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/set_faketime.protocol" ]] \
         || die "set_faketime.protocol not found under ${PATCHES_DIR}/base/ – required"
+    [[ -f "${PATCHES_DIR}/wine/server/0001-apply_faketime.patch" ]] \
+        || die "0001-apply_faketime.patch not found under ${PATCHES_DIR}/wine/server/ – required"
     [[ -f "${LIB_DIR}/apply-proton-dll.sh" ]] \
         || die "apply-proton-dll.sh not found under ${LIB_DIR}/ – required"
 

@@ -212,7 +212,6 @@ stage_wine_patches() {
 
     [[ -d "$PATCHES_DIR/wine" ]] || die "No patches/wine/ under $PATCHES_DIR"
     cp -r "$PATCHES_DIR/wine/." patches/wine/
-    rm -rf patches/wine/loader
 
     [[ -n "$(find patches/wine -name '*.patch' 2>/dev/null)" ]] \
         || die "No patch files found under patches/wine/ - check $PATCHES_DIR"

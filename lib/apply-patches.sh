@@ -37,7 +37,7 @@ apply_patch_file() {
 }
 
 apply_linuwux_patches() {
-    local wine_dir="$1"
+    local wine_dir="wine"
     local patch_log="${PATCH_LOG:-${LOG_DIR}/linuwux-patches.log}"
     local failures=0
     plog "Applying traditional .patch files to $wine_dir ..."
