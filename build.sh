@@ -30,7 +30,7 @@ set -euo pipefail
 #   package.sh        – base checks, configure, redist, verify
 # ============================================================
 
-VERSION="26.08.09"
+VERSION="26.08.10"
 CONTAINER_ENGINE="podman"
 PATCH_REPO="https://github.com/brcly/proton-LinUwUx-patch.git"
 PATCH_BRANCH="${PATCH_BRANCH:-main}"
@@ -182,6 +182,7 @@ header "$HR"
 
 ensure_patches_dir
 setup_paths
+check_required_base_files
 clone_or_reuse_source
 update_submodules
 stage_wine_patches
@@ -212,8 +213,6 @@ fi
 
 apply_force_wineboot_first_run
 apply_proton_dll_overrides
-apply_proton_script_patches
-check_required_base_files
 run_configure_and_build
 package_and_verify
 cleanup_trees

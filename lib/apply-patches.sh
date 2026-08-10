@@ -49,12 +49,13 @@ apply_linuwux_patches() {
             || failures=$((failures+1))
     done < <(find "$SRC_DIR/patches/wine" -name '*.patch' | sort)
 
-    # Sanity-check that content inserts already landed (hooks + call stub).
+    # Sanity-check that content inserts already landed (hooks + call stubs).
     if grep -qF 'linuwux-hooks-include' dlls/ntdll/unix/signal_x86_64.c &&
-       grep -qF 'linuwux-cpuid-handler-call' dlls/ntdll/unix/signal_x86_64.c; then
-        plog "  Hooks include and CPUID call stub are present"
+       grep -qF 'linuwux-cpuid-handler-call' dlls/ntdll/unix/signal_x86_64.c &&
+       grep -qF 'linuwux-sigsys-handler-call' dlls/ntdll/unix/signal_x86_64.c; then
+        plog "  Hooks include + CPUID/SIGSYS call stubs are present"
     else
-        plog_warn "  Missing linuwux hooks include and/or CPUID call stub"
+        plog_warn "  Missing linuwux hooks include and/or CPUID/SIGSYS call stub"
         failures=$((failures+1))
     fi
 
@@ -94,22 +95,4 @@ ge_protonprep() {
     else
         info "protonprep log clean – no failures mentioned"
     fi
-}
-
-apply_proton_script_patches() {
-    local patch_log="${PATCH_LOG:-${LOG_DIR}/linuwux-patches.log}"
-    local failures=0
-    local proton_patch_dir="${PATCHES_DIR}/proton"
-
-    [[ -d "$proton_patch_dir" ]] || return 0
-
-    plog "Applying proton-script patches in $SRC_DIR ..."
-    pushd "$SRC_DIR" > /dev/null
-    while IFS= read -r patch_file; do
-        apply_patch_file "$patch_file" "$(basename "$patch_file")" "$patch_log" \
-            || failures=$((failures+1))
-    done < <(find "$proton_patch_dir" -name '*.patch' | sort)
-    popd > /dev/null
-
-    [[ $failures -eq 0 ]] || plog_die "$failures proton-script patch(es) failed – see $patch_log"
 }
