@@ -19,13 +19,13 @@ lib/
   source.sh              # clone, submodules, stage patches/wine
   apply-content.sh       # content inserts + hooks install
   apply-patches.sh       # traditional .patch apply + GE protonprep
-  package.sh             # user_settings, configure, redist, verify
+  apply-proton-dll.sh    # winmm/version/reflex + lsteamclient defaults
+  package.sh             # base checks, configure, redist, verify
 patches/
   base/
     linuwux_hooks.c      # modern ntdll unix hooks (bulk logic)
     hwprofile_guid.reg
     set_faketime.protocol
-    user_settings.py
   legacy-reflex/
     linuwux_hooks_legacy.c   # same API; used only with --legacy-reflex
   wine/
@@ -40,6 +40,7 @@ The script runs these steps automatically:
 2. `#include "linuwux_hooks.c"` into `signal_x86_64.c` (before Linux `sigsys_handler`, after `REG_*` macros).
 3. Inject tiny call stubs into `segv_handler`, Linux `sigsys_handler`, and `signal_init_process`.
 4. Append HwProfileGuid / `set_faketime` protocol definitions; apply the server faketime `.patch`; regenerate protocol headers.
+5. Content-insert `winmm` / `version` / `reflex` = `n,b` and default `PROTON_DISABLE_LSTEAMCLIENT=1` into the `proton` launcher script (so natives load without relying on `user_settings.py`).
 
 The signal file stays almost stock. All bulk logic lives in one hooks file you can edit without fighting context diffs.
 
@@ -131,6 +132,7 @@ Restart Steam and select the tool under the game’s *Compatibility* settings.
 - SIGSYS stubs target Linux/`HAVE_SECCOMP` only (Apple handler untouched).
 - Startup version check is warn-only (never aborts the build).
 - CachyOS defaults to a **published release tag** (`cachyos-*-slr`), not the newest development branch, so submodule pins match a known-good release.
+- Native `winmm` / `version` / `reflex` overrides and `PROTON_DISABLE_LSTEAMCLIENT` are baked into the `proton` script at build time (no `user_settings.py`).
 
 ## License
 
