@@ -108,7 +108,6 @@ How hooks land:
 
 Required files:
   patches/base/linuwux_hooks.c
-  patches/base/user_settings.py
   patches/base/hwprofile_guid.reg
   patches/base/set_faketime.protocol
   patches/wine/server/0001-apply_faketime.patch
@@ -212,8 +211,7 @@ fi
 apply_force_wineboot_first_run
 apply_proton_dll_overrides
 apply_proton_script_patches
-install_user_settings_and_check_base
-wire_makefile_user_settings
+check_required_base_files
 run_configure_and_build
 package_and_verify
 cleanup_trees

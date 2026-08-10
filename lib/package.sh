@@ -19,12 +19,9 @@
 # user_settings wiring, configure, make redist, package, verify, cleanup.
 # Sourced by build.sh — requires lib/common.sh already loaded.
 
-install_user_settings_and_check_base() {
-    info "Installing user_settings.py and checking required base files..."
+check_required_base_files() {
+    info "Checking required base files..."
 
-    local user_settings_src="${PATCHES_DIR}/base/user_settings.py"
-    [[ -f "$user_settings_src" ]] \
-        || die "user_settings.py not found at $user_settings_src – obtain it and place it there before building"
     [[ -f "${PATCHES_DIR}/base/linuwux_hooks.c" ]] \
         || die "linuwux_hooks.c not found under ${PATCHES_DIR}/base/ – required"
     if [[ $LEGACY_REFLEX -eq 1 ]]; then
@@ -35,48 +32,10 @@ install_user_settings_and_check_base() {
         || die "hwprofile_guid.reg not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/set_faketime.protocol" ]] \
         || die "set_faketime.protocol not found under ${PATCHES_DIR}/base/ – required"
+    [[ -f "${LIB_DIR}/apply-proton-dll.sh" ]] \
+        || die "apply-proton-dll.sh not found under ${LIB_DIR}/ – required"
 
-    cp "$user_settings_src" user_settings.py
-    info "  Installed from $user_settings_src"
-}
-
-wire_makefile_user_settings() {
-    info "Ensuring user_settings.py is included in the package..."
-
-    if grep -q 'USER_SETTINGS_REAL_TARGET' Makefile.in; then
-        info "Makefile.in already contains the rule"
-        return
-    fi
-
-    local anchor_dst='USER_SETTINGS_PY_TARGET := $(addprefix $(DST_BASE)/,user_settings.sample.py)'
-    local anchor_src='$(USER_SETTINGS_PY_TARGET): $(addprefix $(SRCDIR)/,user_settings.sample.py)'
-    local anchor_dist='DIST_COPY_TARGETS := $(FILELOCK_TARGET) $(PROTON_PY_TARGET) \'
-
-    grep -qF "$anchor_dst"  Makefile.in || die "Makefile.in anchor missing (DST_BASE target) – upstream layout changed"
-    grep -qF "$anchor_src"  Makefile.in || die "Makefile.in anchor missing (SRCDIR target) – upstream layout changed"
-    grep -qF "$anchor_dist" Makefile.in || die "Makefile.in anchor missing (DIST_COPY_TARGETS) – upstream layout changed"
-
-    sed -i \
-        -e '/USER_SETTINGS_PY_TARGET := \$(addprefix \$(DST_BASE)\/,user_settings.sample.py)/a\
-USER_SETTINGS_REAL_TARGET := \$(addprefix \$(DST_BASE)\/,user_settings.py)' \
-        Makefile.in
-
-    sed -i \
-        -e '/\$(USER_SETTINGS_PY_TARGET): \$(addprefix \$(SRCDIR)\/,user_settings.sample.py)/a\
-\$(USER_SETTINGS_REAL_TARGET): \$(addprefix \$(SRCDIR)\/,user_settings.py)' \
-        Makefile.in
-
-    sed -i \
-        -e 's|DIST_COPY_TARGETS := \$(FILELOCK_TARGET) \$(PROTON_PY_TARGET) \\|DIST_COPY_TARGETS := \$(FILELOCK_TARGET) \$(PROTON_PY_TARGET) \$(USER_SETTINGS_REAL_TARGET) \\|' \
-        Makefile.in
-
-    grep -qF 'USER_SETTINGS_REAL_TARGET := $(addprefix $(DST_BASE)/,user_settings.py)' Makefile.in \
-        || die "Makefile.in edit failed: DST_BASE rule not inserted"
-    grep -qF '$(USER_SETTINGS_REAL_TARGET): $(addprefix $(SRCDIR)/,user_settings.py)' Makefile.in \
-        || die "Makefile.in edit failed: SRCDIR rule not inserted"
-    grep -qF 'DIST_COPY_TARGETS := $(FILELOCK_TARGET) $(PROTON_PY_TARGET) $(USER_SETTINGS_REAL_TARGET)' Makefile.in \
-        || die "Makefile.in edit failed: DIST_COPY_TARGETS not updated"
-    info "Makefile.in updated"
+    info "  Base files present"
 }
 
 run_configure_and_build() {
