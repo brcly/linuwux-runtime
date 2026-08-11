@@ -33,6 +33,23 @@
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
 
+/*
+ * Standard headers this file needs directly, rather than relying on
+ * whatever signal_x86_64.c happens to have already pulled in by the point
+ * of #include -- see the non-legacy linuwux_hooks.c for why. Standard
+ * headers are self-guarding, so re-including them here is safe even when
+ * signal_x86_64.c already pulled them in earlier.
+ */
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <signal.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <sys/mman.h>
+
 #ifndef LINUWUX_LOG_DEFINED
 #define LINUWUX_LOG_DEFINED
 static void linuwux_log(const char *fmt, ...)

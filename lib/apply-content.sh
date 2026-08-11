@@ -59,8 +59,10 @@ apply_faketime_protocol_fix() {
     fi
 }
 
-# Copy hooks source into the wine tree and #include it once, before Linux
-# sigsys_handler (so REG_* macros already exist).
+# Copy hooks source into the wine tree and #include it once, before whichever
+# of segv_handler / sigsys_handler comes first in the file (both take call
+# stubs that need our declarations already visible -- their relative order
+# isn't guaranteed to stay the same across wine trees).
 # --legacy-reflex uses linuwux_hooks_legacy.c; otherwise linuwux_hooks.c.
 apply_linuwux_hooks() {
     local wine_dir="wine"
@@ -90,15 +92,26 @@ apply_linuwux_hooks() {
         return
     fi
 
-    local test_line func_line
+    local test_line sigsys_line segv_line func_line
     test_line=$(grep -Fn 'SIGSYS, rax %#lx, rip %#lx' "$target" | head -1 | cut -d: -f1)
     [[ -n "$test_line" ]] || plog_die "Could not find SIGSYS trace string (Linux sigsys_handler) in $target"
 
-    func_line=$(awk -v end="$test_line" '
+    sigsys_line=$(awk -v end="$test_line" '
         NR <= end && /^static void sigsys_handler/ { line = NR }
         END { if (line) print line }
     ' "$target")
-    [[ -n "$func_line" ]] || plog_die "Could not find 'static void sigsys_handler' above SIGSYS trace string"
+    [[ -n "$sigsys_line" ]] || plog_die "Could not find 'static void sigsys_handler' above SIGSYS trace string"
+
+    segv_line=$(grep -n '^static void segv_handler' "$target" | head -1 | cut -d: -f1)
+    [[ -n "$segv_line" ]] || plog_die "Could not find 'static void segv_handler' in $target"
+
+    # Insert before whichever function starts first -- both segv_handler and
+    # sigsys_handler get call stubs referencing our symbols.
+    if [[ "$segv_line" -lt "$sigsys_line" ]]; then
+        func_line="$segv_line"
+    else
+        func_line="$sigsys_line"
+    fi
 
     stub=$(mktemp -p "$(dirname "$target")")
     cat > "$stub" <<'EOF'
@@ -109,7 +122,7 @@ EOF
     insert_before_line "$target" "$func_line" "$stub"
     rm -f "$stub"
     grep -qF 'linuwux-hooks-include' "$target" || plog_die "hooks include insert produced no change"
-    plog "  Inserted #include \"linuwux_hooks.c\" before Linux sigsys_handler (line $func_line)"
+    plog "  Inserted #include \"linuwux_hooks.c\" before line $func_line (earlier of segv_handler=$segv_line, sigsys_handler=$sigsys_line)"
 }
 
 apply_cpuid_spoof_handler_fix() {
