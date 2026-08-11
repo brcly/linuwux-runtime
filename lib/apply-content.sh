@@ -91,14 +91,14 @@ apply_linuwux_hooks() {
     fi
 
     local test_line func_line
-    test_line=$(grep -n '0xffff' "$target" | head -1 | cut -d: -f1)
-    [[ -n "$test_line" ]] || plog_die "Could not find seccomp 0xffff test (Linux sigsys_handler) in $target"
+    test_line=$(grep -Fn 'SIGSYS, rax %#lx, rip %#lx' "$target" | head -1 | cut -d: -f1)
+    [[ -n "$test_line" ]] || plog_die "Could not find SIGSYS trace string (Linux sigsys_handler) in $target"
 
     func_line=$(awk -v end="$test_line" '
         NR <= end && /^static void sigsys_handler/ { line = NR }
         END { if (line) print line }
     ' "$target")
-    [[ -n "$func_line" ]] || plog_die "Could not find 'static void sigsys_handler' above 0xffff test"
+    [[ -n "$func_line" ]] || plog_die "Could not find 'static void sigsys_handler' above SIGSYS trace string"
 
     stub=$(mktemp -p "$(dirname "$target")")
     cat > "$stub" <<'EOF'
@@ -192,23 +192,9 @@ apply_sigsys_handler_fix() {
         return
     fi
 
-    local test_line func_line
-    test_line=$(grep -n '0xffff' "$target" | head -1 | cut -d: -f1)
-    [[ -n "$test_line" ]] || plog_die "Could not find seccomp 0xffff test (Linux sigsys_handler) in $target"
-
-    func_line=$(awk -v end="$test_line" '
-        NR <= end && /^static void sigsys_handler/ { line = NR }
-        END { if (line) print line }
-    ' "$target")
-    [[ -n "$func_line" ]] || plog_die "Could not find 'static void sigsys_handler' above 0xffff test"
-
     local anchor_line
-    anchor_line=$(awk -v start="$func_line" -v end="$test_line" '
-        NR >= start && NR <= end && /struct[[:space:]]+syscall_frame[[:space:]]*\*[[:space:]]*frame[[:space:]]*=[[:space:]]*get_syscall_frame/ {
-            print NR; exit
-        }
-    ' "$target")
-    [[ -n "$anchor_line" ]] || plog_die "Could not find get_syscall_frame() inside Linux sigsys_handler"
+    anchor_line=$(grep -Fn 'SIGSYS, rax %#lx, rip %#lx' "$target" | head -1 | cut -d: -f1)
+    [[ -n "$anchor_line" ]] || plog_die "Could not find SIGSYS trace string inside Linux sigsys_handler"
 
     stub=$(mktemp -p "$(dirname "$target")")
     cat > "$stub" <<'EOF'
@@ -219,7 +205,7 @@ EOF
     insert_after_line "$target" "$anchor_line" "$stub"
     rm -f "$stub"
     grep -qF 'linuwux-sigsys-handler-call' "$target" || plog_die "sigsys call stub insert produced no change"
-    plog "  Inserted call stub after line $anchor_line (Linux/HAVE_SECCOMP sigsys_handler only)"
+    plog "  Inserted call stub after line $anchor_line (Linux/HAVE_SECCOMP sigsys_handler only, anchored on SIGSYS trace string)"
 }
 
 # Force one wineboot -u on a fresh prefix. Context-diff patches against proton
