@@ -38,6 +38,20 @@
  *   Default path in reflex does mov rcx,rax / sub rcx,2 / jmp rcx after
  *   arming xmm5 bypass magic. RAX must be a code address so after sub 2 we
  *   land on the syscall insn — not a syscall argument.
+ *
+ * LINUWUX_STOP_SYSCALL=<hex|dec> (dev/linuwux-stop-syscall, throwaway):
+ *   Freeze with SIGSTOP right before a redirect into TargetSysHandler whose
+ *   syscall number (rax) matches. LINUWUX_STOP_SYSCALL_SKIP=<n> skips the
+ *   first n matches so one specific occurrence can be isolated. Occurrence
+ *   count of a shared syscall number is NOT reliably deterministic across
+ *   runs (BL4 has multiple unrelated rax=0x18 call sites) — prefer
+ *   LINUWUX_STOP_RIP below once the exact faulting rip is known.
+ *
+ * LINUWUX_STOP_RIP=<hex|dec> (dev/linuwux-stop-syscall, throwaway):
+ *   Freeze with SIGSTOP the instant a redirect's fault rip matches exactly.
+ *   BL4's addr=0x225FF crash always faults from rip=0x1572cee4c — deterministic
+ *   per call site, unlike counting syscall-number occurrences. Continue with
+ *   kill -CONT <pid>.
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
@@ -86,6 +100,98 @@ static int linuwux_redirect_all_enabled(void)
 {
     const char *env = getenv("LINUWUX_REDIRECT_ALL");
     return env && env[0] == '1' && env[1] == '\0';
+}
+
+/*
+ * Throwaway debug aid (dev/linuwux-stop-syscall): freeze the process with
+ * SIGSTOP right before a specific matching redirect into TargetSysHandler,
+ * so a debugger can attach and step through the trampoline for that exact
+ * call. Targets a syscall number (rax) and, optionally, skips the first N
+ * matches so a specific occurrence can be isolated (e.g. BL4's rax=0x18
+ * crash only reproduces on the 3rd redirect of that syscall number, not
+ * the first two).
+ *
+ *   LINUWUX_STOP_SYSCALL=<hex|dec>   syscall number (rax) to match
+ *   LINUWUX_STOP_SYSCALL_SKIP=<n>    skip the first n matches (default 0)
+ *
+ * Continue with kill -CONT <pid> or gdb continue.
+ */
+static void linuwux_maybe_stop_for_syscall(unsigned long long syscall_nr,
+                                            unsigned long long rip,
+                                            unsigned long long resume)
+{
+    static int match_count;
+    static int stopped_once;
+    const char *env_sys;
+    const char *env_skip;
+    unsigned long long target;
+    int skip;
+
+    if (stopped_once)
+        return;
+
+    env_sys = getenv("LINUWUX_STOP_SYSCALL");
+    if (!env_sys || env_sys[0] == '\0')
+        return;
+
+    target = strtoull(env_sys, NULL, 0);
+    if (syscall_nr != target)
+        return;
+
+    skip = 0;
+    env_skip = getenv("LINUWUX_STOP_SYSCALL_SKIP");
+    if (env_skip && env_skip[0] != '\0')
+        skip = atoi(env_skip);
+
+    if (match_count++ < skip)
+        return;
+
+    stopped_once = 1;
+    /* Always print — attach window is useless if only DEBUG sees it. */
+    fprintf(stderr,
+            "[linuwux] LINUWUX_STOP_SYSCALL: SIGSTOP pid=%d before redirect #%d of "
+            "syscall %#llx (rip=%#llx resume=%#llx). Attach debugger, then kill -CONT %d\n",
+            getpid(), match_count, syscall_nr, rip, resume, getpid());
+    fflush(stderr);
+    raise(SIGSTOP);
+}
+
+/*
+ * Throwaway debug aid (dev/linuwux-stop-syscall): freeze the instant a
+ * redirect's fault RIP matches exactly, for isolating one deterministic
+ * call site (e.g. BL4's rax=0x18 crash always faults from rip=0x1572cee4c
+ * regardless of how many other rax=0x18 redirects happened earlier in the
+ * run) rather than counting occurrences of a shared syscall number.
+ *
+ *   LINUWUX_STOP_RIP=<hex|dec>   exact fault rip to match
+ *
+ * Continue with kill -CONT <pid> or gdb continue.
+ */
+static void linuwux_maybe_stop_for_rip(unsigned long long rip,
+                                        unsigned long long resume)
+{
+    static int stopped_once;
+    const char *env_rip;
+    unsigned long long target;
+
+    if (stopped_once)
+        return;
+
+    env_rip = getenv("LINUWUX_STOP_RIP");
+    if (!env_rip || env_rip[0] == '\0')
+        return;
+
+    target = strtoull(env_rip, NULL, 0);
+    if (rip != target)
+        return;
+
+    stopped_once = 1;
+    fprintf(stderr,
+            "[linuwux] LINUWUX_STOP_RIP: SIGSTOP pid=%d at matching rip=%#llx "
+            "(resume=%#llx). Attach debugger, then kill -CONT %d\n",
+            getpid(), rip, resume, getpid());
+    fflush(stderr);
+    raise(SIGSTOP);
 }
 
 static void detect_cpu_vendor(void)
@@ -384,10 +490,21 @@ static int linuwux_sigsys_route(void *sigcontext)
         linuwux_log("sigsys near -4=%02x %02x -2=%02x %02x | %02x %02x +2=%02x %02x\n",
                     ip[-4], ip[-3], ip[-2], ip[-1], b0, b1, ip[2], ip[3]);
 
-        xmm_regs[4] = syscall_nr & 0xFFFFFFFF;
+        /*
+         * Only the trampoline's `movd %xmm4,%r11d` (low 32 bits) is read.
+         * A raw `syscall` never touches XMM state, so preserve xmm4's upper
+         * 96 bits rather than zeroing them here — the guest may have live
+         * SSE-resident data stashed there across this syscall boundary.
+         */
+        xmm_regs[4] = (xmm_regs[4] & ~(__uint128_t)0xFFFFFFFFULL) | (syscall_nr & 0xFFFFFFFF);
         ctx->uc_mcontext.gregs[REG_RAX] = (long long)resume;
         ctx->uc_mcontext.gregs[REG_RCX] = (long long)TargetSysHandler;
         ctx->uc_mcontext.gregs[REG_RIP] = (long long)TargetSysHandler;
+
+        /* Throwaway: freeze on a matching redirect so gdb can attach and
+         * step through TargetSysHandler with these exact register values. */
+        linuwux_maybe_stop_for_syscall(syscall_nr, rip, resume);
+        linuwux_maybe_stop_for_rip(rip, resume);
         return 1;
     }
 
