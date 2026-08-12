@@ -50,7 +50,12 @@ apply_linuwux_patches() {
     done < <(find "$SRC_DIR/patches/wine" -name '*.patch' | sort)
 
     # Sanity-check that content inserts already landed (hooks + call stubs).
-    if grep -qF 'linuwux-hooks-include' dlls/ntdll/unix/signal_x86_64.c &&
+    # Not applicable under --preload-interposition, which deliberately never
+    # inserts any of these -- the redirect logic lives in
+    # liblinuwux_preload.so instead.
+    if [[ ${PRELOAD_INTERPOSITION:-0} -eq 1 ]]; then
+        plog "  Skipping ntdll hooks-include/call-stub check (--preload-interposition)"
+    elif grep -qF 'linuwux-hooks-include' dlls/ntdll/unix/signal_x86_64.c &&
        grep -qF 'linuwux-cpuid-handler-call' dlls/ntdll/unix/signal_x86_64.c &&
        grep -qF 'linuwux-sigsys-handler-call' dlls/ntdll/unix/signal_x86_64.c; then
         plog "  Hooks include + CPUID/SIGSYS call stubs are present"

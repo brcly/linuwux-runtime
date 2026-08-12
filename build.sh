@@ -27,6 +27,7 @@ set -euo pipefail
 #   apply-content.sh  – hooks install + content inserts
 #   apply-patches.sh  – traditional .patch apply + GE protonprep
 #   apply-proton-dll.sh – winmm/version/reflex + lsteamclient defaults
+#   apply-preload.sh  – EXPERIMENTAL: --preload-interposition alternative
 #   package.sh        – base checks, configure, redist, verify
 # ============================================================
 
@@ -43,6 +44,7 @@ FORCE=0
 CLEAN=1
 LEGACY_REFLEX=0
 UPDATE_PATCHES=0
+PRELOAD_INTERPOSITION=0
 PATCH_LOG=""
 
 # shellcheck source=lib/common.sh
@@ -55,6 +57,8 @@ source "${LIB_DIR}/apply-content.sh"
 source "${LIB_DIR}/apply-patches.sh"
 # shellcheck source=lib/apply-proton-dll.sh
 source "${LIB_DIR}/apply-proton-dll.sh"
+# shellcheck source=lib/apply-preload.sh
+source "${LIB_DIR}/apply-preload.sh"
 # shellcheck source=lib/package.sh
 source "${LIB_DIR}/package.sh"
 
@@ -81,6 +85,7 @@ Examples:
   $(basename "$0") ge
   $(basename "$0") ge GE-Proton11-3
   $(basename "$0") --legacy-reflex ge GE-Proton11-3
+  $(basename "$0") --preload-interposition ge GE-Proton11-5
   $(basename "$0") --force --no-clean cachyos
   $(basename "$0") --update-patches
   $(basename "$0") --container-engine=docker ge
@@ -90,6 +95,11 @@ Options:
   -k, --no-clean              Keep -src/-build trees after a successful build
   --legacy-reflex             Use patches/legacy-reflex/linuwux_hooks_legacy.c
                               (older Reflex dual-trampoline protocol)
+  --preload-interposition     EXPERIMENTAL: build liblinuwux_preload.so and
+                              hook via LD_PRELOAD instead of patching
+                              ntdll's source. See patches/preload/
+                              linuwux_preload.c. Known gap: faketime CPUID
+                              leaf (0x336967) is unsupported in this mode.
   --update-patches            Delete and re-clone patches/ from this repo
   --container-engine=<name>   Container engine (default: podman)
   -h, --help                  Show this help
@@ -109,6 +119,12 @@ How hooks land:
   DLL overrides (winmm/version/reflex) and PROTON_DISABLE_LSTEAMCLIENT
   are content-inserted into the proton launcher script.
 
+  --preload-interposition builds liblinuwux_preload.so from
+  patches/preload/linuwux_preload.c instead and skips all of the above
+  ntdll-side hooks -- it hooks sigaction()/prctl() via LD_PRELOAD (content-
+  inserted into the proton launcher script) rather than patching
+  signal_x86_64.c's source at all.
+
 Required files:
   patches/base/linuwux_hooks.c
   patches/base/hwprofile_guid.reg
@@ -118,6 +134,9 @@ Required files:
 
   With --legacy-reflex also:
   patches/legacy-reflex/linuwux_hooks_legacy.c
+
+  With --preload-interposition also:
+  patches/preload/linuwux_preload.c
 
 EOF
     exit 0
@@ -132,6 +151,7 @@ while [[ $# -gt 0 ]]; do
         -f|--force)  FORCE=1; shift ;;
         -k|--no-clean) CLEAN=0; shift ;;
         --legacy-reflex) LEGACY_REFLEX=1; shift ;;
+        --preload-interposition) PRELOAD_INTERPOSITION=1; shift ;;
         --update-patches) UPDATE_PATCHES=1; shift ;;
         --container-engine=*)
             CONTAINER_ENGINE="${1#--container-engine=}"
@@ -203,10 +223,16 @@ fi
 
 apply_regedit_fix
 apply_faketime_protocol_fix
-apply_linuwux_hooks
-apply_cpuid_spoof_handler_fix
-apply_signal_init_process_hooks
-apply_sigsys_handler_fix
+if [[ $PRELOAD_INTERPOSITION -eq 1 ]]; then
+    info "--preload-interposition: skipping ntdll-side hooks entirely (segv/sigsys call stubs +"
+    info "  signal_init_process insert) -- liblinuwux_preload.so's own constructor does the"
+    info "  CPUID-fault-enable syscall that signal_init_process_hooks would otherwise insert"
+else
+    apply_linuwux_hooks
+    apply_cpuid_spoof_handler_fix
+    apply_signal_init_process_hooks
+    apply_sigsys_handler_fix
+fi
 apply_linuwux_patches
 
 if [[ "$VARIANT" == "cachyos" ]]; then
@@ -216,7 +242,13 @@ fi
 
 apply_force_wineboot_first_run
 apply_proton_dll_overrides
+if [[ $PRELOAD_INTERPOSITION -eq 1 ]]; then
+    apply_preload_ld_env
+fi
 run_configure_and_build
+if [[ $PRELOAD_INTERPOSITION -eq 1 ]]; then
+    build_preload_library
+fi
 package_and_verify
 cleanup_trees
 print_success
