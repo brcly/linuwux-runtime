@@ -93,7 +93,9 @@ apply_linuwux_hooks() {
     fi
 
     local test_line sigsys_line segv_line func_line
-    test_line=$(grep -Fn 'SIGSYS, rax %#lx, rip %#lx' "$target" | head -1 | cut -d: -f1)
+    # Prefix-only match, not the full printf format specifier -- GE 11-3's
+    # seccomp sigsys_handler uses %#llx, GE 11-5's unified one uses %#lx.
+    test_line=$(grep -Fn 'SIGSYS, rax %#' "$target" | head -1 | cut -d: -f1)
     [[ -n "$test_line" ]] || plog_die "Could not find SIGSYS trace string (Linux sigsys_handler) in $target"
 
     sigsys_line=$(awk -v end="$test_line" '
@@ -113,12 +115,22 @@ apply_linuwux_hooks() {
         func_line="$sigsys_line"
     fi
 
-    stub=$(mktemp -p "$(dirname "$target")")
-    cat > "$stub" <<'EOF'
-/* linuwux-hooks-include */
-#include "linuwux_hooks.c"
+    # Detect SUD support in *this* wine tree by content, not the build
+    # machine's <linux/prctl.h> (which doesn't reflect the tree being built).
+    # Anchor on the amd64_thread_data struct member, not a bare
+    # 'syscall_dispatch' substring, which also matches the unrelated
+    # __wine_syscall_dispatcher* PE-side trampoline symbols.
+    local sud_have=0
+    grep -qE 'amd64_thread_data,[[:space:]]*syscall_dispatch' "$target" && sud_have=1
+    plog "  Syscall User Dispatch support: $([[ $sud_have -eq 1 ]] && echo detected || echo "not present")"
 
-EOF
+    stub=$(mktemp -p "$(dirname "$target")")
+    {
+        echo '/* linuwux-hooks-include */'
+        echo "#define LINUWUX_HAVE_SUD ${sud_have}"
+        echo '#include "linuwux_hooks.c"'
+        echo
+    } > "$stub"
     insert_before_line "$target" "$func_line" "$stub"
     rm -f "$stub"
     grep -qF 'linuwux-hooks-include' "$target" || plog_die "hooks include insert produced no change"
@@ -150,7 +162,19 @@ apply_cpuid_spoof_handler_fix() {
     cat > "$stub" <<'EOF'
     /* linuwux-cpuid-handler-call */
     if (linuwux_cpuid_spoof(siginfo, sigcontext, ucontext))
+    {
+#if LINUWUX_HAVE_SUD
+        /*
+         * Every other exit path out of segv_handler() reaches leave_handler(),
+         * which re-arms Syscall User Dispatch (BLOCK) after init_handler()
+         * disarmed it (ALLOW) on entry -- this early return skipped that,
+         * permanently disarming SUD for the thread on the first spoofed
+         * CPUID. Not applicable pre-SUD (GE 11-3 / CachyOS).
+         */
+        leave_handler( ucontext );
+#endif
         return;
+    }
 EOF
     insert_after_line "$target" "$anchor_line" "$stub"
     rm -f "$stub"
@@ -206,7 +230,9 @@ apply_sigsys_handler_fix() {
     fi
 
     local anchor_line
-    anchor_line=$(grep -Fn 'SIGSYS, rax %#lx, rip %#lx' "$target" | head -1 | cut -d: -f1)
+    # Prefix-only match -- see apply_linuwux_hooks() for why (11-3 vs 11-5
+    # printf format specifier differs: %#llx vs %#lx).
+    anchor_line=$(grep -Fn 'SIGSYS, rax %#' "$target" | head -1 | cut -d: -f1)
     [[ -n "$anchor_line" ]] || plog_die "Could not find SIGSYS trace string inside Linux sigsys_handler"
 
     stub=$(mktemp -p "$(dirname "$target")")

@@ -75,6 +75,16 @@
 #include <stdint.h>
 #include <sys/mman.h>
 
+/*
+ * Set by apply_linuwux_hooks() (lib/apply-content.sh) from the wine tree's
+ * actual content -- 1 if signal_x86_64.c has Syscall User Dispatch support
+ * (GE-Proton 11-5+), 0 otherwise (GE 11-3, CachyOS). Not derived from the
+ * build machine's <linux/prctl.h>, which doesn't reflect the tree being built.
+ */
+#ifndef LINUWUX_HAVE_SUD
+#define LINUWUX_HAVE_SUD 0
+#endif
+
 #ifndef LINUWUX_LOG_DEFINED
 #define LINUWUX_LOG_DEFINED
 static void linuwux_log(const char *fmt, ...)
@@ -519,6 +529,19 @@ static int linuwux_sigsys_route(void *sigcontext)
         ctx->uc_mcontext.gregs[REG_RAX] = (long long)resume;
         ctx->uc_mcontext.gregs[REG_RCX] = (long long)TargetSysHandler;
         ctx->uc_mcontext.gregs[REG_RIP] = (long long)TargetSysHandler;
+
+#if LINUWUX_HAVE_SUD
+        /*
+         * Re-arm Syscall User Dispatch before diverting into TargetSysHandler.
+         * init_handler() disarms it (ALLOW) on every signal handler entry;
+         * Wine's normal completion paths re-arm it (BLOCK) before returning
+         * to app code, but our early `return 1` below reaches neither, so
+         * without this the selector stays stuck at ALLOW and every syscall
+         * on this thread afterwards runs raw instead of trapping back into
+         * Wine's NT emulation. No equivalent on GE 11-3 (seccomp, not SUD).
+         */
+        amd64_thread_data()->syscall_dispatch = 1; /* SYSCALL_DISPATCH_FILTER_BLOCK */
+#endif
 
         /* Throwaway: freeze on a matching redirect so gdb can attach and
          * step through TargetSysHandler with these exact register values. */
