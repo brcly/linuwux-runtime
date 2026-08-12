@@ -38,48 +38,4 @@ warn() { echo -e "${YELLOW}[$(ts)] WARNING: $*${RESET}" >&2; }
 header(){ echo -e "\n${CYAN}${BOLD}$*${RESET}"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found"; }
 
-# Mirror console output into the patch session log when PATCH_LOG is set.
-plog() {
-    info "$@"
-    [[ -n "${PATCH_LOG:-}" ]] && echo "[$(ts)] ==> $*" >> "$PATCH_LOG"
-}
-plog_warn() {
-    warn "$@"
-    [[ -n "${PATCH_LOG:-}" ]] && echo "[$(ts)] WARNING: $*" >> "$PATCH_LOG"
-}
-plog_die() {
-    [[ -n "${PATCH_LOG:-}" ]] && echo "[$(ts)] ERROR: $*" >> "$PATCH_LOG"
-    die "$@"
-}
-
 HR="$(printf '=%.0s' {1..60})"
-
-# Insert the contents of content_file after line N of target (1-based).
-insert_after_line() {
-    local target="$1" line="$2" content_file="$3"
-    [[ -r "$content_file" ]] || plog_die "insert_after_line: unreadable $content_file"
-    local tmp
-    tmp=$(mktemp -p "$(dirname "$target")")
-    awk -v line="$line" -v content="$content_file" '
-        BEGIN { if ((getline t < content) < 0) exit 1; close(content) }
-        NR == line { print; while ((getline l < content) > 0) print l; next }
-        { print }
-    ' "$target" > "$tmp" || { rm -f "$tmp"; plog_die "insert_after_line: awk failed on $target"; }
-    chmod --reference="$target" "$tmp" 2>/dev/null || true
-    mv "$tmp" "$target"
-}
-
-# Insert the contents of content_file before line N of target (1-based).
-insert_before_line() {
-    local target="$1" line="$2" content_file="$3"
-    [[ -r "$content_file" ]] || plog_die "insert_before_line: unreadable $content_file"
-    local tmp
-    tmp=$(mktemp -p "$(dirname "$target")")
-    awk -v line="$line" -v content="$content_file" '
-        BEGIN { if ((getline t < content) < 0) exit 1; close(content) }
-        NR == line { while ((getline l < content) > 0) print l; print; next }
-        { print }
-    ' "$target" > "$tmp" || { rm -f "$tmp"; plog_die "insert_before_line: awk failed on $target"; }
-    chmod --reference="$target" "$tmp" 2>/dev/null || true
-    mv "$tmp" "$target"
-}
