@@ -1,0 +1,69 @@
+name: Bug report
+description: Report an issue with liblinuwux_preload.so
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue. Almost every bug we've actually been able to fix so far came from a debug log with `LINUWUX_DEBUG=1` set -- without it, none of `liblinuwux_preload.so`'s own `[linuwux-preload]` lines show up, and we're guessing blind. Please enable it before reproducing (see the Debug log field below).
+
+  - type: dropdown
+    id: launch-method
+    attributes:
+      label: How are you launching the game?
+      description: This matters -- LD_PRELOAD reaches the game differently (or not at all) depending on the path.
+      options:
+        - Steam client (added as a non-Steam game)
+        - Lutris
+        - Heroic
+        - Faugus Launcher
+        - Bottles
+        - umu-run directly (terminal)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: proton-build
+    attributes:
+      label: Which Proton/Wine build?
+      description: Official Valve Proton has a known unresolved issue independent of this library -- see the README's compatibility notes before filing if that's what you're using.
+      options:
+        - GE-Proton
+        - CachyOS Proton
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: launch-options
+    attributes:
+      label: Exact launch options / command used
+      description: |
+        Paste the exact LD_PRELOAD line and any other env vars you set. LD_PRELOAD should be appended, not replace the existing value -- a bare `LD_PRELOAD=/path/to/liblinuwux_preload.so %command%` silently drops Steam's own overlay preload entry:
+
+        LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux_preload.so" %command%
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: debug-log
+    attributes:
+      label: Debug log
+      description: |
+        Set `LINUWUX_DEBUG=1` and `PROTON_LOG=1` (Steam) or `UMU_LOG=1` (umu-run / Lutris / Heroic / Faugus / Bottles) before launching, reproduce the issue, then paste the full log here. Without `LINUWUX_DEBUG=1`, `liblinuwux_preload.so` won't print anything and we can't tell what it actually did.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I set `LINUWUX_DEBUG=1` before reproducing this and it's included in the log above
+          required: true
+        - label: My `LD_PRELOAD` launch option appends to the existing value rather than replacing it
+          required: true
