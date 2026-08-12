@@ -18,40 +18,17 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-/* linuwux-hooks
+/*
+ * linuwux-hooks
  *
- * All LinUwUx unix-side helpers for ntdll. Copied next to signal_x86_64.c and
- * pulled in via #include so we stay in the same TU (REG_* macros, server
- * protocol, etc.) without dumping a large blob into the signal file itself.
+ * Unix-side helpers for ntdll shared by segv_handler/sigsys_handler. Copied
+ * next to signal_x86_64.c and #include'd (not compiled standalone), so it
+ * stays in the same translation unit as REG_* macros, the server protocol
+ * headers, etc. rather than pasting a large blob into the signal file itself.
  *
- * Enable tracing with LINUWUX_DEBUG=1.
- *
- * Redirect scope (dev/redirect-scope):
- *   DenuvOwO only vectors the tracked process (DR3/DR7). Under Wine we approx
- *   that by skipping TargetSysHandler when the fault RIP is in the Wine system
- *   PE band [0x6FFFFF000000, 0x700000000000). 0x7fff… is NOT included — ACBFR
- *   needs at least one redirect from that range (rax=0xffe).
- *   Set LINUWUX_REDIRECT_ALL=1 to restore pre-scope behaviour.
- *   Wine-system skips are intentional and not logged (too hot under DEBUG).
- *
- * Trampoline resume (dev/trampoline-resume-rip):
- *   Default path in reflex does mov rcx,rax / sub rcx,2 / jmp rcx after
- *   arming xmm5 bypass magic. RAX must be a code address so after sub 2 we
- *   land on the syscall insn — not a syscall argument.
- *
- * LINUWUX_STOP_SYSCALL=<hex|dec> (dev/linuwux-stop-syscall, throwaway):
- *   Freeze with SIGSTOP right before a redirect into TargetSysHandler whose
- *   syscall number (rax) matches. LINUWUX_STOP_SYSCALL_SKIP=<n> skips the
- *   first n matches so one specific occurrence can be isolated. Occurrence
- *   count of a shared syscall number is NOT reliably deterministic across
- *   runs (BL4 has multiple unrelated rax=0x18 call sites) — prefer
- *   LINUWUX_STOP_RIP below once the exact faulting rip is known.
- *
- * LINUWUX_STOP_RIP=<hex|dec> (dev/linuwux-stop-syscall, throwaway):
- *   Freeze with SIGSTOP the instant a redirect's fault rip matches exactly.
- *   BL4's addr=0x225FF crash always faults from rip=0x1572cee4c — deterministic
- *   per call site, unlike counting syscall-number occurrences. Continue with
- *   kill -CONT <pid>.
+ * Enable event tracing with LINUWUX_DEBUG=1. Gdb-freeze debug aids
+ * (LINUWUX_STOP_SYSCALL / LINUWUX_STOP_RIP) are documented next to
+ * linuwux_maybe_stop_for_syscall() / linuwux_maybe_stop_for_rip() below.
  */
 #ifndef LINUWUX_HOOKS_INCLUDED
 #define LINUWUX_HOOKS_INCLUDED
@@ -111,7 +88,9 @@ static void linuwux_log(const char *fmt, ...)
 }
 #endif
 
-/* Games' syscall spoof trampoline (set via CPUID leaf 0x336933). */
+/* Set by the CPUID leaf 0x336933 handshake -- the game's own syscall
+ * trampoline entry point, and the redirect target for every syscall
+ * LinUwUx diverts. */
 uint64_t TargetSysHandler = 0;
 uint64_t SyscallBypassMagic = 0x1337133713371337;
 
@@ -120,10 +99,25 @@ unsigned int spoof_leaf40000000_eax, spoof_leaf40000000_ebx, spoof_leaf40000000_
 unsigned int spoof_leaf40000001_eax, spoof_leaf40000001_ebx, spoof_leaf40000001_ecx, spoof_leaf40000001_edx;
 
 /*
- * Wine system PE band (64-bit Proton/GE observations):
- *   ntdll/kernel32/kernelbase often sit in [0x6FFFFF000000, 0x700000000000).
- * Game EXEs ~0x140000000; crack modules often under 0x6FFFFF000000.
- * Do not treat 0x7fff… as Wine PE — some packs (ACBFR) redirect from there.
+ * Wine's own builtin DLLs (ntdll, kernel32, kernelbase, ...) consistently
+ * load in this range under Proton/GE. Syscalls issued from here are never
+ * redirected into TargetSysHandler, for two independent reasons: it
+ * approximates DenuvOwO's real DR3/DR7 hardware scoping (tracked process
+ * only, which Wine has no equivalent for), and without it every syscall
+ * Wine's own PE modules issue was getting routed through the trampoline
+ * too -- confirmed directly while debugging an earlier build, and wasted
+ * work either way even on runs where it happened to be harmless.
+ *
+ * This is an empirical address range, not derived from any real module
+ * query, so it can silently stop matching if a future Wine build changes
+ * where builtins load -- worth a second look if that ever happens, but
+ * not proactively, since replacing it with a real module-range query
+ * means enumerating loaded modules from inside a signal handler safely,
+ * which needs its own design (dl_iterate_phdr() is not safe to call here:
+ * it can deadlock if the interrupted thread already held the dynamic
+ * linker's lock, e.g. mid-dlopen() of the very module that's faulting).
+ * Deliberately excludes 0x7fff... -- some packs (ACBFR) redirect from
+ * addresses up there and would break if it were folded into this band.
  */
 #ifndef LINUWUX_WINE_SYSTEM_RIP_MIN
 #define LINUWUX_WINE_SYSTEM_RIP_MIN 0x00006FFFFF000000ULL
@@ -144,13 +138,14 @@ static int linuwux_redirect_all_enabled(void)
 }
 
 /*
- * Throwaway debug aid (dev/linuwux-stop-syscall): freeze the process with
- * SIGSTOP right before a specific matching redirect into TargetSysHandler,
- * so a debugger can attach and step through the trampoline for that exact
- * call. Targets a syscall number (rax) and, optionally, skips the first N
- * matches so a specific occurrence can be isolated (e.g. BL4's rax=0x18
- * crash only reproduces on the 3rd redirect of that syscall number, not
- * the first two).
+ * Throwaway debug aid: freeze the process with SIGSTOP right before a
+ * specific matching redirect into TargetSysHandler, so a debugger can
+ * attach and step through the trampoline for that exact call. Targets a
+ * syscall number (rax) and, optionally, skips the first N matches so one
+ * specific occurrence can be isolated -- occurrence count of a shared
+ * syscall number is not reliably deterministic across runs (some games
+ * issue the same syscall number from several unrelated call sites), so
+ * prefer LINUWUX_STOP_RIP below once the exact faulting rip is known.
  *
  *   LINUWUX_STOP_SYSCALL=<hex|dec>   syscall number (rax) to match
  *   LINUWUX_STOP_SYSCALL_SKIP=<n>    skip the first n matches (default 0)
@@ -198,11 +193,11 @@ static void linuwux_maybe_stop_for_syscall(unsigned long long syscall_nr,
 }
 
 /*
- * Throwaway debug aid (dev/linuwux-stop-syscall): freeze the instant a
- * redirect's fault RIP matches exactly, for isolating one deterministic
- * call site (e.g. BL4's rax=0x18 crash always faults from rip=0x1572cee4c
- * regardless of how many other rax=0x18 redirects happened earlier in the
- * run) rather than counting occurrences of a shared syscall number.
+ * Throwaway debug aid: freeze the instant a redirect's fault RIP matches
+ * exactly, for isolating one deterministic call site rather than counting
+ * occurrences of a shared syscall number -- some faults reproduce from the
+ * exact same rip every run regardless of how many other redirects of that
+ * syscall number happened first.
  *
  *   LINUWUX_STOP_RIP=<hex|dec>   exact fault rip to match
  *
@@ -291,9 +286,9 @@ static void detect_cpu_vendor(void)
     }
 }
 
-/**
- * Patch KUSER_SHARED_DATA with spoofed values.
- * Called from the special CPUID leaf 0x336933 path.
+/*
+ * Patch KUSER_SHARED_DATA with spoofed values. Called from the CPUID
+ * leaf 0x336933 handshake path.
  */
 static void patch_kuser_shared_data(void)
 {
@@ -392,6 +387,13 @@ static int linuwux_cpuid_spoof(siginfo_t *siginfo, void *sigcontext, ucontext_t 
           spoof_rip[0] == 0x0F && spoof_rip[1] == 0xA2))
         return 0;
 
+    /*
+     * Leaf meanings: 1 = feature bits (real vendor/family spoofed above by
+     * detect_cpu_vendor()); 0x40000000/1 = hypervisor vendor, spoofed away
+     * so nothing sees a hypervisor signature; 0x80000002-4 = brand string;
+     * 0x336933/0x336967 = LinUwUx's own handshake leaves (TargetSysHandler
+     * registration, faketime); default = real leaf, passed straight through.
+     */
     switch (spoof_leaf) {
     case 1:
         spoof_uc->uc_mcontext.gregs[REG_RAX] = spoof_leaf1_eax;
@@ -495,12 +497,8 @@ static int linuwux_sigsys_route(void *sigcontext)
         syscall_nr = (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX];
         rip = (unsigned long long)ctx->uc_mcontext.gregs[REG_RIP];
 
-        /*
-         * Scope filter: approximate DenuvOwO "tracked process only" by not
-         * vectoring Wine system PE syscall sites into the usermode trampoline.
-         * Window is closed above so 0x7fff… still redirects (ACBFR 0xffe).
-         * Skips are silent — this path is too hot for LINUWUX_DEBUG.
-         */
+        /* See linuwux_rip_is_wine_system() above. Skips are unlogged --
+         * this path is too hot for LINUWUX_DEBUG. */
         if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system(rip))
             return 0;
 

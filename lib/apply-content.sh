@@ -244,7 +244,7 @@ EOF
     insert_after_line "$target" "$anchor_line" "$stub"
     rm -f "$stub"
     grep -qF 'linuwux-sigsys-handler-call' "$target" || plog_die "sigsys call stub insert produced no change"
-    plog "  Inserted call stub after line $anchor_line (Linux/HAVE_SECCOMP sigsys_handler only, anchored on SIGSYS trace string)"
+    plog "  Inserted call stub after line $anchor_line (Linux sigsys_handler -- present under both seccomp and SUD trees -- anchored on SIGSYS trace string)"
 }
 
 # Force one wineboot -u on a fresh prefix. Context-diff patches against proton
