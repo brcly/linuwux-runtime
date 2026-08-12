@@ -140,7 +140,7 @@ Copyright (C) 2026 brcly.
 Please keep copyright notices intact when you redistribute or modify this work.
 Preferred credit line for derived builds:
 
-`LinUwUx Proton builder by brcly (https://github.com/brcly/proton-LinUwUx-patch)`
+`LinUwUx Preload Library Builder by brcly (https://github.com/brcly/proton-LinUwUx-patch)`
 
 ## Credits
 - LinUwUx - Original Bypass creator
