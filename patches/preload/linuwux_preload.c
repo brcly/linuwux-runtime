@@ -946,16 +946,16 @@ static void linuwux_preload_init(void)
     setenv("WINEDLLOVERRIDES", overrides, 1);
     linuwux_log("WINEDLLOVERRIDES=\"%s\"\n", overrides);
 
-    /* NOT forcing PROTON_DISABLE_LSTEAMCLIENT=1 here (an earlier version
-     * of this did, by default, to prefer stock steamclient over Proton's
-     * lsteamclient for DenuvOwO packs that dislike its translation
-     * layer): the Steam Overlay's own in-game activation goes through
-     * lsteamclient too, so forcing it off broke the overlay for the
-     * common case in exchange for helping a narrower one (confirmed
-     * against a real Steam + GE-Proton launch). A pack that specifically
-     * needs lsteamclient disabled can still set PROTON_DISABLE_LSTEAMCLIENT=1
-     * itself via launch options -- nothing else here depends on it either
-     * way. */
+    /* Prefer stock steamclient over Proton's lsteamclient -- some
+     * DenuvOwO packs need this, since they dislike lsteamclient's
+     * translation layer. Known tradeoff: the Steam Overlay's own
+     * in-game activation goes through lsteamclient too, so this also
+     * silences the overlay (confirmed against a real Steam + GE-Proton
+     * launch; tried leaving it unset by default, but that broke the
+     * bypass, which matters more). Set PROTON_DISABLE_LSTEAMCLIENT=0
+     * yourself via launch options if you'd rather keep the overlay and
+     * your pack doesn't need this. */
+    setenv("PROTON_DISABLE_LSTEAMCLIENT", "1", 0);
 
     linuwux_log("liblinuwux_preload.so loaded (pid=%d)\n", getpid());
 }

@@ -73,12 +73,12 @@ Environment:
 
 Everything liblinuwux_preload.so does -- CPUID spoofing, SIGSYS/DenuvOwO
 redirect, HwProfileGuid, faketime, and DLL overrides (winmm/version/
-reflex=n,b) -- happens live at load time from inside the library
-itself. Wine's own source is never touched, no prefix registry file
-needs importing, no launcher script needs editing. Use it with an
-existing GE-Proton or CachyOS Proton install (append, don't replace,
-LD_PRELOAD -- a bare LD_PRELOAD=... clobbers Steam's own overlay
-preload entry):
+reflex=n,b, PROTON_DISABLE_LSTEAMCLIENT) -- happens live at load time
+from inside the library itself. Wine's own source is never touched, no
+prefix registry file needs importing, no launcher script needs
+editing. Use it with an existing GE-Proton or CachyOS Proton install
+(append, don't replace, LD_PRELOAD -- a bare LD_PRELOAD=... clobbers
+Steam's own overlay preload entry):
 
   LD_PRELOAD="\${LD_PRELOAD}:/path/to/liblinuwux_preload.so" %command%
 

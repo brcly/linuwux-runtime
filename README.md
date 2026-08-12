@@ -42,7 +42,7 @@ patches/
 
 | Stage | What happens |
 |-------|----------------|
-| Library load | `detect_cpu_vendor()` fills spoof tables; `WINEDLLOVERRIDES` gets `winmm`/`version`/`reflex=n,b` appended (skipping any the user already set) |
+| Library load | `detect_cpu_vendor()` fills spoof tables; `WINEDLLOVERRIDES` gets `winmm`/`version`/`reflex=n,b` appended (skipping any the user already set); `PROTON_DISABLE_LSTEAMCLIENT` defaults to `1` |
 | First `sigaction(SIGSEGV, ...)` | Interposed; wraps Wine's own handler, then enables `ARCH_SET_CPUID` faulting |
 | First `sigaction(SIGSYS, ...)` | Interposed; wraps Wine's own handler |
 | First `prctl(PR_SET_SYSCALL_USER_DISPATCH, ...)` | Interposed; learns the per-thread SUD selector's TEB offset from Wine's own real call, instead of guessing struct layout |
@@ -121,8 +121,8 @@ No installation step, no compatibility-tool registration — just point an exist
 ## Behaviour notes
 
 - Local `patches/` is reused unless `--update-patches`.
-- `WINEDLLOVERRIDES` is set live by the library itself at load time (see Runtime table above) — not baked into any script.
-- `PROTON_DISABLE_LSTEAMCLIENT` is **not** set by the library. Some DenuvOwO packs work better with it forced to `1` (Proton's `lsteamclient` translation layer isn't to every pack's taste), but it also breaks the Steam Overlay's in-game activation for the common case, so it's left for you to opt into via launch options if a specific pack needs it.
+- `WINEDLLOVERRIDES` and `PROTON_DISABLE_LSTEAMCLIENT` are set live by the library itself at load time (see Runtime table above) — not baked into any script.
+- `PROTON_DISABLE_LSTEAMCLIENT=1` is needed for the bypass on DenuvOwO packs that dislike Proton's `lsteamclient` translation layer — but it also silences the Steam Overlay's in-game activation, since the overlay goes through `lsteamclient` too. If your pack doesn't need it, set `PROTON_DISABLE_LSTEAMCLIENT=0` yourself via launch options to keep the overlay.
 - Covers both GE-Proton 11-3-style trees (seccomp+BPF) and GE-Proton 11-5+ trees (Syscall User Dispatch) — which one a given Proton uses is detected at runtime from the process's own signal setup, not guessed from a version number.
 - Confirmed working launched directly through the real Steam client (not just Lutris/Heroic/Faugus) with GE-Proton/CachyOS — the game's `LD_PRELOAD` does reach the process inside Steam's own pressure-vessel container.
 
