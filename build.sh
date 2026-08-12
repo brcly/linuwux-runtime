@@ -30,7 +30,7 @@ set -euo pipefail
 #   package.sh        – base checks, configure, redist, verify
 # ============================================================
 
-VERSION="26.08.11"
+VERSION="26.08.12"
 CONTAINER_ENGINE="podman"
 PATCH_REPO="https://github.com/brcly/proton-LinUwUx-patch.git"
 PATCH_BRANCH="${PATCH_BRANCH:-main}"
