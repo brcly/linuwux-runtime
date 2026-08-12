@@ -16,12 +16,12 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# --preload-interposition (EXPERIMENTAL): build and install
-# liblinuwux_preload.so instead of patching ntdll's source. See
-# patches/preload/linuwux_preload.c for the mechanism (including faketime,
-# leaf 0x336967 -- learned/extracted at build+runtime, no wine source
-# modification needed), and the "Interposition Sketch" design writeup for
-# why this exists.
+# Build and install liblinuwux_preload.so, an LD_PRELOAD library that
+# installs all of LinUwUx's CPUID/SIGSYS/faketime handling without
+# patching ntdll's source at all -- ntdll's signal_x86_64.c stays
+# completely stock. See patches/preload/linuwux_preload.c for the
+# mechanism (including faketime, leaf 0x336967 -- learned/extracted at
+# build+runtime, no wine source modification needed).
 #
 # Sourced by build.sh — requires lib/common.sh already loaded.
 

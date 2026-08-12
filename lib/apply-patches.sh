@@ -49,21 +49,6 @@ apply_linuwux_patches() {
             || failures=$((failures+1))
     done < <(find "$SRC_DIR/patches/wine" -name '*.patch' | sort)
 
-    # Sanity-check that content inserts already landed (hooks + call stubs).
-    # Not applicable under --preload-interposition, which deliberately never
-    # inserts any of these -- the redirect logic lives in
-    # liblinuwux_preload.so instead.
-    if [[ ${PRELOAD_INTERPOSITION:-0} -eq 1 ]]; then
-        plog "  Skipping ntdll hooks-include/call-stub check (--preload-interposition)"
-    elif grep -qF 'linuwux-hooks-include' dlls/ntdll/unix/signal_x86_64.c &&
-       grep -qF 'linuwux-cpuid-handler-call' dlls/ntdll/unix/signal_x86_64.c &&
-       grep -qF 'linuwux-sigsys-handler-call' dlls/ntdll/unix/signal_x86_64.c; then
-        plog "  Hooks include + CPUID/SIGSYS call stubs are present"
-    else
-        plog_warn "  Missing linuwux hooks include and/or CPUID/SIGSYS call stub"
-        failures=$((failures+1))
-    fi
-
     plog "Regenerating server protocol (tools/make_requests)..."
     [[ -x tools/make_requests ]] || plog_die "tools/make_requests missing or not executable"
     ./tools/make_requests >> "$patch_log" 2>&1 \

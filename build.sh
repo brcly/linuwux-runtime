@@ -24,10 +24,11 @@ set -euo pipefail
 # Thin orchestrator. Implementation lives under lib/:
 #   common.sh         – logging, line-insert helpers
 #   source.sh         – clone, submodules, stage patches/wine
-#   apply-content.sh  – hooks install + content inserts
+#   apply-content.sh  – content inserts (regedit fix, faketime protocol,
+#                        force-wineboot gate)
 #   apply-patches.sh  – traditional .patch apply + GE protonprep
 #   apply-proton-dll.sh – winmm/version/reflex + lsteamclient defaults
-#   apply-preload.sh  – EXPERIMENTAL: --preload-interposition alternative
+#   apply-preload.sh  – builds and installs liblinuwux_preload.so
 #   package.sh        – base checks, configure, redist, verify
 # ============================================================
 
@@ -42,9 +43,7 @@ DIST_DIR="${SCRIPT_DIR}/dist"
 LIB_DIR="${SCRIPT_DIR}/lib"
 FORCE=0
 CLEAN=1
-LEGACY_REFLEX=0
 UPDATE_PATCHES=0
-PRELOAD_INTERPOSITION=0
 PATCH_LOG=""
 
 # shellcheck source=lib/common.sh
@@ -68,7 +67,7 @@ usage() {
     cat << EOF
 Proton + LinUwUx Builder v${VERSION}
 
-Build CachyOS or GE Proton from source with LinUwUx hooks applied.
+Build CachyOS or GE Proton from source with LinUwUx applied.
 
 Usage:
   $(basename "$0") [OPTIONS] [VARIANT] [BRANCH/TAG]
@@ -84,8 +83,7 @@ Examples:
   $(basename "$0") cachyos cachyos-11.0-20260703-native
   $(basename "$0") ge
   $(basename "$0") ge GE-Proton11-3
-  $(basename "$0") --legacy-reflex ge GE-Proton11-3
-  $(basename "$0") --preload-interposition ge GE-Proton11-5
+  $(basename "$0") ge GE-Proton11-5
   $(basename "$0") --force --no-clean cachyos
   $(basename "$0") --update-patches
   $(basename "$0") --container-engine=docker ge
@@ -93,13 +91,6 @@ Examples:
 Options:
   -f, --force                 Full re-clone and clean rebuild
   -k, --no-clean              Keep -src/-build trees after a successful build
-  --legacy-reflex             Use patches/legacy-reflex/linuwux_hooks_legacy.c
-                              (older Reflex dual-trampoline protocol)
-  --preload-interposition     EXPERIMENTAL: build liblinuwux_preload.so and
-                              hook via LD_PRELOAD instead of patching
-                              ntdll's source. See patches/preload/
-                              linuwux_preload.c. Known gap: faketime CPUID
-                              leaf (0x336967) is unsupported in this mode.
   --update-patches            Delete and re-clone patches/ from this repo
   --container-engine=<name>   Container engine (default: podman)
   -h, --help                  Show this help
@@ -107,36 +98,27 @@ Options:
 Environment:
   PATCH_BRANCH=<name>         Branch of this repo to clone when patches/ is
                               missing (default: main)
-  LINUWUX_DEBUG=1             Runtime: event tracing from linuwux_hooks*.c
+  LINUWUX_DEBUG=1             Runtime: event tracing from liblinuwux_preload.so
   LINUWUX_REDIRECT_ALL=1      Runtime: disable SIGSYS Wine-PE scope filter
   PROTON_AVX=1                Runtime: AVX/XSAVE in spoofed CPUID/KUSER data
 
-How hooks land:
-  Bulk logic lives in patches/base/linuwux_hooks.c (or the legacy file).
-  It is copied to dlls/ntdll/unix/linuwux_hooks.c and #include'd into
-  signal_x86_64.c. Only tiny call stubs are pasted into the signal file.
-  Proton cold-start wineboot is a content insert after setup_prefix().
-  DLL overrides (winmm/version/reflex) and PROTON_DISABLE_LSTEAMCLIENT
-  are content-inserted into the proton launcher script.
-
-  --preload-interposition builds liblinuwux_preload.so from
-  patches/preload/linuwux_preload.c instead and skips all of the above
-  ntdll-side hooks -- it hooks sigaction()/prctl() via LD_PRELOAD (content-
-  inserted into the proton launcher script) rather than patching
-  signal_x86_64.c's source at all.
+How LinUwUx is applied:
+  liblinuwux_preload.so is built from patches/preload/linuwux_preload.c and
+  content-inserted into the proton launcher script via LD_PRELOAD (see
+  apply-preload.sh). It interposes sigaction()/prctl()/recvmsg()/write()/
+  writev() to install the CPUID/SIGSYS handling and reach wineserver for
+  faketime, entirely without touching Wine's own source -- ntdll's
+  signal_x86_64.c stays completely stock. Proton cold-start wineboot is a
+  content insert after setup_prefix(). DLL overrides (winmm/version/reflex)
+  and PROTON_DISABLE_LSTEAMCLIENT are content-inserted into the proton
+  launcher script.
 
 Required files:
-  patches/base/linuwux_hooks.c
+  patches/preload/linuwux_preload.c
   patches/base/hwprofile_guid.reg
   patches/base/set_faketime.protocol
   patches/wine/server/0001-apply_faketime.patch
   lib/apply-proton-dll.sh
-
-  With --legacy-reflex also:
-  patches/legacy-reflex/linuwux_hooks_legacy.c
-
-  With --preload-interposition also:
-  patches/preload/linuwux_preload.c
 
 EOF
     exit 0
@@ -150,8 +132,6 @@ while [[ $# -gt 0 ]]; do
         -h|--help)   usage ;;
         -f|--force)  FORCE=1; shift ;;
         -k|--no-clean) CLEAN=0; shift ;;
-        --legacy-reflex) LEGACY_REFLEX=1; shift ;;
-        --preload-interposition) PRELOAD_INTERPOSITION=1; shift ;;
         --update-patches) UPDATE_PATCHES=1; shift ;;
         --container-engine=*)
             CONTAINER_ENGINE="${1#--container-engine=}"
@@ -200,7 +180,6 @@ header "$HR"
 header "  Proton + LinUwUx Builder v${VERSION}"
 header "  Variant     : $VARIANT"
 header "  Branch/Tag  : $BRANCH"
-header "  Legacy Reflex: $([[ $LEGACY_REFLEX -eq 1 ]] && echo enabled || echo disabled)"
 header "$HR"
 
 ensure_patches_dir
@@ -223,16 +202,6 @@ fi
 
 apply_regedit_fix
 apply_faketime_protocol_fix
-if [[ $PRELOAD_INTERPOSITION -eq 1 ]]; then
-    info "--preload-interposition: skipping ntdll-side hooks entirely (segv/sigsys call stubs +"
-    info "  signal_init_process insert) -- liblinuwux_preload.so's own constructor does the"
-    info "  CPUID-fault-enable syscall that signal_init_process_hooks would otherwise insert"
-else
-    apply_linuwux_hooks
-    apply_cpuid_spoof_handler_fix
-    apply_signal_init_process_hooks
-    apply_sigsys_handler_fix
-fi
 apply_linuwux_patches
 
 if [[ "$VARIANT" == "cachyos" ]]; then
@@ -242,13 +211,9 @@ fi
 
 apply_force_wineboot_first_run
 apply_proton_dll_overrides
-if [[ $PRELOAD_INTERPOSITION -eq 1 ]]; then
-    apply_preload_ld_env
-fi
+apply_preload_ld_env
 run_configure_and_build
-if [[ $PRELOAD_INTERPOSITION -eq 1 ]]; then
-    build_preload_library
-fi
+build_preload_library
 package_and_verify
 cleanup_trees
 print_success

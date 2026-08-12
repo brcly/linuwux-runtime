@@ -23,17 +23,9 @@
 check_required_base_files() {
     info "Checking required base files..."
 
-    [[ -f "${PATCHES_DIR}/base/linuwux_hooks.c" ]] \
-        || die "linuwux_hooks.c not found under ${PATCHES_DIR}/base/ – required"
-    if [[ $LEGACY_REFLEX -eq 1 ]]; then
-        [[ -f "${PATCHES_DIR}/legacy-reflex/linuwux_hooks_legacy.c" ]] \
-            || die "linuwux_hooks_legacy.c not found under ${PATCHES_DIR}/legacy-reflex/ – required for --legacy-reflex"
-    fi
-    if [[ $PRELOAD_INTERPOSITION -eq 1 ]]; then
-        [[ -f "${PATCHES_DIR}/preload/linuwux_preload.c" ]] \
-            || die "linuwux_preload.c not found under ${PATCHES_DIR}/preload/ – required for --preload-interposition"
-        need gcc
-    fi
+    [[ -f "${PATCHES_DIR}/preload/linuwux_preload.c" ]] \
+        || die "linuwux_preload.c not found under ${PATCHES_DIR}/preload/ – required"
+    need gcc
     [[ -f "${PATCHES_DIR}/base/hwprofile_guid.reg" ]] \
         || die "hwprofile_guid.reg not found under ${PATCHES_DIR}/base/ – required"
     [[ -f "${PATCHES_DIR}/base/set_faketime.protocol" ]] \

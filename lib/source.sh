@@ -128,14 +128,10 @@ resolve_repo_and_branch() {
 
 setup_paths() {
     VERSION_ID=$(compute_version_id "$BRANCH" "$VARIANT")
-    BUILD_FLAVOR=""
-    if [[ $LEGACY_REFLEX -eq 1 ]]; then
-        BUILD_FLAVOR="-Legacy-Reflex"
-    fi
-    SRC_DIR="${SCRIPT_DIR}/${VERSION_ID}${BUILD_FLAVOR}-src"
-    BUILD_DIR="${SCRIPT_DIR}/${VERSION_ID}${BUILD_FLAVOR}-build"
-    BUILD_NAME="${VERSION_ID}-LinUwUx${BUILD_FLAVOR}"
-    LOG_DIR="${SCRIPT_DIR}/logs/${VERSION_ID}${BUILD_FLAVOR}"
+    SRC_DIR="${SCRIPT_DIR}/${VERSION_ID}-src"
+    BUILD_DIR="${SCRIPT_DIR}/${VERSION_ID}-build"
+    BUILD_NAME="${VERSION_ID}-LinUwUx"
+    LOG_DIR="${SCRIPT_DIR}/logs/${VERSION_ID}"
     PATCH_LOG="${LOG_DIR}/linuwux-patches.log"
 
     info "Building version : $BRANCH"
@@ -218,15 +214,6 @@ stage_wine_patches() {
 
     info "Installed patches:"
     find patches/wine -name '*.patch' | sed 's|^|      |'
-
-    # Refuse .patch files that still inject content now owned by linuwux_hooks*.c.
-    local STALE_DEF_PATCHES
-    STALE_DEF_PATCHES=$(grep -rlE \
-        '\+uint64_t TargetSysHandler|\+static void detect_cpu_vendor|\+static void patch_kuser|\+linuwux_cpuid_spoof|\+linuwux_sigsys_route|\+linuwux-hooks-include|\+linuwux-cpuid-handler|\+linuwux-sigsys-handler' \
-        patches/wine 2>/dev/null || true)
-    if [[ -n "$STALE_DEF_PATCHES" ]]; then
-        die "Patch(es) below still add content that lives in linuwux_hooks*.c – remove it from: $STALE_DEF_PATCHES"
-    fi
 }
 
 init_patch_log() {
@@ -236,7 +223,6 @@ init_patch_log() {
         echo "[$(ts)] LinUwUx patch session start"
         echo "  Variant : $VARIANT"
         echo "  Branch  : $BRANCH"
-        echo "  Legacy  : $([[ $LEGACY_REFLEX -eq 1 ]] && echo yes || echo no)"
         echo "  Source  : $SRC_DIR"
         echo "$HR"
     } >> "$PATCH_LOG"

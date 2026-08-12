@@ -1,4 +1,5 @@
 /*
+* Copyright (C) 2026 LinUwUx
  * Copyright (C) 2026 brcly
  *
  * This program is free software: you can redistribute it and/or modify
@@ -18,15 +19,16 @@
  */
 
 /*
- * linuwux-preload (EXPERIMENTAL)
+ * linuwux-preload
  *
- * LD_PRELOAD alternative to patches/base/linuwux_hooks.c. Instead of
- * splicing #include/call-stub text into Wine's own signal_x86_64.c
- * (fragile to upstream reordering/reformatting -- see the GE 11-3 -> 11-5
- * SIGSYS anchor breakage this was built to stop recurring), this
- * interposes the two libc calls Wine itself makes to set up signal
- * delivery -- sigaction() and prctl() -- and wraps around whatever Wine
- * registers, without touching ntdll's source at all.
+ * Installs LinUwUx's CPUID spoofing, SIGSYS/DenuvOwO redirect, and
+ * wineserver faketime entirely via LD_PRELOAD -- ntdll's signal_x86_64.c
+ * is never touched. This interposes the libc calls Wine itself makes to
+ * set up signal delivery -- sigaction() and prctl() -- and wraps around
+ * whatever Wine registers, rather than splicing #include/call-stub text
+ * into Wine's own source (fragile to upstream reordering/reformatting --
+ * see the GE 11-3 -> 11-5 SIGSYS anchor breakage an earlier,
+ * source-patching implementation of this hit before this replaced it).
  *
  * Verified against a real GE-Proton 11-5 tree before building this:
  * Wine's SIGSEGV/SIGSYS registration (signal_init_process()) and its
@@ -34,10 +36,10 @@
  * per thread) both go through the plain libc sigaction()/prctl() symbols,
  * not a raw syscall() that would bypass LD_PRELOAD interposition.
  *
- * Faketime (CPUID leaf 0x336967) talks to wineserver via wine_server_call(),
- * same as the ntdll-side version -- but without an exact, per-build-known
- * struct layout, that call is dangerous to fake blind: wine_server_call()
- * reads fields (data_count/reply_data/data[]/name) at offsets fixed by
+ * Faketime (CPUID leaf 0x336967) talks to wineserver via wine_server_call().
+ * Without an exact, per-build-known struct layout, that call is dangerous
+ * to fake blind: it reads fields (data_count/reply_data/data[]/name) at
+ * offsets fixed by
  * sizeof(union generic_request), which varies by wine version/patch chain
  * and isn't guessable. Two things had to be nailed down, neither by
  * touching wine's source:
@@ -133,7 +135,7 @@ static inline void *linuwux_get_teb(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* CPUID spoofing (ported from patches/base/linuwux_hooks.c)           */
+/* CPUID spoofing                                                      */
 /* ------------------------------------------------------------------ */
 
 static uint64_t g_target_sys_handler = 0;
@@ -350,7 +352,7 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
 }
 
 /* ------------------------------------------------------------------ */
-/* Wine-system RIP scope filter (same rationale as linuwux_hooks.c)    */
+/* Wine-system RIP scope filter                                        */
 /* ------------------------------------------------------------------ */
 
 #define LINUWUX_WINE_SYSTEM_RIP_MIN 0x00006FFFFF000000ULL
