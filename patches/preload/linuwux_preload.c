@@ -34,12 +34,35 @@
  * per thread) both go through the plain libc sigaction()/prctl() symbols,
  * not a raw syscall() that would bypass LD_PRELOAD interposition.
  *
- * Known gap: the faketime CPUID leaf (0x336967) is NOT implemented here.
- * It goes through Wine's SERVER_START_REQ/wine_server_call() RPC plumbing,
- * generated from protocol.def, which isn't usable from outside ntdll.so
- * without its own investigation. Hitting that leaf under
- * --preload-interposition logs a warning instead of silently doing
- * nothing; see linuwux_cpuid_spoof() below.
+ * Faketime (CPUID leaf 0x336967) talks to wineserver via wine_server_call(),
+ * same as the ntdll-side version -- but without an exact, per-build-known
+ * struct layout, that call is dangerous to fake blind: wine_server_call()
+ * reads fields (data_count/reply_data/data[]/name) at offsets fixed by
+ * sizeof(union generic_request), which varies by wine version/patch chain
+ * and isn't guessable. Two things had to be nailed down, neither by
+ * touching wine's source:
+ *   - REQ_set_faketime's numeric ID is positionally generated (depends on
+ *     every request defined before it in protocol.def) -- extracted at
+ *     *our* build time from the tree's own already-generated
+ *     server_protocol.h (build_preload_library() in lib/apply-preload.sh),
+ *     baked in via -DLINUWUX_REQ_SET_FAKETIME. Reading a build artifact,
+ *     not modifying one.
+ *   - sizeof(union generic_request) is learned at runtime by observing
+ *     Wine's own real traffic. wine_server_receive_fd() is what hands a
+ *     thread its request_fd, but `nm -D ntdll.so` against a real build
+ *     shows it is NOT an exported ELF dynamic symbol (unlike
+ *     wine_server_call/wine_server_send_fd, which are) -- it's
+ *     static/internal, so it can't be interposed directly. Its entire
+ *     job, though, is one recvmsg() call with SCM_RIGHTS ancillary data
+ *     to receive that fd via fd-passing, and recvmsg() itself is a
+ *     genuine libc symbol -- ntdll.so calling into libc.so always
+ *     crosses the ELF boundary, regardless of how wine_server_receive_fd
+ *     itself is scoped. Intercepting recvmsg() and reading the SCM_RIGHTS
+ *     control message gives the same fd. The first write()/writev() to
+ *     that fd is then, by construction of Wine's own client protocol code
+ *     (dlls/ntdll/unix/server.c: send_request()), always exactly
+ *     sizeof(union generic_request) bytes. See the recvmsg()/write()/
+ *     writev() interposition below.
  *
  * Enable event tracing with LINUWUX_DEBUG=1 (same variable as the ntdll
  * hooks, deliberately -- this is a drop-in alternative, not a different
@@ -51,15 +74,27 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/uio.h>
 #include <ucontext.h>
 #include <unistd.h>
+
+/* Set by build_preload_library() (lib/apply-preload.sh) from the wine
+ * tree's own generated include/wine/server_protocol.h. -1 means "could not
+ * be determined at build time" -- checked at runtime, faketime just logs
+ * and no-ops rather than sending a request with a bogus type ID. */
+#ifndef LINUWUX_REQ_SET_FAKETIME
+#define LINUWUX_REQ_SET_FAKETIME (-1)
+#endif
 
 #ifndef PR_SET_SYSCALL_USER_DISPATCH
 #define PR_SET_SYSCALL_USER_DISPATCH 59
@@ -219,6 +254,10 @@ static void linuwux_patch_kuser_shared_data(void)
     linuwux_log("kuser_shared_data: patched\n");
 }
 
+/* Defined below (needs the wine_server_call() plumbing); forward-declared
+ * here so the 0x336967 (faketime) case in linuwux_cpuid_spoof() can call it. */
+static void linuwux_set_faketime(long long faketime);
+
 /* Returns 1 if the fault was ours to handle. */
 static int linuwux_cpuid_spoof(ucontext_t *ctx)
 {
@@ -286,11 +325,7 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
         break;
 
     case 0x336967:
-        /* Known gap -- see file header. Not silently ignored: log it so a
-         * faketime-dependent game's misbehavior is traceable back here
-         * instead of looking like an unrelated bug. */
-        linuwux_log("cpuid 0x336967 (faketime) requested but NOT SUPPORTED "
-                    "in --preload-interposition mode yet\n");
+        linuwux_set_faketime((long long)ctx->uc_mcontext.gregs[REG_RCX]);
         ctx->uc_mcontext.gregs[REG_RAX] = 0x0;
         ctx->uc_mcontext.gregs[REG_RBX] = 0x0;
         ctx->uc_mcontext.gregs[REG_RCX] = 0x0;
@@ -390,6 +425,224 @@ not_ours:
 }
 
 /* ------------------------------------------------------------------ */
+/* Faketime: wine_server_call() with a runtime-learned request size    */
+/* ------------------------------------------------------------------ */
+
+/* Matches the real, generated struct set_faketime_request exactly (byte
+ * for byte -- verified against tools/make_requests' actual output for our
+ * own set_faketime.protocol addition): 12-byte header, 4 bytes padding to
+ * align the 8-byte timeout_t, then the value itself. */
+struct linuwux_request_header
+{
+    int          req;
+    unsigned int request_size;
+    unsigned int reply_size;
+};
+
+struct linuwux_set_faketime_request
+{
+    struct linuwux_request_header header;
+    char __pad[4];
+    long long faketime;
+};
+
+/* Mirrors struct __server_request_info's tail in wine/server.h, field for
+ * field -- same compiler, same target ABI, same types and order, so this
+ * lays out identically. Only the union in front of it (which this trailer
+ * must sit immediately after) has a size wine_server_call() decides at
+ * ntdll's own compile time and doesn't tell us; that's g_generic_request_size,
+ * learned below rather than assumed. */
+struct linuwux_server_iovec { const void *ptr; unsigned int size; };
+struct linuwux_request_trailer
+{
+    unsigned int data_count;
+    void *reply_data;
+    struct linuwux_server_iovec data[5];
+    const char *name;
+};
+
+static _Atomic int g_request_fd_candidate = -1;
+static _Atomic size_t g_generic_request_size = 0;
+
+typedef ssize_t (*recvmsg_fn)(int, struct msghdr *, int);
+static recvmsg_fn real_recvmsg;
+
+ssize_t recvmsg(int fd, struct msghdr *msg, int flags)
+{
+    ssize_t ret;
+
+    if (!real_recvmsg)
+        real_recvmsg = (recvmsg_fn)dlsym(RTLD_NEXT, "recvmsg");
+
+    ret = real_recvmsg(fd, msg, flags);
+
+    if (ret >= 0 && atomic_load(&g_request_fd_candidate) == -1 && msg && msg->msg_control)
+    {
+        struct cmsghdr *cmsg;
+        for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg))
+        {
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
+                cmsg->cmsg_len >= CMSG_LEN(sizeof(int)))
+            {
+                int received_fd, expected = -1;
+                memcpy(&received_fd, CMSG_DATA(cmsg), sizeof(received_fd));
+                if (received_fd >= 0 &&
+                    atomic_compare_exchange_strong(&g_request_fd_candidate, &expected, received_fd))
+                    linuwux_log("candidate request_fd=%d (first SCM_RIGHTS via recvmsg)\n", received_fd);
+                break;
+            }
+        }
+    }
+
+    return ret;
+}
+
+typedef ssize_t (*write_fn)(int, const void *, size_t);
+typedef ssize_t (*writev_fn)(int, const struct iovec *, int);
+static write_fn real_write;
+static writev_fn real_writev;
+
+/* Fast path once learned: one atomic load, no further work -- both
+ * functions are far too hot in a normal process to carry any real
+ * overhead past the learning window. */
+ssize_t write(int fd, const void *buf, size_t count)
+{
+    if (!real_write)
+        real_write = (write_fn)dlsym(RTLD_NEXT, "write");
+
+    if (atomic_load(&g_generic_request_size) == 0 &&
+        fd == atomic_load(&g_request_fd_candidate) && count > 0)
+    {
+        size_t expected = 0;
+        if (atomic_compare_exchange_strong(&g_generic_request_size, &expected, count))
+            linuwux_log("learned sizeof(union generic_request)=%zu (via write)\n", count);
+    }
+    return real_write(fd, buf, count);
+}
+
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt)
+{
+    if (!real_writev)
+        real_writev = (writev_fn)dlsym(RTLD_NEXT, "writev");
+
+    if (atomic_load(&g_generic_request_size) == 0 &&
+        fd == atomic_load(&g_request_fd_candidate) && iovcnt > 0 && iov[0].iov_len > 0)
+    {
+        size_t expected = 0;
+        size_t sz = iov[0].iov_len;
+        if (atomic_compare_exchange_strong(&g_generic_request_size, &expected, sz))
+            linuwux_log("learned sizeof(union generic_request)=%zu (via writev)\n", sz);
+    }
+    return real_writev(fd, iov, iovcnt);
+}
+
+typedef unsigned int (*wine_server_call_fn)(void *);
+
+/* dlsym(RTLD_DEFAULT, ...) only searches the process's GLOBAL symbol
+ * scope -- which does NOT include a library loaded via plain dlopen()
+ * without RTLD_GLOBAL (glibc's dlopen() default is RTLD_LOCAL). Wine's
+ * own PE/unix-module loader loads ntdll.so's unix backend via its own
+ * internal dlopen() call, not as an ordinary linked dependency, so
+ * wine_server_call -- confirmed present via `nm -D ntdll.so` against a
+ * real build -- is invisible to RTLD_DEFAULT even though it genuinely
+ * exists. Fix: find ntdll.so's real on-disk path from /proc/self/maps
+ * (it's already loaded by the time any of our code runs), then
+ * dlopen(path, RTLD_NOLOAD) to get a handle to that SAME already-loaded
+ * object without a second load, and dlsym() on that specific handle --
+ * handle-based dlsym() always finds the symbol regardless of the
+ * object's RTLD_LOCAL/RTLD_GLOBAL scope. Verified against a synthetic
+ * RTLD_LOCAL dlopen() before relying on it here. */
+static void *linuwux_find_ntdll_symbol(const char *name)
+{
+    static void *ntdll_handle;
+    static int tried;
+
+    if (!ntdll_handle && !tried)
+    {
+        FILE *f;
+        char line[4096], path[4096];
+
+        tried = 1;
+        path[0] = '\0';
+        f = fopen("/proc/self/maps", "r");
+        if (f)
+        {
+            while (fgets(line, sizeof(line), f))
+            {
+                size_t len = strlen(line);
+                if (len && line[len - 1] == '\n')
+                    line[--len] = '\0';
+                if (len > 9 && strcmp(line + len - 9, "/ntdll.so") == 0)
+                {
+                    const char *sp = strrchr(line, ' ');
+                    if (sp)
+                        snprintf(path, sizeof(path), "%s", sp + 1);
+                    break;
+                }
+            }
+            fclose(f);
+        }
+        if (path[0])
+        {
+            ntdll_handle = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
+            linuwux_log("faketime: ntdll.so at %s -> handle=%p\n", path, ntdll_handle);
+        }
+        else
+            linuwux_log("faketime: could not find ntdll.so in /proc/self/maps\n");
+    }
+
+    return ntdll_handle ? dlsym(ntdll_handle, name) : NULL;
+}
+
+static void linuwux_set_faketime(long long faketime)
+{
+    static wine_server_call_fn real_wine_server_call;
+    size_t union_size = atomic_load(&g_generic_request_size);
+    unsigned char *buf;
+    struct linuwux_set_faketime_request *req;
+    struct linuwux_request_trailer *trailer;
+
+    if (LINUWUX_REQ_SET_FAKETIME < 0)
+    {
+        linuwux_log("faketime: REQ_set_faketime unknown (not found in this tree's "
+                    "server_protocol.h at build time) -- skipping\n");
+        return;
+    }
+    if (!union_size)
+    {
+        linuwux_log("faketime: sizeof(union generic_request) not learned yet "
+                    "(no wineserver traffic observed on the request fd) -- skipping\n");
+        return;
+    }
+    if (!real_wine_server_call)
+        real_wine_server_call = (wine_server_call_fn)linuwux_find_ntdll_symbol("wine_server_call");
+    if (!real_wine_server_call)
+    {
+        linuwux_log("faketime: wine_server_call not resolvable -- skipping\n");
+        return;
+    }
+
+    buf = calloc(1, union_size + sizeof(struct linuwux_request_trailer));
+    if (!buf)
+        return;
+
+    req = (struct linuwux_set_faketime_request *)buf;
+    req->header.req = LINUWUX_REQ_SET_FAKETIME;
+    req->header.request_size = 0;
+    req->header.reply_size = 0;
+    req->faketime = faketime;
+
+    trailer = (struct linuwux_request_trailer *)(buf + union_size);
+    trailer->data_count = 0;
+    trailer->reply_data = NULL;
+    trailer->name = "set_faketime";
+
+    real_wine_server_call(buf);
+    linuwux_log("faketime: sent set_faketime=%llx via wine_server_call\n", faketime);
+    free(buf);
+}
+
+/* ------------------------------------------------------------------ */
 /* sigaction()/prctl() interposition                                   */
 /* ------------------------------------------------------------------ */
 
@@ -441,6 +694,33 @@ static void linuwux_sigsys_wrapper(int sig, siginfo_t *info, void *uctx)
     linuwux_chain_sigsys(sig, info, uctx);
 }
 
+/*
+ * Enable CPUID faulting -- deliberately NOT done in the library constructor.
+ * Constructors run before Wine (or anything else in the process) has
+ * registered a real SIGSEGV handler; a stray cpuid instruction executed by
+ * libc/ld.so startup code in that window would fault with no handler
+ * installed at all yet (not even Wine's own), default disposition, instant
+ * process death with no log line and nothing to debug. Confirmed the hard
+ * way: an earlier version enabled this in the constructor and killed the
+ * game process before it ever got as far as registering its own handlers.
+ * Safe here, called right after our SIGSEGV wrapper is confirmed installed
+ * as the active handler for this thread.
+ *
+ * Same scope caveat as the ntdll-side variant either way: ARCH_SET_CPUID is
+ * a per-thread setting and this only fires once, for whichever thread
+ * first registers a SIGSEGV handler -- not a regression, just an existing
+ * limitation neither variant currently solves.
+ */
+static void linuwux_enable_cpuid_fault(void)
+{
+    static int done;
+    if (done)
+        return;
+    done = 1;
+    syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);
+    linuwux_log("CPUID faulting enabled (tid=%d)\n", (int)syscall(SYS_gettid));
+}
+
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 {
     if (!real_sigaction)
@@ -451,8 +731,12 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         s_have_real_segv = 1;
         struct sigaction ours = *act;
         ours.sa_sigaction = linuwux_segv_wrapper;
-        linuwux_log("intercepted Wine's sigaction(SIGSEGV, ...)\n");
-        return real_sigaction(signum, &ours, oldact);
+        int r = real_sigaction(signum, &ours, oldact);
+        if (r == 0) {
+            linuwux_log("intercepted Wine's sigaction(SIGSEGV, ...)\n");
+            linuwux_enable_cpuid_fault();
+        }
+        return r;
     }
     if (act && signum == SIGSYS && act->sa_sigaction != linuwux_sigsys_wrapper) {
         s_real_sys = *act;
@@ -501,16 +785,5 @@ __attribute__((constructor))
 static void linuwux_preload_init(void)
 {
     linuwux_detect_cpu_vendor();
-    /*
-     * Enable CPUID faulting on this (the process's first) thread -- the
-     * ntdll-side variant does this via a content-insert into
-     * signal_init_process(), which we're not touching at all in this mode.
-     * Same scope caveat either way: ARCH_SET_CPUID is documented as a
-     * per-thread setting, and this only covers the thread that loads this
-     * library, matching the ntdll-side version's own behavior (also only
-     * the thread that runs signal_init_process()) -- not a regression,
-     * just an existing limitation neither variant currently solves.
-     */
-    syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);
     linuwux_log("liblinuwux_preload.so loaded (pid=%d)\n", getpid());
 }

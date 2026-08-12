@@ -18,9 +18,10 @@
 
 # --preload-interposition (EXPERIMENTAL): build and install
 # liblinuwux_preload.so instead of patching ntdll's source. See
-# patches/preload/linuwux_preload.c for the mechanism and its known gaps
-# (faketime leaf 0x336967 unsupported), and the "Interposition Sketch"
-# design writeup for why this exists.
+# patches/preload/linuwux_preload.c for the mechanism (including faketime,
+# leaf 0x336967 -- learned/extracted at build+runtime, no wine source
+# modification needed), and the "Interposition Sketch" design writeup for
+# why this exists.
 #
 # Sourced by build.sh — requires lib/common.sh already loaded.
 
@@ -65,41 +66,109 @@ STUB
     plog "  Inserted LD_PRELOAD append after line $brace_line (after dlloverrides brace)"
 }
 
-# Compile liblinuwux_preload.so and drop it into the built redist tree, so
-# it ends up inside the packaged tarball. Run this AFTER run_configure_and_
-# build() (needs the built "files/" tree to already exist) and BEFORE
-# package_and_verify() (which tars up whatever's in the redist dir).
+# Extract REQ_set_faketime's value from this tree's own generated
+# include/wine/server_protocol.h (a build artifact tools/make_requests
+# already produced during apply_linuwux_patches() -- reading it here, not
+# modifying it). The enum value is positionally generated -- it depends on
+# every request defined before it in protocol.def -- so it varies by wine
+# version/patch chain and can't be hardcoded. Prints the value on stdout,
+# nothing on failure; caller decides how to treat a miss.
+extract_req_set_faketime() {
+    local server_protocol_h="${SRC_DIR}/wine/include/wine/server_protocol.h"
+    [[ -f "$server_protocol_h" ]] || return 1
+
+    awk '
+        /^enum request$/ { in_enum=1; next }
+        in_enum && /^\};/ { exit }
+        in_enum && match($0, /REQ_[A-Za-z0-9_]+/) {
+            name = substr($0, RSTART, RLENGTH)
+            if (name == "REQ_set_faketime") { print count; found=1; exit }
+            count++
+        }
+        END { if (!found) exit 1 }
+    ' "$server_protocol_h"
+}
+
+# Compile liblinuwux_preload.so and get it into whatever redist artifact
+# package_and_verify() will actually end up using. Run this AFTER
+# run_configure_and_build() and BEFORE package_and_verify().
 #
-# LEAST VERIFIED PART of --preload-interposition: the redist-directory
-# search below is copied from package_and_verify()'s own fallback logic in
-# package.sh, but hasn't been confirmed against a real build's actual
-# output layout. If make redist produces a tarball directly rather than a
-# loose directory, this step finds nothing to inject into and warns
-# instead of failing the whole build -- opt-in experimental step, so a
-# soft failure here shouldn't block an otherwise-successful build.
+# make redist produces its OWN tarball directly, packaging a loose staging
+# directory (also left on disk) at the point make redist finishes -- before
+# this function ever runs. package_and_verify() checks for that pre-built
+# tarball FIRST and uses it as-is if found, only falling back to re-tarring
+# a loose directory when no tarball exists yet. Confirmed the hard way: an
+# earlier version of this function only handled the loose-directory case,
+# silently injecting the library into a directory that had already been
+# tarred up and was never looked at again -- correctly built, silently
+# unused. This handles both paths package_and_verify() can take, in the
+# same priority order it uses.
 build_preload_library() {
     local src="${PATCHES_DIR}/preload/linuwux_preload.c"
-    local redist_dir="" dst_dir
+    local so_tmp tarball
+    local req_faketime
 
     plog "Building liblinuwux_preload.so ..."
     [[ -f "$src" ]] || plog_die "$src not found"
     need gcc
 
-    for candidate in redist dist "${BUILD_NAME}" *; do
-        if [[ -d "$candidate" && ( -f "$candidate/proton" || -f "$candidate/version" ) ]]; then
-            redist_dir="$candidate"
-            break
-        fi
-    done
-
-    if [[ -z "$redist_dir" ]]; then
-        plog_warn "  Could not locate a loose redist directory to install liblinuwux_preload.so into (make redist may have produced a tarball directly) -- skipping. Build continues without preload interposition; see lib/apply-preload.sh if this needs adjusting for your build layout."
-        return
+    if req_faketime=$(extract_req_set_faketime); then
+        plog "  REQ_set_faketime=${req_faketime} (from this tree's server_protocol.h) -- faketime support enabled"
+    else
+        req_faketime=-1
+        plog_warn "  Could not determine REQ_set_faketime from ${SRC_DIR}/wine/include/wine/server_protocol.h -- faketime (cpuid leaf 0x336967) will log and no-op at runtime. Build continues."
     fi
 
-    dst_dir="${redist_dir}/files/bin"
-    mkdir -p "$dst_dir"
-    gcc -std=gnu11 -O2 -fPIC -shared -Wall -o "${dst_dir}/liblinuwux_preload.so" "$src" -ldl \
+    so_tmp=$(mktemp -p "$PWD" liblinuwux_preload.XXXXXX.so)
+    gcc -std=gnu11 -O2 -fPIC -shared -Wall -DLINUWUX_REQ_SET_FAKETIME="${req_faketime}" -o "$so_tmp" "$src" -ldl \
         || plog_die "Failed to compile liblinuwux_preload.so"
-    plog "  Built ${dst_dir}/liblinuwux_preload.so"
+    plog "  Compiled $(basename "$so_tmp")"
+
+    tarball=$(find . -maxdepth 3 \( -name '*.tar.gz' -o -name '*.tar.xz' \) 2>/dev/null | head -1)
+
+    if [[ -n "$tarball" ]]; then
+        plog "  Found existing redist tarball ($tarball) -- injecting into it directly"
+        local work inner
+        work=$(mktemp -d -p "$PWD")
+        if [[ "$tarball" == *.tar.xz ]]; then
+            tar -xJf "$tarball" -C "$work" || plog_die "Failed to extract $tarball"
+        else
+            tar -xzf "$tarball" -C "$work" || plog_die "Failed to extract $tarball"
+        fi
+        inner=$(find "$work" -maxdepth 1 -mindepth 1 -type d | head -1)
+        [[ -n "$inner" ]] || plog_die "Could not find the extracted redist tree inside $tarball"
+
+        mkdir -p "$inner/files/bin"
+        cp "$so_tmp" "$inner/files/bin/liblinuwux_preload.so"
+
+        rm -f "$tarball"
+        if [[ "$tarball" == *.tar.xz ]]; then
+            need xz
+            tar -cJf "$tarball" -C "$work" "$(basename "$inner")" || plog_die "Failed to re-pack $tarball"
+        else
+            tar -czf "$tarball" -C "$work" "$(basename "$inner")" || plog_die "Failed to re-pack $tarball"
+        fi
+        rm -rf "$work"
+        plog "  Re-packed $tarball with liblinuwux_preload.so included"
+    else
+        local redist_dir=""
+        for candidate in redist dist "${BUILD_NAME}" *; do
+            if [[ -d "$candidate" && ( -f "$candidate/proton" || -f "$candidate/version" ) ]]; then
+                redist_dir="$candidate"
+                break
+            fi
+        done
+
+        if [[ -z "$redist_dir" ]]; then
+            plog_warn "  Could not locate a redist tarball or loose directory to install liblinuwux_preload.so into -- skipping. Build continues without preload interposition; see lib/apply-preload.sh if this needs adjusting for your build layout."
+            rm -f "$so_tmp"
+            return
+        fi
+
+        mkdir -p "${redist_dir}/files/bin"
+        cp "$so_tmp" "${redist_dir}/files/bin/liblinuwux_preload.so"
+        plog "  Installed into loose redist dir ${redist_dir}/files/bin/liblinuwux_preload.so"
+    fi
+
+    rm -f "$so_tmp"
 }
