@@ -80,6 +80,18 @@
  * actual content -- 1 if signal_x86_64.c has Syscall User Dispatch support
  * (GE-Proton 11-5+), 0 otherwise (GE 11-3, CachyOS). Not derived from the
  * build machine's <linux/prctl.h>, which doesn't reflect the tree being built.
+ *
+ * SUD-sensitive early-return sites (LINUWUX_HAVE_SUD only): any code path
+ * that returns from segv_handler()/sigsys_handler() without reaching
+ * Wine's own leave_handler() must re-arm syscall_dispatch itself, or every
+ * syscall on that thread runs raw and unintercepted from then on.
+ *
+ * Known sites:
+ *   - linuwux_sigsys_route()  return 1               (this file)
+ *   - segv_handler() CPUID early return  (lib/apply-content.sh,
+ *     apply_cpuid_spoof_handler_fix)
+ *
+ * Adding a new early return under LINUWUX_HAVE_SUD? Add it here too.
  */
 #ifndef LINUWUX_HAVE_SUD
 #define LINUWUX_HAVE_SUD 0
@@ -540,7 +552,7 @@ static int linuwux_sigsys_route(void *sigcontext)
          * on this thread afterwards runs raw instead of trapping back into
          * Wine's NT emulation. No equivalent on GE 11-3 (seccomp, not SUD).
          */
-        amd64_thread_data()->syscall_dispatch = 1; /* SYSCALL_DISPATCH_FILTER_BLOCK */
+        leave_handler( ctx ); /* SYSCALL_DISPATCH_FILTER_BLOCK */
 #endif
 
         /* Throwaway: freeze on a matching redirect so gdb can attach and
