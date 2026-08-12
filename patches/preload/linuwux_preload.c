@@ -911,11 +911,34 @@ int prctl(int option, ...)
     return (int)ret;
 }
 
+/* Appends ";entry" (or just "entry" if buf is still empty) to buf, safely --
+ * used instead of strncat() with hand-computed remaining-length arithmetic,
+ * which silently no-ops (or worse, truncates mid-token) once strlen(buf) gets
+ * within a few bytes of bufsize. Confirmed the hard way: a real launcher-
+ * supplied WINEDLLOVERRIDES landed at exactly 511 bytes against the old
+ * 512-byte buffer, leaving strncat() zero bytes of room -- winmm/version/
+ * reflex silently never got appended, and reflex-rs never loaded as a
+ * result. Logs instead of silently dropping the entry if it still doesn't
+ * fit. */
+static void linuwux_append_override(char *buf, size_t bufsize, const char *entry)
+{
+    size_t len = strlen(buf);
+    int n;
+
+    if (len >= bufsize)
+        return;
+
+    n = snprintf(buf + len, bufsize - len, "%s%s", len ? ";" : "", entry);
+    if (n < 0 || len + (size_t)n >= bufsize)
+        linuwux_log("WINEDLLOVERRIDES: not enough room to append \"%s\" -- skipping\n", entry);
+}
+
 __attribute__((constructor))
 static void linuwux_preload_init(void)
 {
-    char overrides[512];
+    char overrides[4096];
     const char *existing;
+    int n;
 
     linuwux_detect_cpu_vendor();
 
@@ -932,16 +955,17 @@ static void linuwux_preload_init(void)
      * set isn't just politeness -- it avoids genuinely undefined
      * behavior. */
     existing = getenv("WINEDLLOVERRIDES");
-    overrides[0] = '\0';
-    if (existing)
-        snprintf(overrides, sizeof(overrides), "%s", existing);
+    n = snprintf(overrides, sizeof(overrides), "%s", existing ? existing : "");
+    if (existing && (n < 0 || (size_t)n >= sizeof(overrides)))
+        linuwux_log("WINEDLLOVERRIDES: existing value (%zu bytes) doesn't fit our %zu-byte buffer -- truncated\n",
+                     strlen(existing), sizeof(overrides));
 
     if (!existing || !strstr(existing, "winmm="))
-        strncat(overrides, overrides[0] ? ";winmm=n,b" : "winmm=n,b", sizeof(overrides) - strlen(overrides) - 1);
+        linuwux_append_override(overrides, sizeof(overrides), "winmm=n,b");
     if (!existing || !strstr(existing, "version="))
-        strncat(overrides, overrides[0] ? ";version=n,b" : "version=n,b", sizeof(overrides) - strlen(overrides) - 1);
+        linuwux_append_override(overrides, sizeof(overrides), "version=n,b");
     if (!existing || !strstr(existing, "reflex="))
-        strncat(overrides, overrides[0] ? ";reflex=n,b" : "reflex=n,b", sizeof(overrides) - strlen(overrides) - 1);
+        linuwux_append_override(overrides, sizeof(overrides), "reflex=n,b");
 
     setenv("WINEDLLOVERRIDES", overrides, 1);
     linuwux_log("WINEDLLOVERRIDES=\"%s\"\n", overrides);
