@@ -22,6 +22,16 @@ This project does **not** configure host-side requirements for the bypass (UMIP,
 
 Compiles `patches/preload/linuwux_preload.c` and drops `liblinuwux_preload.so` in `dist/` — no Proton/Wine clone, no container engine, done in seconds. Point `LD_PRELOAD` at it from any existing Proton's launch options (append, don't replace — see above).
 
+Prefer not to manage `LD_PRELOAD` paths yourself? `./build.sh --install` also installs the library to `~/.local/lib` and a `linuwux` wrapper to `~/.local/bin`, so the launch option is just:
+
+```
+~/.local/bin/linuwux %command%
+```
+
+The wrapper appends to `LD_PRELOAD` itself (never replaces it) before exec'ing the real command, so it can't clobber the Steam Overlay either. The absolute path works immediately, regardless of `PATH` — once `~/.local/bin` is confirmed on `PATH`, plain `linuwux %command%` works too (handy from a terminal, Lutris, or Heroic; Steam's own process environment won't pick up a `PATH` change until it's restarted, so the absolute form is what to use there).
+
+Once installed, later runs of plain `./build.sh` (no `--install` needed again) keep the installed copy in sync automatically — pull an update, rebuild, and it's live without any extra step.
+
 ## Layout
 
 ```
@@ -100,6 +110,7 @@ Needs nothing from a Wine build — same as everything else this library does.
 
 | Flag | Effect |
 |------|--------|
+| `--install` | Also install to `~/.local/lib` + a `linuwux` wrapper in `~/.local/bin` |
 | `--update-patches` | Re-clone `patches/` from this repo |
 | `-h`, `--help` | Help |
 
@@ -108,12 +119,20 @@ Needs nothing from a Wine build — same as everything else this library does.
 | `PATCH_BRANCH=<name>` | Branch for patch clone when `patches/` is missing |
 | `LINUWUX_DEBUG=1` | Runtime event tracing |
 | `LINUWUX_REDIRECT_ALL=1` | Disable SIGSYS Wine-PE scope filter |
+| `LINUWUX_PRELOAD=<path>` | `linuwux` wrapper only: override the library path it loads |
 | `PROTON_AVX=1` | AVX/XSAVE in spoofed CPUID/KUSER data |
 
 ## Output
 
 ```
 dist/liblinuwux_preload.so
+```
+
+With `--install`, also:
+
+```
+~/.local/lib/liblinuwux_preload.so
+~/.local/bin/linuwux
 ```
 
 No installation step, no compatibility-tool registration — just point an existing Proton's `LD_PRELOAD` launch option at it (append, don't replace — see Quick start).

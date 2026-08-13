@@ -40,6 +40,7 @@ PATCHES_DIR="${SCRIPT_DIR}/patches"
 DIST_DIR="${SCRIPT_DIR}/dist"
 LIB_DIR="${SCRIPT_DIR}/lib"
 UPDATE_PATCHES=0
+INSTALL=0
 
 # shellcheck source=lib/common.sh
 source "${LIB_DIR}/common.sh"
@@ -61,6 +62,9 @@ Usage:
   $(basename "$0") [OPTIONS]
 
 Options:
+  --install                   Also install to ~/.local/lib + a 'linuwux'
+                               wrapper in ~/.local/bin, for a plain
+                               'linuwux %command%' launch option
   --update-patches            Delete and re-clone patches/ from this repo
   -h, --help                  Show this help
 
@@ -92,6 +96,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)   usage ;;
+        --install) INSTALL=1; shift ;;
         --update-patches) UPDATE_PATCHES=1; shift ;;
         *)
             die "Unknown argument: $1  (use --help)"
@@ -102,3 +107,9 @@ done
 ensure_patches_dir
 check_required_base_files
 build_preload
+if [[ $INSTALL -eq 1 ]]; then
+    install_preload
+elif already_installed; then
+    refresh_installed_copy
+fi
+exit 0
