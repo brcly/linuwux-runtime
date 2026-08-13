@@ -161,12 +161,30 @@ With `--install`, also:
 
 Neither is a real "install" in the traditional sense — no compatibility-tool registration, nothing Proton or Steam needs to know about ahead of time. It's just a file to point a launch option at (see Quick start).
 
+To uninstall, just remove the two files:
+
+```bash
+rm -f ~/.local/lib/liblinuwux.so ~/.local/bin/linuwux
+```
+
+Then remove it from the game's launch options.
+
 ## Behaviour notes
 
 - `WINEDLLOVERRIDES` and `PROTON_DISABLE_LSTEAMCLIENT` are set live by the library itself at load time (see Runtime table above) — not baked into any script.
 - `PROTON_DISABLE_LSTEAMCLIENT=1` bypasses Steam DRM/Steamworks checks some DenuvOwO packs trip on. It doesn't affect the Steam Overlay — that keeps working as long as `LD_PRELOAD` is appended rather than replaced (see Quick start).
 - The library announces its version on every load (`[linuwux] vX.Y.Z loaded (pid=...)`, printed to stderr regardless of `LINUWUX_DEBUG`) so it shows up in whatever log gets pasted for a bug report. Check it any time without launching a game via `linuwux --version` or `strings liblinuwux.so | grep linuwux`.
 - Confirmed working launched directly through the real Steam client (not just Lutris/Heroic/Faugus) with GE-Proton/CachyOS — the game's `LD_PRELOAD` does reach the process inside Steam's own pressure-vessel container.
+
+## Reporting issues
+
+Open an [issue](https://github.com/brcly/linuwux-runtime/issues/new/choose) and include:
+
+- `linuwux --version` (or `strings liblinuwux.so | grep linuwux` if you built from source)
+- A `LINUWUX_DEBUG=1` run — set it before launching, either as a Steam launch option prefix (`LINUWUX_DEBUG=1 ~/.local/bin/linuwux %command%`) or via `LINUWUX_DEBUG=1 linuwux <game exe>` from a terminal — and paste the resulting log
+- GE-Proton/CachyOS version, and whether it's a Denuvo pack, another DRM, or something else
+
+Without the version and a debug log, diagnosing a report usually starts with a guess.
 
 ## License
 

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax check
+        run: |
+          bash -n build.sh
+          sh -n install.sh
+          sh -n src/linuwux.sh
+
+      - name: Shellcheck
+        run: shellcheck build.sh install.sh src/linuwux.sh
+
+      - name: Build liblinuwux.so (-Wall -Wextra)
+        run: gcc -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -o /tmp/strict-check.so src/linuwux.c -ldl
+
+      - name: Build via build.sh
+        run: ./build.sh
+
+      - name: Verify export surface stays exactly the 4 interposed libc symbols
+        run: |
+          exports=$(nm -D dist/liblinuwux.so | awk '$2=="T"{print $3}' | sort)
+          expected=$(printf '%s\n' clock_gettime gettimeofday prctl sigaction | sort)
+          if [ "$exports" != "$expected" ]; then
+            echo "::error::Unexpected exported symbols -- LD_PRELOAD libraries should only export their interposition targets"
+            diff <(echo "$expected") <(echo "$exports")
+            exit 1
+          fi
+          echo "Export surface OK:"
+          echo "$exports"
+
+      - name: Smoke test --install and --version
+        run: |
+          export HOME="${RUNNER_TEMP}/fakehome"
+          mkdir -p "$HOME"
+          ./build.sh --install
+          "${HOME}/.local/bin/linuwux" --version
