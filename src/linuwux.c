@@ -18,13 +18,11 @@
  */
 
 /*
- * linuwux
+ * linuwux — LD_PRELOAD library for DenuvOwO/LinUwUx under Wine/Proton.
  *
- * Installs LinUwUx's CPUID spoofing, SIGSYS/DenuvOwO redirect,
- * HwProfileGuid, DLL overrides, and faketime via LD_PRELOAD. Interposes
- * sigaction()/prctl() and clock_gettime()/gettimeofday().
- *
- * LINUWUX_DEBUG=1 enables event tracing.
+ * Hooks: sigaction, prctl, clock_gettime, gettimeofday.
+ * Provides: CPUID spoof, SIGSYS redirect, HwProfileGuid, DLL overrides, faketime.
+ * Debug: LINUWUX_DEBUG=1
  */
 
 #define _GNU_SOURCE
@@ -57,14 +55,12 @@
 #define ARCH_SET_CPUID 0x1012
 #endif
 
-/* Set via build.sh's -DLINUWUX_VERSION; "dev" for an ad hoc gcc build. */
+/* From -DLINUWUX_VERSION; "dev" if built by hand. */
 #ifndef LINUWUX_VERSION
 #define LINUWUX_VERSION "dev"
 #endif
 
-/* Unreferenced but kept live by __attribute__((used)) -- readable
- * without running anything: `strings liblinuwux.so | grep linuwux`,
- * or `linuwux --version` against an installed copy. */
+/* Kept for `strings` / `linuwux --version`. */
 static const char linuwux_version_tag[] __attribute__((used)) =
     "linuwux " LINUWUX_VERSION;
 
@@ -79,7 +75,7 @@ static void linuwux_log(const char *fmt, ...)
     va_end(ap);
 }
 
-/* TEB via the %gs self-pointer (Win64 NtTib.Self, offset 0x30). */
+/* Win64 TEB: %gs:0x30 (NtTib.Self). */
 static inline void *linuwux_get_teb(void)
 {
     void *teb;
@@ -87,12 +83,12 @@ static inline void *linuwux_get_teb(void)
     return teb;
 }
 
-/* ------------------------------------------------------------------ */
-/* CPUID spoofing                                                      */
-/* ------------------------------------------------------------------ */
+/* --- CPUID spoof --- */
 
-static uint64_t g_target_sys_handler = 0;
+/* Set on arm leaf; read from all threads. */
+static _Atomic uint64_t g_target_sys_handler = 0;
 
+/* Filled once in the constructor before any other thread exists. */
 static unsigned int g_spoof_leaf1_eax, g_spoof_leaf1_ebx, g_spoof_leaf1_ecx, g_spoof_leaf1_edx;
 static unsigned int g_spoof_leaf40000000_eax, g_spoof_leaf40000000_ebx, g_spoof_leaf40000000_ecx, g_spoof_leaf40000000_edx;
 static unsigned int g_spoof_leaf40000001_eax, g_spoof_leaf40000001_ebx, g_spoof_leaf40000001_ecx, g_spoof_leaf40000001_edx;
@@ -211,22 +207,14 @@ static void linuwux_patch_kuser_shared_data(void)
     linuwux_log("kuser_shared_data: patched\n");
 }
 
-/* Defined below; called from the faketime CPUID leaf case. */
 static void linuwux_set_faketime(long long faketime);
-
-/* Defined below; called from the arm CPUID leaf case, not from
- * recvmsg() -- calling it there instead nests a second
- * wine_server_call() inside an unfinished one and corrupts
- * wineserver's protocol state. */
 static void linuwux_set_hwprofile_guid(void);
 
-/* DenuvOwO's custom CPUID leaves: not real Intel/AMD leaves, they're
- * how the hypervisor bypass signals arm/faketime requests through the
- * trapped CPUID instruction. */
+/* DenuvOwO protocol leaves (not real CPUID leaves). */
 #define LINUWUX_CPUID_LEAF_ARM      0x336933
 #define LINUWUX_CPUID_LEAF_FAKETIME 0x336967
 
-/* Returns 1 if the fault was ours to handle. */
+/* Handle a CPUID fault. Returns 1 if handled. */
 static int linuwux_cpuid_spoof(ucontext_t *ctx)
 {
     unsigned int spoof_leaf, spoof_subleaf;
@@ -236,13 +224,13 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
     spoof_subleaf = (unsigned int)ctx->uc_mcontext.gregs[REG_RCX];
 
     if (!(rip[0] == 0x0F && rip[1] == 0xA2))
-        return 0;   /* not a cpuid instruction at the fault site */
+        return 0;
 
     switch (spoof_leaf) {
     case 1:
         ctx->uc_mcontext.gregs[REG_RAX] = g_spoof_leaf1_eax;
         ctx->uc_mcontext.gregs[REG_RBX] = g_spoof_leaf1_ebx;
-        ctx->uc_mcontext.gregs[REG_RCX] = g_spoof_leaf1_ecx | (g_target_sys_handler ? 0 : (0x1 << 31));
+        ctx->uc_mcontext.gregs[REG_RCX] = g_spoof_leaf1_ecx | (atomic_load(&g_target_sys_handler) ? 0 : (0x1 << 31));
         ctx->uc_mcontext.gregs[REG_RDX] = g_spoof_leaf1_edx;
         break;
 
@@ -284,7 +272,7 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
     case LINUWUX_CPUID_LEAF_ARM:
         linuwux_log("cpuid arm leaf, TargetSysHandler=%#llx\n",
                     (unsigned long long)ctx->uc_mcontext.gregs[REG_RCX]);
-        g_target_sys_handler = (uint64_t)ctx->uc_mcontext.gregs[REG_RCX];
+        atomic_store(&g_target_sys_handler, (uint64_t)ctx->uc_mcontext.gregs[REG_RCX]);
         linuwux_patch_kuser_shared_data();
         linuwux_set_hwprofile_guid();
         ctx->uc_mcontext.gregs[REG_RAX] = 0x0;
@@ -302,6 +290,7 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
         break;
 
     default:
+        /* Pass through real CPUID while faulting is briefly disabled. */
         syscall(SYS_arch_prctl, ARCH_SET_CPUID, 1);
         __asm__ volatile(
             "cpuid"
@@ -318,10 +307,9 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
     return 1;
 }
 
-/* ------------------------------------------------------------------ */
-/* Wine-system RIP scope filter                                        */
-/* ------------------------------------------------------------------ */
+/* --- SIGSYS redirect --- */
 
+/* Typical Proton/GE ntdll/kernel PE range — skip redirects here unless forced. */
 #define LINUWUX_WINE_SYSTEM_RIP_MIN 0x00006FFFFF000000ULL
 #define LINUWUX_WINE_SYSTEM_RIP_MAX 0x0000700000000000ULL
 
@@ -336,31 +324,31 @@ static int linuwux_redirect_all_enabled(void)
     return env && env[0] == '1' && env[1] == '\0';
 }
 
-/* ------------------------------------------------------------------ */
-/* Syscall User Dispatch: learn the selector from Wine's own prctl().  */
-/* ------------------------------------------------------------------ */
-
-static ptrdiff_t g_sud_teb_offset = -1;  /* -1 == not learned yet / no SUD on this tree */
+/* TEB offset of SUD selector; -1 if unused (seccomp trees). */
+static _Atomic ptrdiff_t g_sud_teb_offset = -1;
 
 static void linuwux_rearm_sud(void)
 {
-    if (g_sud_teb_offset < 0)
+    ptrdiff_t teb_offset = atomic_load(&g_sud_teb_offset);
+    if (teb_offset < 0)
         return;
     unsigned char *teb = (unsigned char *)linuwux_get_teb();
-    teb[g_sud_teb_offset] = 1;  /* SYSCALL_DISPATCH_FILTER_BLOCK */
+    teb[teb_offset] = 1;  /* BLOCK */
 }
 
-/* ------------------------------------------------------------------ */
-/* SIGSYS redirect: DenuvOwO's blocked-syscall handoff                 */
-/* ------------------------------------------------------------------ */
-
+/* Redirect blocked syscalls into TargetSysHandler after arm. Returns 1 if handled. */
 static int linuwux_sigsys_route(ucontext_t *ctx)
 {
-    __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
-    unsigned long long syscall_nr, rip, resume;
+    __uint128_t *xmm_regs;
+    unsigned long long syscall_nr, rip, resume, target_sys_handler;
     unsigned char *fault_ip, opcode0, opcode1;
 
-    if (g_target_sys_handler == 0 ||
+    if (!ctx->uc_mcontext.fpregs)
+        return 0;
+    xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
+
+    target_sys_handler = atomic_load(&g_target_sys_handler);
+    if (target_sys_handler == 0 ||
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFFULL) == 0x1337133713371337ULL)
         goto not_ours;
 
@@ -368,22 +356,21 @@ static int linuwux_sigsys_route(ucontext_t *ctx)
     rip = (unsigned long long)ctx->uc_mcontext.gregs[REG_RIP];
 
     if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system(rip))
-        return 0;   /* not a fault we redirect; let Wine's real handler run */
+        return 0;
 
-    /* If the fault is on the `syscall` instruction itself (0f 05),
-     * resume past it -- otherwise resume at the fault site unchanged. */
     fault_ip = (unsigned char *)(uintptr_t)rip;
     opcode0 = fault_ip[0];
     opcode1 = fault_ip[1];
+    /* Advance past `syscall` (0f 05) when that is the fault site. */
     resume = (opcode0 == 0x0f && opcode1 == 0x05) ? rip + 2 : rip;
 
     linuwux_log("sigsys redirect rax=%llx rip=%llx resume=%llx -> %#llx\n",
-                syscall_nr, rip, resume, (unsigned long long)g_target_sys_handler);
+                syscall_nr, rip, resume, target_sys_handler);
 
     xmm_regs[4] = (xmm_regs[4] & ~(__uint128_t)0xFFFFFFFFULL) | (syscall_nr & 0xFFFFFFFF);
     ctx->uc_mcontext.gregs[REG_RAX] = (long long)resume;
-    ctx->uc_mcontext.gregs[REG_RCX] = (long long)g_target_sys_handler;
-    ctx->uc_mcontext.gregs[REG_RIP] = (long long)g_target_sys_handler;
+    ctx->uc_mcontext.gregs[REG_RCX] = (long long)target_sys_handler;
+    ctx->uc_mcontext.gregs[REG_RIP] = (long long)target_sys_handler;
 
     linuwux_rearm_sud();
     return 1;
@@ -394,20 +381,27 @@ not_ours:
     return 0;
 }
 
-/* dlsym(RTLD_DEFAULT) can't see ntdll.so's exports (Wine loads it via
- * its own dlopen(), not RTLD_GLOBAL). Find its real path via
- * /proc/self/maps and dlopen(path, RTLD_NOLOAD) instead. */
+/*
+ * Resolve a symbol from ntdll.so (not visible via RTLD_DEFAULT).
+ * Path comes from /proc/self/maps + RTLD_NOLOAD.
+ * May run under SIGSEGV (arm -> hwprofile); fopen/dlopen are not AS-safe.
+ * Late callers do not wait on a stuck resolver — return NULL instead.
+ */
+enum { LINUWUX_NTDLL_NOT_STARTED = 0, LINUWUX_NTDLL_IN_PROGRESS = 1, LINUWUX_NTDLL_DONE = 2 };
+
 static void *linuwux_find_ntdll_symbol(const char *name)
 {
-    static void *ntdll_handle;
-    static int tried;
+    static _Atomic(void *) ntdll_handle;
+    static _Atomic int state;
+    int expected_state = LINUWUX_NTDLL_NOT_STARTED;
+    void *handle;
 
-    if (!ntdll_handle && !tried)
+    if (atomic_compare_exchange_strong(&state, &expected_state, LINUWUX_NTDLL_IN_PROGRESS))
     {
         FILE *f;
         char line[4096], path[4096];
 
-        tried = 1;
+        handle = NULL;
         path[0] = '\0';
         f = fopen("/proc/self/maps", "r");
         if (f)
@@ -421,9 +415,7 @@ static void *linuwux_find_ntdll_symbol(const char *name)
                 if (len && line[len - 1] == '\n')
                     line[--len] = '\0';
 
-                /* Skip 5 whitespace-delimited fields to reach the
-                 * pathname -- it can contain spaces (e.g. "Proton
-                 * 11.0"), so don't split on the last space. */
+                /* Pathname is field 6; may contain spaces. */
                 field = line;
                 for (i = 0; i < 5 && field; i++)
                 {
@@ -446,22 +438,22 @@ static void *linuwux_find_ntdll_symbol(const char *name)
         }
         if (path[0])
         {
-            ntdll_handle = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
-            linuwux_log("linuwux_find_ntdll_symbol: ntdll.so at %s -> handle=%p\n", path, ntdll_handle);
+            handle = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
+            linuwux_log("linuwux_find_ntdll_symbol: ntdll.so at %s -> handle=%p\n", path, handle);
         }
         else
             linuwux_log("linuwux_find_ntdll_symbol: could not find ntdll.so in /proc/self/maps\n");
+
+        atomic_store_explicit(&ntdll_handle, handle, memory_order_release);
+        atomic_store_explicit(&state, LINUWUX_NTDLL_DONE, memory_order_release);
     }
 
-    return ntdll_handle ? dlsym(ntdll_handle, name) : NULL;
+    handle = atomic_load_explicit(&ntdll_handle, memory_order_acquire);
+    return handle ? dlsym(handle, name) : NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* HwProfileGuid: written via the real NT registry API, not a wine.inf */
-/* content-insert -- no source patch or rebuild required.              */
-/* ------------------------------------------------------------------ */
+/* --- HwProfileGuid via NT registry API --- */
 
-/* Matches winternl.h layout; ULONG is always 32-bit on Windows. */
 struct linuwux_unicode_string
 {
     uint16_t Length;
@@ -483,8 +475,6 @@ struct linuwux_object_attributes
 #define LINUWUX_KEY_ALL_ACCESS       0x001F003F
 #define LINUWUX_REG_SZ               1
 
-/* Genuine ELF exports of ntdll.so; WINAPI/__stdcall is a no-op for GCC
- * on x86_64, so plain C function pointers work. */
 typedef int32_t (*nt_create_key_fn)(void **key, uint32_t access, const struct linuwux_object_attributes *attr,
                                      uint32_t index, const struct linuwux_unicode_string *class,
                                      uint32_t options, uint32_t *disposition);
@@ -499,11 +489,11 @@ static void linuwux_ascii_to_utf16(const char *src, uint16_t *dst, size_t count)
         dst[i] = (uint16_t)(unsigned char)src[i];
 }
 
-/* Same key the old wine.inf content-insert set. Called from the
- * LINUWUX_CPUID_LEAF_ARM case (see forward declaration above). */
+/* Write Hardware Profiles\\0001\\HwProfileGuid once (arm leaf). */
 static void linuwux_set_hwprofile_guid(void)
 {
-    static int done;
+    static _Atomic int done;
+    int expected_done = 0;
     nt_create_key_fn nt_create_key;
     nt_set_value_key_fn nt_set_value_key;
     nt_close_fn nt_close;
@@ -520,16 +510,13 @@ static void linuwux_set_hwprofile_guid(void)
     static const char value_name_str[] = "HwProfileGuid";
     static const char data_str[] = "{12345678-1234-1234-1234-123456789012}";
 
-    /* Catch a too-small buffer at compile time if either string above
-     * ever grows past what value_name_buf/data_buf can hold. */
     _Static_assert(sizeof(value_name_str) <= sizeof(value_name_buf) / sizeof(value_name_buf[0]),
                    "value_name_buf too small for value_name_str");
     _Static_assert(sizeof(data_str) <= sizeof(data_buf) / sizeof(data_buf[0]),
                    "data_buf too small for data_str");
 
-    if (done)
+    if (!atomic_compare_exchange_strong(&done, &expected_done, 1))
         return;
-    done = 1;
 
     nt_create_key = (nt_create_key_fn)linuwux_find_ntdll_symbol("NtCreateKey");
     nt_set_value_key = (nt_set_value_key_fn)linuwux_find_ntdll_symbol("NtSetValueKey");
@@ -540,9 +527,7 @@ static void linuwux_set_hwprofile_guid(void)
         return;
     }
 
-    /* NtCreateKey only auto-creates the last path component, so walk
-     * the path one level at a time, threading each handle in as the
-     * next call's RootDirectory. */
+    /* NtCreateKey only creates the last component — walk path level by level. */
     cur = NULL;
     for (i = 0; i < sizeof(path_components) / sizeof(path_components[0]); i++)
     {
@@ -599,14 +584,12 @@ static void linuwux_set_hwprofile_guid(void)
     nt_close(cur);
 }
 
-/* ------------------------------------------------------------------ */
-/* Faketime: client-side clock_gettime()/gettimeofday() interposition  */
-/* ------------------------------------------------------------------ */
+/* --- Faketime (REALTIME clocks only) --- */
 
 #define LINUWUX_TICKS_PER_SEC      10000000LL
 #define LINUWUX_TICKS_1601_TO_1970 116444736000000000LL
 
-/* Windows FILETIME ticks: 100ns since 1601-01-01. */
+/* FILETIME-style: 100ns ticks since 1601-01-01. */
 static int64_t linuwux_unix_to_ticks(time_t sec, long nsec)
 {
     return (int64_t)sec * LINUWUX_TICKS_PER_SEC + nsec / 100 + LINUWUX_TICKS_1601_TO_1970;
@@ -621,7 +604,6 @@ static void linuwux_ticks_to_unix(int64_t ticks, time_t *sec, long *nsec)
     *nsec = (long)(unix_ticks % LINUWUX_TICKS_PER_SEC) * 100;
 }
 
-/* 0 is a valid offset, so track "is it set" separately from the value. */
 static _Atomic int64_t g_faketime_offset;
 static _Atomic int g_faketime_active;
 
@@ -678,9 +660,7 @@ int gettimeofday(struct timeval *tv, void *tz)
     return ret;
 }
 
-/* offset = ((now_ticks >> 32) - requested) << 32. Uses
- * real_clock_gettime() directly, not clock_gettime(), to avoid
- * recursing into our own wrapper above. */
+/* offset = ((now >> 32) - requested) << 32; uses real_clock_gettime to avoid recursion. */
 static void linuwux_set_faketime(long long requested)
 {
     struct timespec ts;
@@ -705,9 +685,7 @@ static void linuwux_set_faketime(long long requested)
                 requested, (unsigned long long)high32, (unsigned long long)offset);
 }
 
-/* ------------------------------------------------------------------ */
-/* sigaction()/prctl() interposition                                   */
-/* ------------------------------------------------------------------ */
+/* --- Signal / prctl interpose --- */
 
 typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
 typedef long (*prctl_fn)(int, unsigned long, unsigned long, unsigned long, unsigned long);
@@ -715,20 +693,20 @@ typedef long (*prctl_fn)(int, unsigned long, unsigned long, unsigned long, unsig
 static sigaction_fn real_sigaction;
 static prctl_fn real_prctl;
 
-static struct sigaction s_real_segv;
-static struct sigaction s_real_sys;
-static int s_have_real_segv;
-static int s_have_real_sys;
+/* Only sa_sigaction is chained; store it atomically to avoid torn struct copies. */
+typedef void (*linuwux_sig_handler_fn)(int, siginfo_t *, void *);
+static _Atomic(linuwux_sig_handler_fn) s_real_segv_handler;
+static _Atomic(linuwux_sig_handler_fn) s_real_sys_handler;
 
 static void linuwux_segv_wrapper(int sig, siginfo_t *info, void *uctx);
 static void linuwux_sigsys_wrapper(int sig, siginfo_t *info, void *uctx);
 
 static void linuwux_chain_segv(int sig, siginfo_t *info, void *uctx)
 {
-    if (s_have_real_segv && s_real_segv.sa_sigaction)
-        s_real_segv.sa_sigaction(sig, info, uctx);
+    linuwux_sig_handler_fn real = atomic_load(&s_real_segv_handler);
+    if (real)
+        real(sig, info, uctx);
     else {
-        /* No real handler -- restore default and re-raise. */
         signal(SIGSEGV, SIG_DFL);
         raise(SIGSEGV);
     }
@@ -736,8 +714,9 @@ static void linuwux_chain_segv(int sig, siginfo_t *info, void *uctx)
 
 static void linuwux_chain_sigsys(int sig, siginfo_t *info, void *uctx)
 {
-    if (s_have_real_sys && s_real_sys.sa_sigaction)
-        s_real_sys.sa_sigaction(sig, info, uctx);
+    linuwux_sig_handler_fn real = atomic_load(&s_real_sys_handler);
+    if (real)
+        real(sig, info, uctx);
 }
 
 static void linuwux_segv_wrapper(int sig, siginfo_t *info, void *uctx)
@@ -756,15 +735,13 @@ static void linuwux_sigsys_wrapper(int sig, siginfo_t *info, void *uctx)
     linuwux_chain_sigsys(sig, info, uctx);
 }
 
-/* Not called from the constructor -- a stray CPUID before any SIGSEGV
- * handler exists would kill the process outright. Per-thread; only
- * the first thread to register SIGSEGV gets this. */
+/* Enable CPUID faults once; TIF_NOCPUID is inherited by new threads on clone. */
 static void linuwux_enable_cpuid_fault(void)
 {
-    static int done;
-    if (done)
+    static _Atomic int done;
+    int expected_done = 0;
+    if (!atomic_compare_exchange_strong(&done, &expected_done, 1))
         return;
-    done = 1;
     syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);
     linuwux_log("CPUID faulting enabled (tid=%d)\n", (int)syscall(SYS_gettid));
 }
@@ -775,30 +752,30 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         real_sigaction = (sigaction_fn)dlsym(RTLD_NEXT, "sigaction");
 
     if (act && signum == SIGSEGV && act->sa_sigaction != linuwux_segv_wrapper) {
-        s_real_segv = *act;
-        s_have_real_segv = 1;
         struct sigaction ours = *act;
         ours.sa_sigaction = linuwux_segv_wrapper;
         int r = real_sigaction(signum, &ours, oldact);
         if (r == 0) {
+            atomic_store(&s_real_segv_handler, act->sa_sigaction);
             linuwux_log("intercepted Wine's sigaction(SIGSEGV, ...)\n");
             linuwux_enable_cpuid_fault();
         }
         return r;
     }
     if (act && signum == SIGSYS && act->sa_sigaction != linuwux_sigsys_wrapper) {
-        s_real_sys = *act;
-        s_have_real_sys = 1;
         struct sigaction ours = *act;
         ours.sa_sigaction = linuwux_sigsys_wrapper;
-        linuwux_log("intercepted Wine's sigaction(SIGSYS, ...)\n");
-        return real_sigaction(signum, &ours, oldact);
+        int r = real_sigaction(signum, &ours, oldact);
+        if (r == 0) {
+            atomic_store(&s_real_sys_handler, act->sa_sigaction);
+            linuwux_log("intercepted Wine's sigaction(SIGSYS, ...)\n");
+        }
+        return r;
     }
     return real_sigaction(signum, act, oldact);
 }
 
-/* prctl() is declared variadic in glibc; match that to avoid a
- * conflicting-types error. */
+/* Match glibc's variadic prctl declaration. */
 int prctl(int option, ...)
 {
     va_list ap;
@@ -819,15 +796,14 @@ int prctl(int option, ...)
     if (ret >= 0 && option == PR_SET_SYSCALL_USER_DISPATCH && a2 == PR_SYS_DISPATCH_ON) {
         unsigned char *selector_addr = (unsigned char *)a5;
         unsigned char *teb = (unsigned char *)linuwux_get_teb();
-        g_sud_teb_offset = selector_addr - teb;
+        ptrdiff_t teb_offset = selector_addr - teb;
+        atomic_store(&g_sud_teb_offset, teb_offset);
         linuwux_log("learned SUD selector: teb-offset=%#tx (teb=%p selector=%p)\n",
-                    g_sud_teb_offset, (void *)teb, (void *)selector_addr);
+                    teb_offset, (void *)teb, (void *)selector_addr);
     }
     return (int)ret;
 }
 
-/* Safe append -- avoids strncat()'s hand-computed remaining-length
- * arithmetic, which silently no-ops near the buffer's end. */
 static void linuwux_append_override(char *buf, size_t bufsize, const char *entry)
 {
     size_t len = strlen(buf);
@@ -850,8 +826,7 @@ static void linuwux_init(void)
 
     linuwux_detect_cpu_vendor();
 
-    /* Append required overrides, skipping any the user already set --
-     * duplicate keys are unspecified in Wine's own parser. */
+    /* Append our DLL overrides without clobbering user-set keys. */
     existing = getenv("WINEDLLOVERRIDES");
     n = snprintf(overrides, sizeof(overrides), "%s", existing ? existing : "");
     if (existing && (n < 0 || (size_t)n >= sizeof(overrides)))
@@ -868,13 +843,9 @@ static void linuwux_init(void)
     setenv("WINEDLLOVERRIDES", overrides, 1);
     linuwux_log("WINEDLLOVERRIDES=\"%s\"\n", overrides);
 
-    /* Bypasses Steam DRM/Steamworks checks some DenuvOwO packs trip on.
-     * The Steam Overlay still works fine with LD_PRELOAD appended
-     * correctly -- it doesn't go through lsteamclient. */
+    /* Default on for DenuvOwO; user can set 0. Overlay does not need lsteamclient. */
     setenv("PROTON_DISABLE_LSTEAMCLIENT", "1", 0);
 
-    /* Not gated by LINUWUX_DEBUG -- always identify what's loaded and
-     * which build, so it lands in whatever log gets pasted for a bug
-     * report without needing LINUWUX_DEBUG set in advance. */
+    /* Always print version (not only under LINUWUX_DEBUG) for bug reports. */
     fprintf(stderr, "[linuwux] v%s loaded (pid=%d)\n", LINUWUX_VERSION, getpid());
 }
