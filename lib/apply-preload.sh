@@ -147,12 +147,12 @@ EOF
     echo -e "  ${BOLD}Wrapper${RESET}  : $wrapper"
     header "$HR"
     echo
-    echo "Steam launch options for any GE-Proton / CachyOS game:"
+    echo "Launch options for any GE-Proton / CachyOS game:"
     echo "  ${wrapper} %command%"
     echo
     if [[ ":$PATH:" == *":${bindir}:"* ]]; then
         echo "${bindir} is already on your PATH, so this also works from a terminal"
-        echo "(Lutris, Heroic, bare umu-run, etc.):"
+        echo "(Steam, Lutris, Heroic, bare umu-run, etc.):"
         echo "  linuwux %command%"
         echo
     else
