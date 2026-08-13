@@ -91,8 +91,14 @@ static inline void *linuwux_get_teb(void)
 /* CPUID spoofing                                                      */
 /* ------------------------------------------------------------------ */
 
-static uint64_t g_target_sys_handler = 0;
+/* Written once (arm leaf) and read from every thread's CPUID/SIGSYS
+ * fault handling afterward -- genuinely cross-thread, so atomic. */
+static _Atomic uint64_t g_target_sys_handler = 0;
 
+/* Not atomic: written once by linuwux_detect_cpu_vendor(), called only
+ * from the constructor -- before any other thread of this process
+ * exists. Thread creation happens-after the constructor returns, so
+ * every later reader already sees these fully initialized. */
 static unsigned int g_spoof_leaf1_eax, g_spoof_leaf1_ebx, g_spoof_leaf1_ecx, g_spoof_leaf1_edx;
 static unsigned int g_spoof_leaf40000000_eax, g_spoof_leaf40000000_ebx, g_spoof_leaf40000000_ecx, g_spoof_leaf40000000_edx;
 static unsigned int g_spoof_leaf40000001_eax, g_spoof_leaf40000001_ebx, g_spoof_leaf40000001_ecx, g_spoof_leaf40000001_edx;
@@ -242,7 +248,7 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
     case 1:
         ctx->uc_mcontext.gregs[REG_RAX] = g_spoof_leaf1_eax;
         ctx->uc_mcontext.gregs[REG_RBX] = g_spoof_leaf1_ebx;
-        ctx->uc_mcontext.gregs[REG_RCX] = g_spoof_leaf1_ecx | (g_target_sys_handler ? 0 : (0x1 << 31));
+        ctx->uc_mcontext.gregs[REG_RCX] = g_spoof_leaf1_ecx | (atomic_load(&g_target_sys_handler) ? 0 : (0x1 << 31));
         ctx->uc_mcontext.gregs[REG_RDX] = g_spoof_leaf1_edx;
         break;
 
@@ -284,7 +290,7 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
     case LINUWUX_CPUID_LEAF_ARM:
         linuwux_log("cpuid arm leaf, TargetSysHandler=%#llx\n",
                     (unsigned long long)ctx->uc_mcontext.gregs[REG_RCX]);
-        g_target_sys_handler = (uint64_t)ctx->uc_mcontext.gregs[REG_RCX];
+        atomic_store(&g_target_sys_handler, (uint64_t)ctx->uc_mcontext.gregs[REG_RCX]);
         linuwux_patch_kuser_shared_data();
         linuwux_set_hwprofile_guid();
         ctx->uc_mcontext.gregs[REG_RAX] = 0x0;
@@ -340,14 +346,18 @@ static int linuwux_redirect_all_enabled(void)
 /* Syscall User Dispatch: learn the selector from Wine's own prctl().  */
 /* ------------------------------------------------------------------ */
 
-static ptrdiff_t g_sud_teb_offset = -1;  /* -1 == not learned yet / no SUD on this tree */
+/* Written once (first SUD prctl()) and read from every thread's
+ * SIGSYS handling afterward -- genuinely cross-thread, so atomic.
+ * -1 == not learned yet / no SUD on this tree. */
+static _Atomic ptrdiff_t g_sud_teb_offset = -1;
 
 static void linuwux_rearm_sud(void)
 {
-    if (g_sud_teb_offset < 0)
+    ptrdiff_t teb_offset = atomic_load(&g_sud_teb_offset);
+    if (teb_offset < 0)
         return;
     unsigned char *teb = (unsigned char *)linuwux_get_teb();
-    teb[g_sud_teb_offset] = 1;  /* SYSCALL_DISPATCH_FILTER_BLOCK */
+    teb[teb_offset] = 1;  /* SYSCALL_DISPATCH_FILTER_BLOCK */
 }
 
 /* ------------------------------------------------------------------ */
@@ -357,10 +367,13 @@ static void linuwux_rearm_sud(void)
 static int linuwux_sigsys_route(ucontext_t *ctx)
 {
     __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
-    unsigned long long syscall_nr, rip, resume;
+    unsigned long long syscall_nr, rip, resume, target_sys_handler;
     unsigned char *fault_ip, opcode0, opcode1;
 
-    if (g_target_sys_handler == 0 ||
+    /* Loaded once so a concurrent arm on another thread can't change
+     * the value out from under this fault's redirect. */
+    target_sys_handler = atomic_load(&g_target_sys_handler);
+    if (target_sys_handler == 0 ||
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFFULL) == 0x1337133713371337ULL)
         goto not_ours;
 
@@ -378,12 +391,12 @@ static int linuwux_sigsys_route(ucontext_t *ctx)
     resume = (opcode0 == 0x0f && opcode1 == 0x05) ? rip + 2 : rip;
 
     linuwux_log("sigsys redirect rax=%llx rip=%llx resume=%llx -> %#llx\n",
-                syscall_nr, rip, resume, (unsigned long long)g_target_sys_handler);
+                syscall_nr, rip, resume, target_sys_handler);
 
     xmm_regs[4] = (xmm_regs[4] & ~(__uint128_t)0xFFFFFFFFULL) | (syscall_nr & 0xFFFFFFFF);
     ctx->uc_mcontext.gregs[REG_RAX] = (long long)resume;
-    ctx->uc_mcontext.gregs[REG_RCX] = (long long)g_target_sys_handler;
-    ctx->uc_mcontext.gregs[REG_RIP] = (long long)g_target_sys_handler;
+    ctx->uc_mcontext.gregs[REG_RCX] = (long long)target_sys_handler;
+    ctx->uc_mcontext.gregs[REG_RIP] = (long long)target_sys_handler;
 
     linuwux_rearm_sud();
     return 1;
@@ -397,17 +410,20 @@ not_ours:
 /* dlsym(RTLD_DEFAULT) can't see ntdll.so's exports (Wine loads it via
  * its own dlopen(), not RTLD_GLOBAL). Find its real path via
  * /proc/self/maps and dlopen(path, RTLD_NOLOAD) instead. */
+/* Resolution states for linuwux_find_ntdll_symbol()'s once-only lookup. */
+enum { LINUWUX_NTDLL_NOT_STARTED = 0, LINUWUX_NTDLL_IN_PROGRESS = 1, LINUWUX_NTDLL_DONE = 2 };
+
 static void *linuwux_find_ntdll_symbol(const char *name)
 {
     static void *ntdll_handle;
-    static int tried;
+    static _Atomic int state;
+    int expected_state = LINUWUX_NTDLL_NOT_STARTED;
 
-    if (!ntdll_handle && !tried)
+    if (atomic_compare_exchange_strong(&state, &expected_state, LINUWUX_NTDLL_IN_PROGRESS))
     {
         FILE *f;
         char line[4096], path[4096];
 
-        tried = 1;
         path[0] = '\0';
         f = fopen("/proc/self/maps", "r");
         if (f)
@@ -451,6 +467,18 @@ static void *linuwux_find_ntdll_symbol(const char *name)
         }
         else
             linuwux_log("linuwux_find_ntdll_symbol: could not find ntdll.so in /proc/self/maps\n");
+
+        /* Release-store: ntdll_handle above must be visible to any
+         * thread that observes DONE below. */
+        atomic_store_explicit(&state, LINUWUX_NTDLL_DONE, memory_order_release);
+    }
+    else
+    {
+        /* Another thread is already resolving this (or just finished)
+         * -- wait for it instead of racing a half-initialized handle
+         * or returning a false "not found". */
+        while (atomic_load_explicit(&state, memory_order_acquire) != LINUWUX_NTDLL_DONE)
+            __asm__ volatile("pause");
     }
 
     return ntdll_handle ? dlsym(ntdll_handle, name) : NULL;
@@ -503,7 +531,8 @@ static void linuwux_ascii_to_utf16(const char *src, uint16_t *dst, size_t count)
  * LINUWUX_CPUID_LEAF_ARM case (see forward declaration above). */
 static void linuwux_set_hwprofile_guid(void)
 {
-    static int done;
+    static _Atomic int done;
+    int expected_done = 0;
     nt_create_key_fn nt_create_key;
     nt_set_value_key_fn nt_set_value_key;
     nt_close_fn nt_close;
@@ -527,9 +556,11 @@ static void linuwux_set_hwprofile_guid(void)
     _Static_assert(sizeof(data_str) <= sizeof(data_buf) / sizeof(data_buf[0]),
                    "data_buf too small for data_str");
 
-    if (done)
+    /* Only the thread that flips done 0 -> 1 proceeds; a concurrent
+     * arm on another thread just returns instead of redoing the
+     * registry writes. */
+    if (!atomic_compare_exchange_strong(&done, &expected_done, 1))
         return;
-    done = 1;
 
     nt_create_key = (nt_create_key_fn)linuwux_find_ntdll_symbol("NtCreateKey");
     nt_set_value_key = (nt_set_value_key_fn)linuwux_find_ntdll_symbol("NtSetValueKey");
@@ -757,14 +788,18 @@ static void linuwux_sigsys_wrapper(int sig, siginfo_t *info, void *uctx)
 }
 
 /* Not called from the constructor -- a stray CPUID before any SIGSEGV
- * handler exists would kill the process outright. Per-thread; only
- * the first thread to register SIGSEGV gets this. */
+ * handler exists would kill the process outright. ARCH_SET_CPUID is
+ * per-thread, but the kernel copies thread_info.flags (TIF_NOCPUID)
+ * into every new thread's task_struct at clone() time, so calling
+ * this once here still covers every thread Wine spawns afterward --
+ * only threads that existed before this first call would be missed,
+ * and Wine registers SIGSEGV before creating any of its own. */
 static void linuwux_enable_cpuid_fault(void)
 {
-    static int done;
-    if (done)
+    static _Atomic int done;
+    int expected_done = 0;
+    if (!atomic_compare_exchange_strong(&done, &expected_done, 1))
         return;
-    done = 1;
     syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);
     linuwux_log("CPUID faulting enabled (tid=%d)\n", (int)syscall(SYS_gettid));
 }
@@ -819,9 +854,10 @@ int prctl(int option, ...)
     if (ret >= 0 && option == PR_SET_SYSCALL_USER_DISPATCH && a2 == PR_SYS_DISPATCH_ON) {
         unsigned char *selector_addr = (unsigned char *)a5;
         unsigned char *teb = (unsigned char *)linuwux_get_teb();
-        g_sud_teb_offset = selector_addr - teb;
+        ptrdiff_t teb_offset = selector_addr - teb;
+        atomic_store(&g_sud_teb_offset, teb_offset);
         linuwux_log("learned SUD selector: teb-offset=%#tx (teb=%p selector=%p)\n",
-                    g_sud_teb_offset, (void *)teb, (void *)selector_addr);
+                    teb_offset, (void *)teb, (void *)selector_addr);
     }
     return (int)ret;
 }
