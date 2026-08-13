@@ -19,19 +19,22 @@
 set -euo pipefail
 
 # ============================================================
-# LinUwUx preload builder
+# LinUwUx builder
 #
-# Compiles liblinuwux_preload.so -- an LD_PRELOAD library carrying all of
+# Compiles liblinuwux.so -- an LD_PRELOAD library carrying all of
 # LinUwUx's CPUID spoofing, SIGSYS/DenuvOwO redirect, HwProfileGuid,
 # faketime, and DLL-override handling. Nothing else: no Proton/Wine
-# source is cloned, patched, or built. See src/linuwux_preload.c for
+# source is cloned, patched, or built. See src/linuwux.c for
 # the mechanism.
 # ============================================================
 
+# YY.MM.DD; add a .N suffix for same-day hotfixes (26.08.13 -> 26.08.13.1).
+# Baked into the .so as LINUWUX_VERSION -- announced on load and readable
+# via 'linuwux --version'.
 VERSION="26.08.13"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/src/linuwux_preload.c"
+SRC="${SCRIPT_DIR}/src/linuwux.c"
 DIST_DIR="${SCRIPT_DIR}/dist"
 INSTALL=0
 
@@ -58,9 +61,9 @@ trap 'echo -e "\n${RED}[$(ts)] Build failed${RESET}" >&2' ERR
 
 usage() {
     cat << EOF
-LinUwUx preload builder v${VERSION}
+LinUwUx builder v${VERSION}
 
-Build liblinuwux_preload.so -- an LD_PRELOAD library that installs the
+Build liblinuwux.so -- an LD_PRELOAD library that installs the
 LinUwUx DenuvOwO hypervisor-bypass patch set into GE-Proton or CachyOS
 Proton. Nothing to clone, patch, or configure on the Proton side.
 Official Valve Proton is not currently supported.
@@ -75,11 +78,11 @@ Options:
   -h, --help                  Show this help
 
 Environment:
-  LINUWUX_DEBUG=1             Runtime: event tracing from liblinuwux_preload.so
+  LINUWUX_DEBUG=1             Runtime: event tracing from liblinuwux.so
   LINUWUX_REDIRECT_ALL=1      Runtime: disable SIGSYS Wine-PE scope filter
   PROTON_AVX=1                Runtime: AVX/XSAVE in spoofed CPUID/KUSER data
 
-Everything liblinuwux_preload.so does -- CPUID spoofing, SIGSYS/DenuvOwO
+Everything liblinuwux.so does -- CPUID spoofing, SIGSYS/DenuvOwO
 redirect, HwProfileGuid, faketime, and DLL overrides (winmm/version/
 reflex=n,b, PROTON_DISABLE_LSTEAMCLIENT) -- happens live at load time
 from inside the library itself. Wine's own source is never touched, no
@@ -88,10 +91,10 @@ editing. Use it with an existing GE-Proton or CachyOS Proton install
 (append, don't replace, LD_PRELOAD -- a bare LD_PRELOAD=... clobbers
 Steam's own overlay preload entry):
 
-  LD_PRELOAD="\${LD_PRELOAD}:/path/to/liblinuwux_preload.so" %command%
+  LD_PRELOAD="\${LD_PRELOAD}:/path/to/liblinuwux.so" %command%
 
 Required files:
-  src/linuwux_preload.c
+  src/linuwux.c
   src/linuwux.sh          (only for --install)
 
 EOF
@@ -109,27 +112,29 @@ while [[ $# -gt 0 ]]; do
 done
 
 already_installed() {
-    [[ -f "${HOME}/.local/lib/liblinuwux_preload.so" ]]
+    [[ -f "${HOME}/.local/lib/liblinuwux.so" ]]
 }
 
-# Compile liblinuwux_preload.so and drop it in dist/. No Proton/Wine
+# Compile liblinuwux.so and drop it in dist/. No Proton/Wine
 # source is touched or needed.
-build_preload() {
-    local out="${DIST_DIR}/liblinuwux_preload.so"
+build_linuwux() {
+    local out="${DIST_DIR}/liblinuwux.so"
 
-    info "Building liblinuwux_preload.so ..."
+    info "Building liblinuwux.so ..."
     [[ -f "$SRC" ]] || die "$SRC not found"
     need gcc
 
     mkdir -p "$DIST_DIR"
-    gcc -std=gnu11 -O2 -fPIC -shared -Wall -o "$out" "$SRC" -ldl \
-        || die "Failed to compile liblinuwux_preload.so"
+    gcc -std=gnu11 -O2 -fPIC -shared -Wall -DLINUWUX_VERSION=\"${VERSION}\" \
+        -o "$out" "$SRC" -ldl \
+        || die "Failed to compile liblinuwux.so"
 
     echo
     header "$HR"
     header "  BUILD SUCCESSFUL"
     header "$HR"
     echo -e "  ${BOLD}Library${RESET}  : $out"
+    echo -e "  ${BOLD}Version${RESET}  : $VERSION"
     header "$HR"
     echo
 
@@ -150,8 +155,8 @@ build_preload() {
 # "installed once" stays current on every plain rebuild too, not just
 # when --install is passed again.
 refresh_installed_copy() {
-    local out="${DIST_DIR}/liblinuwux_preload.so"
-    local dest="${HOME}/.local/lib/liblinuwux_preload.so"
+    local out="${DIST_DIR}/liblinuwux.so"
+    local dest="${HOME}/.local/lib/liblinuwux.so"
 
     cp -f "$out" "$dest"
     info "Refreshed installed copy → $dest"
@@ -159,15 +164,15 @@ refresh_installed_copy() {
 
 # Install the library plus a 'linuwux' wrapper under ~/.local so launch
 # options don't need a raw LD_PRELOAD path.
-install_preload() {
-    local src="${DIST_DIR}/liblinuwux_preload.so"
+install_linuwux() {
+    local src="${DIST_DIR}/liblinuwux.so"
     local wrapper_src="${SCRIPT_DIR}/src/linuwux.sh"
     local libdir="${HOME}/.local/lib"
     local bindir="${HOME}/.local/bin"
-    local dest="${libdir}/liblinuwux_preload.so"
+    local dest="${libdir}/liblinuwux.so"
     local wrapper="${bindir}/linuwux"
 
-    [[ -f "$src" ]] || die "Nothing to install -- build liblinuwux_preload.so first"
+    [[ -f "$src" ]] || die "Nothing to install -- build liblinuwux.so first"
     [[ -f "$wrapper_src" ]] || die "$wrapper_src not found"
 
     mkdir -p "$libdir" "$bindir"
@@ -209,9 +214,9 @@ install_preload() {
     echo
 }
 
-build_preload
+build_linuwux
 if [[ $INSTALL -eq 1 ]]; then
-    install_preload
+    install_linuwux
 elif already_installed; then
     refresh_installed_copy
 fi

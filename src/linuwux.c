@@ -18,7 +18,7 @@
  */
 
 /*
- * linuwux-preload
+ * linuwux
  *
  * Installs LinUwUx's CPUID spoofing, SIGSYS/DenuvOwO redirect,
  * HwProfileGuid, DLL overrides, and faketime via LD_PRELOAD. Interposes
@@ -57,12 +57,23 @@
 #define ARCH_SET_CPUID 0x1012
 #endif
 
+/* Set via build.sh's -DLINUWUX_VERSION; "dev" for an ad hoc gcc build. */
+#ifndef LINUWUX_VERSION
+#define LINUWUX_VERSION "dev"
+#endif
+
+/* Unreferenced but kept live by __attribute__((used)) -- readable
+ * without running anything: `strings liblinuwux.so | grep linuwux`,
+ * or `linuwux --version` against an installed copy. */
+static const char linuwux_version_tag[] __attribute__((used)) =
+    "linuwux " LINUWUX_VERSION;
+
 static void linuwux_log(const char *fmt, ...)
 {
     va_list ap;
     if (!getenv("LINUWUX_DEBUG"))
         return;
-    fprintf(stderr, "[linuwux-preload] ");
+    fprintf(stderr, "[linuwux] ");
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -831,7 +842,7 @@ static void linuwux_append_override(char *buf, size_t bufsize, const char *entry
 }
 
 __attribute__((constructor))
-static void linuwux_preload_init(void)
+static void linuwux_init(void)
 {
     char overrides[4096];
     const char *existing;
@@ -862,5 +873,8 @@ static void linuwux_preload_init(void)
      * correctly -- it doesn't go through lsteamclient. */
     setenv("PROTON_DISABLE_LSTEAMCLIENT", "1", 0);
 
-    linuwux_log("liblinuwux_preload.so loaded (pid=%d)\n", getpid());
+    /* Not gated by LINUWUX_DEBUG -- always identify what's loaded and
+     * which build, so it lands in whatever log gets pasted for a bug
+     * report without needing LINUWUX_DEBUG set in advance. */
+    fprintf(stderr, "[linuwux] v%s loaded (pid=%d)\n", LINUWUX_VERSION, getpid());
 }
