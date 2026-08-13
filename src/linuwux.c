@@ -834,22 +834,28 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         real_sigaction = (sigaction_fn)dlsym(RTLD_NEXT, "sigaction");
 
     if (act && signum == SIGSEGV && act->sa_sigaction != linuwux_segv_wrapper) {
-        atomic_store(&s_real_segv_handler, act->sa_sigaction);
         struct sigaction ours = *act;
         ours.sa_sigaction = linuwux_segv_wrapper;
         int r = real_sigaction(signum, &ours, oldact);
         if (r == 0) {
+            /* Only publish once our wrapper is actually the installed
+             * handler -- otherwise a failed call would have leaked a
+             * stale/wrong chain-to pointer with nothing underneath it. */
+            atomic_store(&s_real_segv_handler, act->sa_sigaction);
             linuwux_log("intercepted Wine's sigaction(SIGSEGV, ...)\n");
             linuwux_enable_cpuid_fault();
         }
         return r;
     }
     if (act && signum == SIGSYS && act->sa_sigaction != linuwux_sigsys_wrapper) {
-        atomic_store(&s_real_sys_handler, act->sa_sigaction);
         struct sigaction ours = *act;
         ours.sa_sigaction = linuwux_sigsys_wrapper;
-        linuwux_log("intercepted Wine's sigaction(SIGSYS, ...)\n");
-        return real_sigaction(signum, &ours, oldact);
+        int r = real_sigaction(signum, &ours, oldact);
+        if (r == 0) {
+            atomic_store(&s_real_sys_handler, act->sa_sigaction);
+            linuwux_log("intercepted Wine's sigaction(SIGSYS, ...)\n");
+        }
+        return r;
     }
     return real_sigaction(signum, act, oldact);
 }
