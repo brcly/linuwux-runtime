@@ -1,6 +1,6 @@
-# LinUwUx Preload
+# LinUwUx
 
-Build `liblinuwux_preload.so`: an `LD_PRELOAD` library that installs the **LinUwUx** DenuvOwO hypervisor-bypass patch set into GE-Proton or CachyOS Proton, with nothing to build, patch, or configure on the Proton side.
+Build `liblinuwux.so`: an `LD_PRELOAD` library that installs the **LinUwUx** DenuvOwO hypervisor-bypass patch set into GE-Proton or CachyOS Proton, with nothing to build, patch, or configure on the Proton side.
 
 CPUID spoofing, the SIGSYS/DenuvOwO redirect, the `HwProfileGuid` registry fix, faketime, and the native DLL overrides (`winmm`/`version`/`reflex=n,b`) all happen live, from inside the library, the moment it loads — no Wine source is patched, no launcher script is touched, no registry file needs importing.
 
@@ -18,13 +18,13 @@ This project does **not** configure host-side requirements for the bypass (UMIP,
 ./build.sh
 ```
 
-Compiles `src/linuwux_preload.c` and drops `liblinuwux_preload.so` in `dist/` — no Proton/Wine clone, no container engine, done in seconds. Add it to the game's launch options, **appending** to `LD_PRELOAD` rather than replacing it:
+Compiles `src/linuwux.c` and drops `liblinuwux.so` in `dist/` — no Proton/Wine clone, no container engine, done in seconds. Add it to the game's launch options, **appending** to `LD_PRELOAD` rather than replacing it:
 
 ```
-LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux_preload.so" %command%
+LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux.so" %command%
 ```
 
-Steam sets its own `LD_PRELOAD` earlier in the launch chain to inject the Steam Overlay (`GameOverlayRenderer64.so`); a bare `LD_PRELOAD=/path/to/liblinuwux_preload.so %command%` clobbers that outright and silences the overlay.
+Steam sets its own `LD_PRELOAD` earlier in the launch chain to inject the Steam Overlay (`GameOverlayRenderer64.so`); a bare `LD_PRELOAD=/path/to/liblinuwux.so %command%` clobbers that outright and silences the overlay.
 
 ### Simpler: `--install`
 
@@ -40,26 +40,26 @@ Installs the library to `~/.local/lib` and a `linuwux` wrapper to `~/.local/bin`
 
 The wrapper appends to `LD_PRELOAD` itself (same rule as above, handled for you) before exec'ing the real command. The absolute path works immediately regardless of `PATH` — once `~/.local/bin` is confirmed on `PATH`, plain `linuwux %command%` works too (handy from a terminal, Lutris, or Heroic; Steam's own process environment won't pick up a `PATH` change until it's restarted, so the absolute form is what to use there).
 
-Once installed, plain `./build.sh` (no `--install` needed again) keeps the installed copy in sync on every rebuild — pull an update, rebuild, and it's live with no extra step.
+Once installed, plain `./build.sh` (no `--install` needed again) keeps the installed copy in sync on every rebuild — pull an update, rebuild, and it's live with no extra step. Check what's actually installed any time with `linuwux --version`.
 
 ## Layout
 
 ```
 build.sh                 # self-contained: builds, and optionally installs
 src/
-  linuwux_preload.c      # LD_PRELOAD library -- all LinUwUx logic lives here
+  linuwux.c              # LD_PRELOAD library -- all LinUwUx logic lives here
   linuwux.sh            # 'linuwux' wrapper template, installed by --install
 ```
 
 ## How LinUwUx is applied
 
-`liblinuwux_preload.so` interposes libc calls Wine itself already makes — for signal delivery (`sigaction()`, `prctl()`) and for the wall clock (`clock_gettime()`, `gettimeofday()`) — and wraps around whatever Wine registers at runtime, rather than touching Wine's source, a prefix's registry, or a launcher script at all.
+`liblinuwux.so` interposes libc calls Wine itself already makes — for signal delivery (`sigaction()`, `prctl()`) and for the wall clock (`clock_gettime()`, `gettimeofday()`) — and wraps around whatever Wine registers at runtime, rather than touching Wine's source, a prefix's registry, or a launcher script at all.
 
 ### Runtime
 
 | Stage | What happens |
 |-------|----------------|
-| Library load | `detect_cpu_vendor()` fills spoof tables; `WINEDLLOVERRIDES` gets `winmm`/`version`/`reflex=n,b` appended (skipping any the user already set); `PROTON_DISABLE_LSTEAMCLIENT` defaults to `1` |
+| Library load | `detect_cpu_vendor()` fills spoof tables; `WINEDLLOVERRIDES` gets `winmm`/`version`/`reflex=n,b` appended (skipping any the user already set); `PROTON_DISABLE_LSTEAMCLIENT` defaults to `1`; `[linuwux] vX.Y.Z loaded (pid=...)` is printed to stderr unconditionally |
 | First `sigaction(SIGSEGV, ...)` | Interposed; wraps Wine's own handler, then enables `ARCH_SET_CPUID` faulting |
 | First `sigaction(SIGSYS, ...)` | Interposed; wraps Wine's own handler |
 | First `prctl(PR_SET_SYSCALL_USER_DISPATCH, ...)` | Interposed; learns the per-thread SUD selector's TEB offset from Wine's own real call, instead of guessing struct layout |
@@ -70,7 +70,7 @@ src/
 
 **Syscall User Dispatch (GE-Proton 11-5+).** These trees replace seccomp+BPF
 with Linux's Syscall User Dispatch. Rather than detecting this from the
-tree's source at build time, the preload library learns the SUD selector's
+tree's source at build time, the library learns the SUD selector's
 TEB offset directly from Wine's own real `prctl()` call at runtime — the
 same offset resolves correctly whether or not the tree has SUD support,
 since the whole mechanism is a no-op on trees that never make that
@@ -111,6 +111,12 @@ Wine build, same as everything else here.
 | `--install` | Also install to `~/.local/lib` + a `linuwux` wrapper in `~/.local/bin` |
 | `-h`, `--help` | Help |
 
+The installed `linuwux` wrapper has its own flag:
+
+| Flag | Effect |
+|------|--------|
+| `--version`, `-V` | Print the installed library's version (read from the `.so` itself via `strings`) and exit |
+
 | Environment | Effect |
 |-------------|--------|
 | `LINUWUX_DEBUG=1` | Runtime event tracing |
@@ -121,13 +127,13 @@ Wine build, same as everything else here.
 ## Output
 
 ```
-dist/liblinuwux_preload.so
+dist/liblinuwux.so
 ```
 
 With `--install`, also:
 
 ```
-~/.local/lib/liblinuwux_preload.so
+~/.local/lib/liblinuwux.so
 ~/.local/bin/linuwux
 ```
 
@@ -137,6 +143,7 @@ Neither is a real "install" in the traditional sense — no compatibility-tool r
 
 - `WINEDLLOVERRIDES` and `PROTON_DISABLE_LSTEAMCLIENT` are set live by the library itself at load time (see Runtime table above) — not baked into any script.
 - `PROTON_DISABLE_LSTEAMCLIENT=1` bypasses Steam DRM/Steamworks checks some DenuvOwO packs trip on. It doesn't affect the Steam Overlay — that keeps working as long as `LD_PRELOAD` is appended rather than replaced (see Quick start).
+- The library announces its version on every load (`[linuwux] vX.Y.Z loaded (pid=...)`, printed to stderr regardless of `LINUWUX_DEBUG`) so it shows up in whatever log gets pasted for a bug report. Check it any time without launching a game via `linuwux --version` or `strings liblinuwux.so | grep linuwux`.
 - Confirmed working launched directly through the real Steam client (not just Lutris/Heroic/Faugus) with GE-Proton/CachyOS — the game's `LD_PRELOAD` does reach the process inside Steam's own pressure-vessel container.
 
 ## License
@@ -153,7 +160,7 @@ Copyright (C) 2026 brcly.
 Please keep copyright notices intact when you redistribute or modify this work.
 Preferred credit line for derived builds:
 
-`LinUwUx Preload by brcly (https://github.com/brcly/proton-LinUwUx-patch)`
+`LinUwUx by brcly (https://github.com/brcly/proton-LinUwUx-patch)`
 
 ## Credits
 - LinUwUx - Original Bypass creator
