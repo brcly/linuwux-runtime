@@ -1,4 +1,4 @@
-# Proton + LinUwUx Builder
+# LinUwUx Preload
 
 Build `liblinuwux_preload.so`: an `LD_PRELOAD` library that installs the **LinUwUx** DenuvOwO hypervisor-bypass patch set into GE-Proton or CachyOS Proton, with nothing to build, patch, or configure on the Proton side.
 
@@ -159,7 +159,7 @@ Copyright (C) 2026 brcly.
 Please keep copyright notices intact when you redistribute or modify this work.
 Preferred credit line for derived builds:
 
-`LinUwUx Proton builder by brcly (https://github.com/brcly/proton-LinUwUx-patch)`
+`LinUwUx Preload by brcly (https://github.com/brcly/proton-LinUwUx-patch)`
 
 ## Credits
 - LinUwUx - Original Bypass creator
