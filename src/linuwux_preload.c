@@ -1,5 +1,4 @@
 /*
-* Copyright (C) 2026 LinUwUx
  * Copyright (C) 2026 brcly
  *
  * This program is free software: you can redistribute it and/or modify
@@ -833,9 +832,9 @@ static void linuwux_preload_init(void)
     setenv("WINEDLLOVERRIDES", overrides, 1);
     linuwux_log("WINEDLLOVERRIDES=\"%s\"\n", overrides);
 
-    /* Needed by some DenuvOwO packs; also silences the Steam Overlay.
-     * Set PROTON_DISABLE_LSTEAMCLIENT=0 yourself via launch options to
-     * keep the overlay if your pack doesn't need this. */
+    /* Bypasses Steam DRM/Steamworks checks some DenuvOwO packs trip on.
+     * The Steam Overlay still works fine with LD_PRELOAD appended
+     * correctly -- it doesn't go through lsteamclient. */
     setenv("PROTON_DISABLE_LSTEAMCLIENT", "1", 0);
 
     linuwux_log("liblinuwux_preload.so loaded (pid=%d)\n", getpid());

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Copyright (C) 2026 brcly
 #
 # This program is free software: you can redistribute it and/or modify
@@ -16,26 +16,21 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# Shared helpers for the Proton + LinUwUx builder.
-# Sourced by build.sh — do not execute directly.
+# linuwux -- launch helper for liblinuwux_preload.so
+#
+# Installed to ~/.local/bin/linuwux by build.sh --install. Steam launch
+# option: ~/.local/bin/linuwux %command%
 
-if [[ -t 1 ]]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    CYAN='\033[0;36m'
-    BOLD='\033[1m'
-    RESET='\033[0m'
-else
-    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' RESET=''
+lib="${LINUWUX_PRELOAD:-${HOME}/.local/lib/liblinuwux_preload.so}"
+if [ ! -f "$lib" ]; then
+    echo "linuwux: library not found: $lib" >&2
+    echo "  Build/install it from proton-LinUwUx-patch, or set LINUWUX_PRELOAD to its path" >&2
+    exit 1
 fi
-
-ts() { date '+%H:%M:%S'; }
-
-die()  { echo -e "${RED}[$(ts)] ERROR: $*${RESET}" >&2; exit 1; }
-info() { echo -e "${GREEN}[$(ts)] ==> $*${RESET}"; }
-warn() { echo -e "${YELLOW}[$(ts)] WARNING: $*${RESET}" >&2; }
-header(){ echo -e "\n${CYAN}${BOLD}$*${RESET}"; }
-need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found"; }
-
-HR="$(printf '=%.0s' {1..60})"
+if [ "$#" -eq 0 ]; then
+    echo "linuwux: no command given -- use it as a Steam launch option:" >&2
+    echo "  ~/.local/bin/linuwux %command%" >&2
+    exit 1
+fi
+export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$lib"
+exec "$@"

@@ -24,27 +24,35 @@ set -euo pipefail
 # Compiles liblinuwux_preload.so -- an LD_PRELOAD library carrying all of
 # LinUwUx's CPUID spoofing, SIGSYS/DenuvOwO redirect, HwProfileGuid,
 # faketime, and DLL-override handling. Nothing else: no Proton/Wine
-# source is cloned, patched, or built. See patches/preload/
-# linuwux_preload.c for the mechanism.
-#
-#   lib/common.sh         – logging helpers
-#   lib/apply-preload.sh  – fetches patches/, builds the library
+# source is cloned, patched, or built. See src/linuwux_preload.c for
+# the mechanism.
 # ============================================================
 
-VERSION="26.08.12"
-PATCH_REPO="https://github.com/brcly/proton-LinUwUx-patch.git"
-PATCH_BRANCH="${PATCH_BRANCH:-main}"
+VERSION="26.08.13"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCHES_DIR="${SCRIPT_DIR}/patches"
+SRC="${SCRIPT_DIR}/src/linuwux_preload.c"
 DIST_DIR="${SCRIPT_DIR}/dist"
-LIB_DIR="${SCRIPT_DIR}/lib"
-UPDATE_PATCHES=0
+INSTALL=0
 
-# shellcheck source=lib/common.sh
-source "${LIB_DIR}/common.sh"
-# shellcheck source=lib/apply-preload.sh
-source "${LIB_DIR}/apply-preload.sh"
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' CYAN='' BOLD='' RESET=''
+fi
+
+ts() { date '+%H:%M:%S'; }
+
+die()  { echo -e "${RED}[$(ts)] ERROR: $*${RESET}" >&2; exit 1; }
+info() { echo -e "${GREEN}[$(ts)] ==> $*${RESET}"; }
+header(){ echo -e "\n${CYAN}${BOLD}$*${RESET}"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found"; }
+
+HR="$(printf '=%.0s' {1..60})"
 
 trap 'echo -e "\n${RED}[$(ts)] Build failed${RESET}" >&2' ERR
 
@@ -61,12 +69,12 @@ Usage:
   $(basename "$0") [OPTIONS]
 
 Options:
-  --update-patches            Delete and re-clone patches/ from this repo
+  --install                   Also install to ~/.local/lib + a 'linuwux'
+                               wrapper in ~/.local/bin, for a plain
+                               'linuwux %command%' launch option
   -h, --help                  Show this help
 
 Environment:
-  PATCH_BRANCH=<name>         Branch of this repo to clone when patches/ is
-                              missing (default: main)
   LINUWUX_DEBUG=1             Runtime: event tracing from liblinuwux_preload.so
   LINUWUX_REDIRECT_ALL=1      Runtime: disable SIGSYS Wine-PE scope filter
   PROTON_AVX=1                Runtime: AVX/XSAVE in spoofed CPUID/KUSER data
@@ -83,7 +91,8 @@ Steam's own overlay preload entry):
   LD_PRELOAD="\${LD_PRELOAD}:/path/to/liblinuwux_preload.so" %command%
 
 Required files:
-  patches/preload/linuwux_preload.c
+  src/linuwux_preload.c
+  src/linuwux.sh          (only for --install)
 
 EOF
     exit 0
@@ -92,13 +101,118 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)   usage ;;
-        --update-patches) UPDATE_PATCHES=1; shift ;;
+        --install) INSTALL=1; shift ;;
         *)
             die "Unknown argument: $1  (use --help)"
             ;;
     esac
 done
 
-ensure_patches_dir
-check_required_base_files
+already_installed() {
+    [[ -f "${HOME}/.local/lib/liblinuwux_preload.so" ]]
+}
+
+# Compile liblinuwux_preload.so and drop it in dist/. No Proton/Wine
+# source is touched or needed.
+build_preload() {
+    local out="${DIST_DIR}/liblinuwux_preload.so"
+
+    info "Building liblinuwux_preload.so ..."
+    [[ -f "$SRC" ]] || die "$SRC not found"
+    need gcc
+
+    mkdir -p "$DIST_DIR"
+    gcc -std=gnu11 -O2 -fPIC -shared -Wall -o "$out" "$SRC" -ldl \
+        || die "Failed to compile liblinuwux_preload.so"
+
+    echo
+    header "$HR"
+    header "  BUILD SUCCESSFUL"
+    header "$HR"
+    echo -e "  ${BOLD}Library${RESET}  : $out"
+    header "$HR"
+    echo
+
+    if [[ $INSTALL -eq 1 ]] || already_installed; then
+        return 0
+    fi
+
+    echo "Use it with an existing GE-Proton or CachyOS Proton install -- add to that"
+    echo "game's launch options (append, don't replace, LD_PRELOAD -- a bare"
+    echo "LD_PRELOAD=... clobbers Steam's own overlay preload entry):"
+    echo "  LD_PRELOAD=\"\${LD_PRELOAD}:$out\" %command%"
+    echo
+    echo "Or run with --install for a 'linuwux %command%' launch option instead."
+    echo
+}
+
+# If a previous --install exists, keep it in sync automatically -- so
+# "installed once" stays current on every plain rebuild too, not just
+# when --install is passed again.
+refresh_installed_copy() {
+    local out="${DIST_DIR}/liblinuwux_preload.so"
+    local dest="${HOME}/.local/lib/liblinuwux_preload.so"
+
+    cp -f "$out" "$dest"
+    info "Refreshed installed copy → $dest"
+}
+
+# Install the library plus a 'linuwux' wrapper under ~/.local so launch
+# options don't need a raw LD_PRELOAD path.
+install_preload() {
+    local src="${DIST_DIR}/liblinuwux_preload.so"
+    local wrapper_src="${SCRIPT_DIR}/src/linuwux.sh"
+    local libdir="${HOME}/.local/lib"
+    local bindir="${HOME}/.local/bin"
+    local dest="${libdir}/liblinuwux_preload.so"
+    local wrapper="${bindir}/linuwux"
+
+    [[ -f "$src" ]] || die "Nothing to install -- build liblinuwux_preload.so first"
+    [[ -f "$wrapper_src" ]] || die "$wrapper_src not found"
+
+    mkdir -p "$libdir" "$bindir"
+    cp -f "$src" "$dest"
+    info "Installed library → $dest"
+
+    cp -f "$wrapper_src" "$wrapper"
+    chmod 0755 "$wrapper"
+    info "Installed wrapper  → $wrapper"
+
+    echo
+    header "$HR"
+    header "  INSTALL SUCCESSFUL"
+    header "$HR"
+    echo -e "  ${BOLD}Library${RESET}  : $dest"
+    echo -e "  ${BOLD}Wrapper${RESET}  : $wrapper"
+    header "$HR"
+    echo
+    echo "Steam launch options for any GE-Proton / CachyOS game:"
+    echo "  ${wrapper} %command%"
+    echo
+    if [[ ":$PATH:" == *":${bindir}:"* ]]; then
+        echo "${bindir} is already on your PATH, so this also works from a terminal"
+        echo "(Lutris, Heroic, bare umu-run, etc.):"
+        echo "  linuwux %command%"
+        echo
+    else
+        echo "${bindir} is not on your PATH yet. That only matters for a terminal,"
+        echo "Lutris, or Heroic -- Steam uses the absolute path above regardless."
+        echo "To get the plain 'linuwux' command elsewhere, add this to ~/.bashrc"
+        echo "(or equivalent) and open a new terminal:"
+        echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+        echo
+    fi
+    echo "LINUWUX_PRELOAD=/other/path overrides the library the wrapper loads."
+    echo
+    echo "Advanced (no wrapper) — absolute path only, never relative:"
+    echo "  LD_PRELOAD=\"\${LD_PRELOAD}:$dest\" %command%"
+    echo
+}
+
 build_preload
+if [[ $INSTALL -eq 1 ]]; then
+    install_preload
+elif already_installed; then
+    refresh_installed_copy
+fi
+exit 0
