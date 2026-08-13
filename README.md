@@ -136,7 +136,7 @@ Neither is a real "install" in the traditional sense — no compatibility-tool r
 ## Behaviour notes
 
 - `WINEDLLOVERRIDES` and `PROTON_DISABLE_LSTEAMCLIENT` are set live by the library itself at load time (see Runtime table above) — not baked into any script.
-- `PROTON_DISABLE_LSTEAMCLIENT=1` is needed for the bypass on DenuvOwO packs that dislike Proton's `lsteamclient` translation layer — but it also silences the Steam Overlay's in-game activation, since the overlay goes through `lsteamclient` too. If your pack doesn't need it, set `PROTON_DISABLE_LSTEAMCLIENT=0` yourself via launch options to keep the overlay.
+- `PROTON_DISABLE_LSTEAMCLIENT=1` bypasses Steam DRM/Steamworks checks some DenuvOwO packs trip on. It doesn't affect the Steam Overlay — that keeps working as long as `LD_PRELOAD` is appended rather than replaced (see Quick start).
 - Confirmed working launched directly through the real Steam client (not just Lutris/Heroic/Faugus) with GE-Proton/CachyOS — the game's `LD_PRELOAD` does reach the process inside Steam's own pressure-vessel container.
 
 ## License
