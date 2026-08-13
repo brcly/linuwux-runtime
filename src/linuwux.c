@@ -366,9 +366,16 @@ static void linuwux_rearm_sud(void)
 
 static int linuwux_sigsys_route(ucontext_t *ctx)
 {
-    __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
+    __uint128_t *xmm_regs;
     unsigned long long syscall_nr, rip, resume, target_sys_handler;
     unsigned char *fault_ip, opcode0, opcode1;
+
+    /* fpregs is effectively always set on x86_64 Linux, but this
+     * routes through the XMM registers below -- bail rather than
+     * dereference on the off chance it's ever NULL. */
+    if (!ctx->uc_mcontext.fpregs)
+        return 0;
+    xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
 
     /* Loaded once so a concurrent arm on another thread can't change
      * the value out from under this fault's redirect. */
@@ -409,7 +416,17 @@ not_ours:
 
 /* dlsym(RTLD_DEFAULT) can't see ntdll.so's exports (Wine loads it via
  * its own dlopen(), not RTLD_GLOBAL). Find its real path via
- * /proc/self/maps and dlopen(path, RTLD_NOLOAD) instead. */
+ * /proc/self/maps and dlopen(path, RTLD_NOLOAD) instead.
+ *
+ * fopen()/dlopen() below aren't async-signal-safe, and this runs
+ * inside the SIGSEGV handler chain (arm leaf -> hwprofile_guid ->
+ * here) -- a known, accepted tradeoff, not an oversight. The trigger
+ * is a specific CPUID leaf DenuvOwO's own code executes deliberately
+ * once, not an arbitrary async signal, which narrows the window where
+ * this could land mid-malloc() in some other libc call on the same
+ * thread. A real fix means deferring this work outside the handler
+ * entirely (a self-pipe or dedicated worker thread); not done here. */
+
 /* Resolution states for linuwux_find_ntdll_symbol()'s once-only lookup. */
 enum { LINUWUX_NTDLL_NOT_STARTED = 0, LINUWUX_NTDLL_IN_PROGRESS = 1, LINUWUX_NTDLL_DONE = 2 };
 
@@ -746,18 +763,24 @@ typedef long (*prctl_fn)(int, unsigned long, unsigned long, unsigned long, unsig
 static sigaction_fn real_sigaction;
 static prctl_fn real_prctl;
 
-static struct sigaction s_real_segv;
-static struct sigaction s_real_sys;
-static int s_have_real_segv;
-static int s_have_real_sys;
+/* Only .sa_sigaction is ever used below, so that's all that's stored --
+ * as a single pointer-sized atomic rather than the whole struct. Two
+ * threads racing sigaction(SIGSEGV, ...) (or SIGSYS) could otherwise
+ * tear a plain `struct sigaction` copy mid-write, splicing a function
+ * pointer from one registration with flags/mask from another; a
+ * naturally-aligned pointer store can't tear. */
+typedef void (*linuwux_sig_handler_fn)(int, siginfo_t *, void *);
+static _Atomic(linuwux_sig_handler_fn) s_real_segv_handler;
+static _Atomic(linuwux_sig_handler_fn) s_real_sys_handler;
 
 static void linuwux_segv_wrapper(int sig, siginfo_t *info, void *uctx);
 static void linuwux_sigsys_wrapper(int sig, siginfo_t *info, void *uctx);
 
 static void linuwux_chain_segv(int sig, siginfo_t *info, void *uctx)
 {
-    if (s_have_real_segv && s_real_segv.sa_sigaction)
-        s_real_segv.sa_sigaction(sig, info, uctx);
+    linuwux_sig_handler_fn real = atomic_load(&s_real_segv_handler);
+    if (real)
+        real(sig, info, uctx);
     else {
         /* No real handler -- restore default and re-raise. */
         signal(SIGSEGV, SIG_DFL);
@@ -767,8 +790,9 @@ static void linuwux_chain_segv(int sig, siginfo_t *info, void *uctx)
 
 static void linuwux_chain_sigsys(int sig, siginfo_t *info, void *uctx)
 {
-    if (s_have_real_sys && s_real_sys.sa_sigaction)
-        s_real_sys.sa_sigaction(sig, info, uctx);
+    linuwux_sig_handler_fn real = atomic_load(&s_real_sys_handler);
+    if (real)
+        real(sig, info, uctx);
 }
 
 static void linuwux_segv_wrapper(int sig, siginfo_t *info, void *uctx)
@@ -810,8 +834,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         real_sigaction = (sigaction_fn)dlsym(RTLD_NEXT, "sigaction");
 
     if (act && signum == SIGSEGV && act->sa_sigaction != linuwux_segv_wrapper) {
-        s_real_segv = *act;
-        s_have_real_segv = 1;
+        atomic_store(&s_real_segv_handler, act->sa_sigaction);
         struct sigaction ours = *act;
         ours.sa_sigaction = linuwux_segv_wrapper;
         int r = real_sigaction(signum, &ours, oldact);
@@ -822,8 +845,7 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
         return r;
     }
     if (act && signum == SIGSYS && act->sa_sigaction != linuwux_sigsys_wrapper) {
-        s_real_sys = *act;
-        s_have_real_sys = 1;
+        atomic_store(&s_real_sys_handler, act->sa_sigaction);
         struct sigaction ours = *act;
         ours.sa_sigaction = linuwux_sigsys_wrapper;
         linuwux_log("intercepted Wine's sigaction(SIGSYS, ...)\n");
