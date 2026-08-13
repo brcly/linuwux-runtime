@@ -1,12 +1,6 @@
-<<<<<<< HEAD
 # LinUwUx
 
 Build `liblinuwux.so`: an `LD_PRELOAD` library that installs the **LinUwUx** DenuvOwO hypervisor-bypass patch set into GE-Proton or CachyOS Proton, with nothing to build, patch, or configure on the Proton side.
-=======
-# LinUwUx Preload
-
-Build `liblinuwux_preload.so`: an `LD_PRELOAD` library that installs the **LinUwUx** DenuvOwO hypervisor-bypass patch set into GE-Proton or CachyOS Proton, with nothing to build, patch, or configure on the Proton side.
->>>>>>> origin/main
 
 CPUID spoofing, the SIGSYS/DenuvOwO redirect, the `HwProfileGuid` registry fix, faketime, and the native DLL overrides (`winmm`/`version`/`reflex=n,b`) all happen live, from inside the library, the moment it loads — no Wine source is patched, no launcher script is touched, no registry file needs importing.
 
@@ -24,7 +18,6 @@ This project does **not** configure host-side requirements for the bypass (UMIP,
 ./build.sh
 ```
 
-<<<<<<< HEAD
 Compiles `src/linuwux.c` and drops `liblinuwux.so` in `dist/` — no Proton/Wine clone, no container engine, done in seconds. Add it to the game's launch options, **appending** to `LD_PRELOAD` rather than replacing it:
 
 ```
@@ -32,15 +25,6 @@ LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux.so" %command%
 ```
 
 Steam sets its own `LD_PRELOAD` earlier in the launch chain to inject the Steam Overlay (`GameOverlayRenderer64.so`); a bare `LD_PRELOAD=/path/to/liblinuwux.so %command%` clobbers that outright and silences the overlay.
-=======
-Compiles `src/linuwux_preload.c` and drops `liblinuwux_preload.so` in `dist/` — no Proton/Wine clone, no container engine, done in seconds. Add it to the game's launch options, **appending** to `LD_PRELOAD` rather than replacing it:
-
-```
-LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux_preload.so" %command%
-```
-
-Steam sets its own `LD_PRELOAD` earlier in the launch chain to inject the Steam Overlay (`GameOverlayRenderer64.so`); a bare `LD_PRELOAD=/path/to/liblinuwux_preload.so %command%` clobbers that outright and silences the overlay.
->>>>>>> origin/main
 
 ### Simpler: `--install`
 
@@ -56,22 +40,14 @@ Installs the library to `~/.local/lib` and a `linuwux` wrapper to `~/.local/bin`
 
 The wrapper appends to `LD_PRELOAD` itself (same rule as above, handled for you) before exec'ing the real command. The absolute path works immediately regardless of `PATH` — once `~/.local/bin` is confirmed on `PATH`, plain `linuwux %command%` works too (handy from a terminal, Lutris, or Heroic; Steam's own process environment won't pick up a `PATH` change until it's restarted, so the absolute form is what to use there).
 
-<<<<<<< HEAD
 Once installed, plain `./build.sh` (no `--install` needed again) keeps the installed copy in sync on every rebuild — pull an update, rebuild, and it's live with no extra step. Check what's actually installed any time with `linuwux --version`.
-=======
-Once installed, plain `./build.sh` (no `--install` needed again) keeps the installed copy in sync on every rebuild — pull an update, rebuild, and it's live with no extra step.
->>>>>>> origin/main
 
 ## Layout
 
 ```
 build.sh                 # self-contained: builds, and optionally installs
 src/
-<<<<<<< HEAD
   linuwux.c              # LD_PRELOAD library -- all LinUwUx logic lives here
-=======
-  linuwux_preload.c      # LD_PRELOAD library -- all LinUwUx logic lives here
->>>>>>> origin/main
   linuwux.sh            # 'linuwux' wrapper template, installed by --install
 ```
 
@@ -157,11 +133,7 @@ dist/liblinuwux.so
 With `--install`, also:
 
 ```
-<<<<<<< HEAD
 ~/.local/lib/liblinuwux.so
-=======
-~/.local/lib/liblinuwux_preload.so
->>>>>>> origin/main
 ~/.local/bin/linuwux
 ```
 
@@ -171,10 +143,7 @@ Neither is a real "install" in the traditional sense — no compatibility-tool r
 
 - `WINEDLLOVERRIDES` and `PROTON_DISABLE_LSTEAMCLIENT` are set live by the library itself at load time (see Runtime table above) — not baked into any script.
 - `PROTON_DISABLE_LSTEAMCLIENT=1` bypasses Steam DRM/Steamworks checks some DenuvOwO packs trip on. It doesn't affect the Steam Overlay — that keeps working as long as `LD_PRELOAD` is appended rather than replaced (see Quick start).
-<<<<<<< HEAD
 - The library announces its version on every load (`[linuwux] vX.Y.Z loaded (pid=...)`, printed to stderr regardless of `LINUWUX_DEBUG`) so it shows up in whatever log gets pasted for a bug report. Check it any time without launching a game via `linuwux --version` or `strings liblinuwux.so | grep linuwux`.
-=======
->>>>>>> origin/main
 - Confirmed working launched directly through the real Steam client (not just Lutris/Heroic/Faugus) with GE-Proton/CachyOS — the game's `LD_PRELOAD` does reach the process inside Steam's own pressure-vessel container.
 
 ## License
@@ -191,11 +160,7 @@ Copyright (C) 2026 brcly.
 Please keep copyright notices intact when you redistribute or modify this work.
 Preferred credit line for derived builds:
 
-<<<<<<< HEAD
 `LinUwUx by brcly (https://github.com/brcly/proton-LinUwUx-patch)`
-=======
-`LinUwUx Preload by brcly (https://github.com/brcly/proton-LinUwUx-patch)`
->>>>>>> origin/main
 
 ## Credits
 - LinUwUx - Original Bypass creator
