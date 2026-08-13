@@ -432,15 +432,17 @@ enum { LINUWUX_NTDLL_NOT_STARTED = 0, LINUWUX_NTDLL_IN_PROGRESS = 1, LINUWUX_NTD
 
 static void *linuwux_find_ntdll_symbol(const char *name)
 {
-    static void *ntdll_handle;
+    static _Atomic(void *) ntdll_handle;
     static _Atomic int state;
     int expected_state = LINUWUX_NTDLL_NOT_STARTED;
+    void *handle;
 
     if (atomic_compare_exchange_strong(&state, &expected_state, LINUWUX_NTDLL_IN_PROGRESS))
     {
         FILE *f;
         char line[4096], path[4096];
 
+        handle = NULL;
         path[0] = '\0';
         f = fopen("/proc/self/maps", "r");
         if (f)
@@ -479,26 +481,26 @@ static void *linuwux_find_ntdll_symbol(const char *name)
         }
         if (path[0])
         {
-            ntdll_handle = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
-            linuwux_log("linuwux_find_ntdll_symbol: ntdll.so at %s -> handle=%p\n", path, ntdll_handle);
+            handle = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
+            linuwux_log("linuwux_find_ntdll_symbol: ntdll.so at %s -> handle=%p\n", path, handle);
         }
         else
             linuwux_log("linuwux_find_ntdll_symbol: could not find ntdll.so in /proc/self/maps\n");
 
-        /* Release-store: ntdll_handle above must be visible to any
-         * thread that observes DONE below. */
+        atomic_store_explicit(&ntdll_handle, handle, memory_order_release);
         atomic_store_explicit(&state, LINUWUX_NTDLL_DONE, memory_order_release);
     }
-    else
-    {
-        /* Another thread is already resolving this (or just finished)
-         * -- wait for it instead of racing a half-initialized handle
-         * or returning a false "not found". */
-        while (atomic_load_explicit(&state, memory_order_acquire) != LINUWUX_NTDLL_DONE)
-            __asm__ volatile("pause");
-    }
+    /* Deliberately not a wait-for-completion: fopen()/dlopen() above
+     * aren't async-signal-safe (see the comment above this function),
+     * so the resolving thread can, in principle, stall indefinitely --
+     * e.g. self-deadlocking by re-entering dlopen()'s own lock if it
+     * was already mid-dlopen() elsewhere when the signal landed.
+     * Blocking every other caller on that would turn one thread's
+     * stall into a much larger one. Fail open with NULL instead,
+     * matching the pre-hardening behavior. */
 
-    return ntdll_handle ? dlsym(ntdll_handle, name) : NULL;
+    handle = atomic_load_explicit(&ntdll_handle, memory_order_acquire);
+    return handle ? dlsym(handle, name) : NULL;
 }
 
 /* ------------------------------------------------------------------ */
