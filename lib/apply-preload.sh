@@ -16,13 +16,10 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# Build liblinuwux_preload.so: an LD_PRELOAD library that installs all of
-# LinUwUx's CPUID spoofing, SIGSYS/DenuvOwO redirect, HwProfileGuid,
-# faketime, and DLL-override handling without touching Wine's source, a
-# prefix's registry files, or a Proton launcher script -- it's entirely
-# self-contained, and works against an existing GE-Proton or CachyOS
-# Proton install (official Valve Proton is not currently supported).
-# See patches/preload/linuwux_preload.c for the mechanism.
+# Build liblinuwux_preload.so: an LD_PRELOAD library that installs LinUwUx's
+# CPUID spoofing, SIGSYS/DenuvOwO redirect, HwProfileGuid, faketime, and
+# DLL-override handling. Works against an existing GE-Proton or CachyOS
+# Proton install (official Valve Proton not currently supported).
 #
 # Sourced by build.sh — requires lib/common.sh already loaded.
 
@@ -58,12 +55,7 @@ check_required_base_files() {
 }
 
 # Compile liblinuwux_preload.so and drop it in dist/. No Proton/Wine
-# source is touched or needed -- CPUID spoofing, SIGSYS/DenuvOwO
-# redirect, HwProfileGuid, DLL overrides, and faketime are all fully
-# self-contained in the library itself (faketime via clock_gettime()/
-# gettimeofday() interposition -- see linuwux_preload.c for why that
-# reaches further than the wineserver-round-trip approach an earlier
-# version of this used, and needs nothing from a Wine build at all).
+# source is touched or needed.
 build_preload() {
     local src="${PATCHES_DIR}/preload/linuwux_preload.c"
     local out="${DIST_DIR}/liblinuwux_preload.so"

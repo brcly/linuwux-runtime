@@ -22,27 +22,10 @@
  * linuwux-preload
  *
  * Installs LinUwUx's CPUID spoofing, SIGSYS/DenuvOwO redirect,
- * HwProfileGuid, DLL overrides, and faketime entirely via LD_PRELOAD --
- * Wine's own source is never touched. This interposes libc calls Wine
- * itself makes -- sigaction()/prctl() for signal delivery,
- * clock_gettime()/gettimeofday() for the wall clock -- and wraps around
- * whatever Wine registers at runtime, rather than splicing call-stub
- * text into Wine's own source (fragile to upstream reordering/
- * reformatting -- see the GE 11-3 -> 11-5 SIGSYS anchor breakage an
- * earlier, source-patching implementation of this hit before this
- * replaced it).
+ * HwProfileGuid, DLL overrides, and faketime via LD_PRELOAD. Interposes
+ * sigaction()/prctl() and clock_gettime()/gettimeofday().
  *
- * Verified against a real GE-Proton 11-5 tree before building this:
- * Wine's SIGSEGV/SIGSYS registration (signal_init_process()) and its
- * Syscall User Dispatch registration (init_syscall_frame(), called once
- * per thread) both go through the plain libc sigaction()/prctl() symbols,
- * not a raw syscall() that would bypass LD_PRELOAD interposition.
- *
- * See linuwux_set_faketime() below for why faketime is fully
- * client-side rather than the wineserver-round-trip protocol an earlier
- * version of this used.
- *
- * Enable event tracing with LINUWUX_DEBUG=1.
+ * LINUWUX_DEBUG=1 enables event tracing.
  */
 
 #define _GNU_SOURCE
@@ -85,14 +68,7 @@ static void linuwux_log(const char *fmt, ...)
     va_end(ap);
 }
 
-/*
- * TEB access via the %gs self-pointer (Win64 NtTib.Self, offset 0x30) --
- * the same thing NtCurrentTeb() does, but without needing to dlsym() a
- * symbol out of ntdll.so (which may not even be mapped yet when our own
- * constructor runs). This is core x86_64 Windows ABI, not a Wine-internal
- * implementation detail, so it's about as stable an assumption as this
- * whole approach can make.
- */
+/* TEB via the %gs self-pointer (Win64 NtTib.Self, offset 0x30). */
 static inline void *linuwux_get_teb(void)
 {
     void *teb;
@@ -222,26 +198,13 @@ static void linuwux_patch_kuser_shared_data(void)
     linuwux_log("kuser_shared_data: patched\n");
 }
 
-/* Defined below (needs the clock_gettime() interposition plumbing);
- * forward-declared here so the 0x336967 (faketime) case in
- * linuwux_cpuid_spoof() can call it. */
+/* Defined below; called from the 0x336967 (faketime) case. */
 static void linuwux_set_faketime(long long faketime);
 
-/* Defined below (needs linuwux_find_ntdll_symbol() and the NT registry
- * structs/typedefs); forward-declared here so the 0x336933 (arm) case in
- * linuwux_cpuid_spoof() can call it. Called from there specifically
- * because a CPUID-trap SIGSEGV can only fire while guest code is actively
- * executing an instruction -- never while this thread is blocked inside
- * a wine_server_call() -- which makes it safe for NtCreateKey/
- * NtSetValueKey's own internal wine_server_call() to run here. An earlier
- * version called this from inside the recvmsg() interposition instead,
- * on the theory that "first SCM_RIGHTS reply" meant "connection is live";
- * in practice that point is still *inside* the wine_server_call() that
- * owns that exact recvmsg, so issuing a second, nested request/reply
- * cycle on the same server socket corrupted wineserver's client-side
- * protocol state for the thread ("wine client error:0: write: Bad file
- * descriptor", confirmed against a real Proton 11.0 + Steam Linux Runtime
- * launch). */
+/* Defined below; called from the 0x336933 (arm) case, not from
+ * recvmsg() -- calling it there instead nests a second
+ * wine_server_call() inside an unfinished one and corrupts
+ * wineserver's protocol state. */
 static void linuwux_set_hwprofile_guid(void);
 
 /* Returns 1 if the fault was ours to handle. */
@@ -355,8 +318,7 @@ static int linuwux_redirect_all_enabled(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Syscall User Dispatch: learn the selector address from Wine's own   */
-/* real prctl() call, instead of guessing amd64_thread_data's layout.  */
+/* Syscall User Dispatch: learn the selector from Wine's own prctl().  */
 /* ------------------------------------------------------------------ */
 
 static long g_sud_teb_offset = -1;  /* -1 == not learned yet / no SUD on this tree */
@@ -411,20 +373,9 @@ not_ours:
     return 0;
 }
 
-/* dlsym(RTLD_DEFAULT, ...) only searches the process's GLOBAL symbol
- * scope -- which does NOT include a library loaded via plain dlopen()
- * without RTLD_GLOBAL (glibc's dlopen() default is RTLD_LOCAL). Wine's
- * own PE/unix-module loader loads ntdll.so's unix backend via its own
- * internal dlopen() call, not as an ordinary linked dependency, so
- * NtCreateKey/NtSetValueKey/NtClose -- confirmed present via `nm -D
- * ntdll.so` against a real build -- are invisible to RTLD_DEFAULT even
- * though they genuinely exist. Fix: find ntdll.so's real on-disk path
- * from /proc/self/maps (it's already loaded by the time any of our code
- * runs), then dlopen(path, RTLD_NOLOAD) to get a handle to that SAME
- * already-loaded object without a second load, and dlsym() on that
- * specific handle -- handle-based dlsym() always finds the symbol
- * regardless of the object's RTLD_LOCAL/RTLD_GLOBAL scope. Verified
- * against a synthetic RTLD_LOCAL dlopen() before relying on it here. */
+/* dlsym(RTLD_DEFAULT) can't see ntdll.so's exports (Wine loads it via
+ * its own dlopen(), not RTLD_GLOBAL). Find its real path via
+ * /proc/self/maps and dlopen(path, RTLD_NOLOAD) instead. */
 static void *linuwux_find_ntdll_symbol(const char *name)
 {
     static void *ntdll_handle;
@@ -449,14 +400,9 @@ static void *linuwux_find_ntdll_symbol(const char *name)
                 if (len && line[len - 1] == '\n')
                     line[--len] = '\0';
 
-                /* /proc/self/maps: "addr perms offset dev inode  pathname"
-                 * -- pathname is the 6th whitespace-delimited field, but,
-                 * unlike the five before it, is never itself re-tokenized
-                 * by the kernel: real install paths routinely contain
-                 * spaces (e.g. Steam's own "Proton 11.0" directory), so
-                 * finding the *last* space on the line -- as this used to
-                 * -- lands inside such a pathname instead of at its
-                 * start. Skip exactly five fields by hand instead. */
+                /* Skip 5 whitespace-delimited fields to reach the
+                 * pathname -- it can contain spaces (e.g. "Proton
+                 * 11.0"), so don't split on the last space. */
                 field = line;
                 for (i = 0; i < 5 && field; i++)
                 {
@@ -494,10 +440,7 @@ static void *linuwux_find_ntdll_symbol(const char *name)
 /* content-insert -- no source patch or rebuild required.              */
 /* ------------------------------------------------------------------ */
 
-/* Matches the real NT structures field-for-field (winternl.h) -- same
- * compiler, same target ABI, so this lays out identically. ULONG is
- * always 32 bits on Windows (unlike `unsigned long`, which is 64 on
- * Linux x86_64), hence uint32_t rather than a native-width type. */
+/* Matches winternl.h layout; ULONG is always 32-bit on Windows. */
 struct linuwux_unicode_string
 {
     uint16_t Length;
@@ -519,19 +462,8 @@ struct linuwux_object_attributes
 #define LINUWUX_KEY_ALL_ACCESS       0x001F003F
 #define LINUWUX_REG_SZ               1
 
-/* NtCreateKey/NtSetValueKey/NtClose are confirmed genuine ELF exports of
- * ntdll.so (`nm -D` against a real build), same as wine_server_call --
- * their unix-side implementations (dlls/ntdll/unix/registry.c) are
- * declared WINAPI/__stdcall, but that attribute is a no-op for GCC on
- * x86_64 (stdcall only means anything on 32-bit x86), so the compiled
- * symbols use plain SysV ABI, directly callable via a normal C function
- * pointer -- no ms_abi/PE-export-table work needed, unlike calling into
- * genuinely PE-side code would require. Internally these still do a real
- * wine_server_call() (SERVER_START_REQ(create_key)/(set_key_value)), but
- * since we call the *wrapper* functions rather than hand-building the
- * request ourselves, none of the wire-protocol/struct-layout reverse
- * engineering the old faketime implementation needed applies here --
- * the wrapper handles all of that. */
+/* Genuine ELF exports of ntdll.so; WINAPI/__stdcall is a no-op for GCC
+ * on x86_64, so plain C function pointers work. */
 typedef int32_t (*nt_create_key_fn)(void **key, uint32_t access, const struct linuwux_object_attributes *attr,
                                      uint32_t index, const struct linuwux_unicode_string *class,
                                      uint32_t options, uint32_t *disposition);
@@ -546,14 +478,8 @@ static void linuwux_ascii_to_utf16(const char *src, uint16_t *dst, size_t count)
         dst[i] = (uint16_t)(unsigned char)src[i];
 }
 
-/* Same key/value the old wine.inf content-insert set (patches/base/
- * hwprofile_guid.reg), but written live via wineserver instead of baked
- * into a freshly-booted prefix's registry defaults at Wine build time --
- * works on a prefix this project never patched or rebuilt. Called from
- * the 0x336933 (arm) case in linuwux_cpuid_spoof()
- * -- see the forward declaration above for why that timing, rather than
- * "first wineserver connection", is what makes NtCreateKey's own nested
- * wine_server_call() safe here. */
+/* Same key the old wine.inf content-insert set. Called from the
+ * 0x336933 arm case (see forward declaration above). */
 static void linuwux_set_hwprofile_guid(void)
 {
     static int done;
@@ -566,9 +492,6 @@ static void linuwux_set_hwprofile_guid(void)
     uint16_t value_name_buf[16];
     uint16_t data_buf[48];
     size_t i;
-    /* Same key as the old wine.inf content-insert (patches/base/
-     * hwprofile_guid.reg) split into its individual path components --
-     * see the loop below for why this can't just be one string. */
     static const char *const path_components[] = {
         "\\Registry", "Machine", "System", "CurrentControlSet",
         "Control", "IDConfigDB", "Hardware Profiles", "0001"
@@ -589,20 +512,9 @@ static void linuwux_set_hwprofile_guid(void)
         return;
     }
 
-    /* NtCreateKey only ever auto-creates the LAST missing component of
-     * whatever ObjectName it's given -- wineserver's generic object-
-     * namespace walk (server/object.c: lookup_named_object(), confirmed
-     * against real Wine source) fails the whole call with
-     * STATUS_OBJECT_NAME_NOT_FOUND the instant an INTERMEDIATE component
-     * is missing, rather than creating it along the way. A single
-     * NtCreateKey call for the full multi-level path therefore only ever
-     * worked on a prefix that already happened to have "Control\
-     * IDConfigDB\Hardware Profiles" -- which Wine's own default registry
-     * doesn't ship (confirmed the hard way: NtCreateKey failing on a real
-     * Proton 11.0 + Steam Linux Runtime launch). RegCreateKeyEx gets away
-     * with a multi-level path because it walks and creates each
-     * component itself; do the same here, threading each level's handle
-     * in as the next call's RootDirectory. */
+    /* NtCreateKey only auto-creates the last path component, so walk
+     * the path one level at a time, threading each handle in as the
+     * next call's RootDirectory. */
     cur = NULL;
     for (i = 0; i < sizeof(path_components) / sizeof(path_components[0]); i++)
     {
@@ -659,9 +571,7 @@ static void linuwux_set_hwprofile_guid(void)
 #define LINUWUX_TICKS_PER_SEC      10000000LL
 #define LINUWUX_TICKS_1601_TO_1970 116444736000000000LL
 
-/* Windows FILETIME-style ticks (100ns since 1601-01-01), matching the
- * unit wineserver's own current_time used -- keeps the offset formula
- * below identical to what the old server-side patch computed. */
+/* Windows FILETIME ticks: 100ns since 1601-01-01. */
 static int64_t linuwux_unix_to_ticks(time_t sec, long nsec)
 {
     return (int64_t)sec * LINUWUX_TICKS_PER_SEC + nsec / 100 + LINUWUX_TICKS_1601_TO_1970;
@@ -676,11 +586,7 @@ static void linuwux_ticks_to_unix(int64_t ticks, time_t *sec, long *nsec)
     *nsec = (long)(unix_ticks % LINUWUX_TICKS_PER_SEC) * 100;
 }
 
-/* 0 means "not set" -- clock_gettime()/gettimeofday() pass real time
- * through unmodified until the CPUID leaf below sets this at least once.
- * A real offset can validly be 0 too (target time == real time at the
- * moment it was set), so this needs its own has-it-been-set flag rather
- * than treating 0 as "unset". */
+/* 0 is a valid offset, so track "is it set" separately from the value. */
 static _Atomic int64_t g_faketime_offset;
 static _Atomic int g_faketime_active;
 
@@ -737,17 +643,9 @@ int gettimeofday(struct timeval *tv, void *tz)
     return ret;
 }
 
-/* Same formula the old wineserver-side patch used:
- * faketime_offset = ((current_time_ticks >> 32) - requested_value) << 32
- * -- computed once, here, from real time at the moment the leaf fires
- * (via real_clock_gettime() directly -- NOT the bare clock_gettime()
- * name, which would recurse into our own wrapper above and apply any
- * *existing* offset before computing the new one, compounding instead
- * of resetting), then applied as a constant shift to every future
- * CLOCK_REALTIME/CLOCK_REALTIME_COARSE query. Matching the formula
- * exactly means a real trampoline's call produces the same real-world
- * time shift regardless of whether this client-side path or the old
- * wineserver-side one is behind it. */
+/* offset = ((now_ticks >> 32) - requested) << 32. Uses
+ * real_clock_gettime() directly, not clock_gettime(), to avoid
+ * recursing into our own wrapper above. */
 static void linuwux_set_faketime(long long requested)
 {
     struct timespec ts;
@@ -795,8 +693,7 @@ static void linuwux_chain_segv(int sig, siginfo_t *info, void *uctx)
     if (s_have_real_segv && s_real_segv.sa_sigaction)
         s_real_segv.sa_sigaction(sig, info, uctx);
     else {
-        /* No real handler captured -- don't silently swallow a genuine
-         * fault. Restore default disposition and re-raise. */
+        /* No real handler -- restore default and re-raise. */
         signal(SIGSEGV, SIG_DFL);
         raise(SIGSEGV);
     }
@@ -824,23 +721,9 @@ static void linuwux_sigsys_wrapper(int sig, siginfo_t *info, void *uctx)
     linuwux_chain_sigsys(sig, info, uctx);
 }
 
-/*
- * Enable CPUID faulting -- deliberately NOT done in the library constructor.
- * Constructors run before Wine (or anything else in the process) has
- * registered a real SIGSEGV handler; a stray cpuid instruction executed by
- * libc/ld.so startup code in that window would fault with no handler
- * installed at all yet (not even Wine's own), default disposition, instant
- * process death with no log line and nothing to debug. Confirmed the hard
- * way: an earlier version enabled this in the constructor and killed the
- * game process before it ever got as far as registering its own handlers.
- * Safe here, called right after our SIGSEGV wrapper is confirmed installed
- * as the active handler for this thread.
- *
- * Known scope caveat: ARCH_SET_CPUID is a per-thread setting and this
- * only fires once, for whichever thread first registers a SIGSEGV
- * handler -- other threads in the same process don't get CPUID faulting
- * enabled automatically.
- */
+/* Not called from the constructor -- a stray CPUID before any SIGSEGV
+ * handler exists would kill the process outright. Per-thread; only
+ * the first thread to register SIGSEGV gets this. */
 static void linuwux_enable_cpuid_fault(void)
 {
     static int done;
@@ -879,11 +762,8 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     return real_sigaction(signum, act, oldact);
 }
 
-/* glibc declares prctl() variadic (int prctl(int, ...)); match that
- * exactly here to avoid a conflicting-types error against <sys/prctl.h>.
- * Calling the real prctl through a fixed 5-arg function pointer is still
- * ABI-safe on x86_64 System V -- it's the same trick used to interpose
- * open()/fcntl()/ioctl(), all similarly variadic in their headers. */
+/* prctl() is declared variadic in glibc; match that to avoid a
+ * conflicting-types error. */
 int prctl(int option, ...)
 {
     va_list ap;
@@ -911,15 +791,8 @@ int prctl(int option, ...)
     return (int)ret;
 }
 
-/* Appends ";entry" (or just "entry" if buf is still empty) to buf, safely --
- * used instead of strncat() with hand-computed remaining-length arithmetic,
- * which silently no-ops (or worse, truncates mid-token) once strlen(buf) gets
- * within a few bytes of bufsize. Confirmed the hard way: a real launcher-
- * supplied WINEDLLOVERRIDES landed at exactly 511 bytes against the old
- * 512-byte buffer, leaving strncat() zero bytes of room -- winmm/version/
- * reflex silently never got appended, and reflex-rs never loaded as a
- * result. Logs instead of silently dropping the entry if it still doesn't
- * fit. */
+/* Safe append -- avoids strncat()'s hand-computed remaining-length
+ * arithmetic, which silently no-ops near the buffer's end. */
 static void linuwux_append_override(char *buf, size_t bufsize, const char *entry)
 {
     size_t len = strlen(buf);
@@ -942,18 +815,8 @@ static void linuwux_preload_init(void)
 
     linuwux_detect_cpu_vendor();
 
-    /* WINEDLLOVERRIDES: append our required native-DLL overrides,
-     * skipping any the user/launcher already specified (never override
-     * explicit user intent). Wine reads this via a plain getenv() on the
-     * first load-order decision (dlls/ntdll/unix/loadorder.c:
-     * init_load_order()), which only happens deep inside the unix-side
-     * loader's module-loading logic -- well after all ELF constructors,
-     * including this one, have already run. Duplicate entries for the
-     * same module produce unspecified bsearch() behavior in Wine's own
-     * parser (its override list is sorted then bsearched, with no
-     * defined tie-break for duplicate keys), so skipping ones already
-     * set isn't just politeness -- it avoids genuinely undefined
-     * behavior. */
+    /* Append required overrides, skipping any the user already set --
+     * duplicate keys are unspecified in Wine's own parser. */
     existing = getenv("WINEDLLOVERRIDES");
     n = snprintf(overrides, sizeof(overrides), "%s", existing ? existing : "");
     if (existing && (n < 0 || (size_t)n >= sizeof(overrides)))
@@ -970,15 +833,9 @@ static void linuwux_preload_init(void)
     setenv("WINEDLLOVERRIDES", overrides, 1);
     linuwux_log("WINEDLLOVERRIDES=\"%s\"\n", overrides);
 
-    /* Prefer stock steamclient over Proton's lsteamclient -- some
-     * DenuvOwO packs need this, since they dislike lsteamclient's
-     * translation layer. Known tradeoff: the Steam Overlay's own
-     * in-game activation goes through lsteamclient too, so this also
-     * silences the overlay (confirmed against a real Steam + GE-Proton
-     * launch; tried leaving it unset by default, but that broke the
-     * bypass, which matters more). Set PROTON_DISABLE_LSTEAMCLIENT=0
-     * yourself via launch options if you'd rather keep the overlay and
-     * your pack doesn't need this. */
+    /* Needed by some DenuvOwO packs; also silences the Steam Overlay.
+     * Set PROTON_DISABLE_LSTEAMCLIENT=0 yourself via launch options to
+     * keep the overlay if your pack doesn't need this. */
     setenv("PROTON_DISABLE_LSTEAMCLIENT", "1", 0);
 
     linuwux_log("liblinuwux_preload.so loaded (pid=%d)\n", getpid());
