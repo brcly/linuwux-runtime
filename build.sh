@@ -24,6 +24,7 @@ set -euo pipefail
 # Compiles liblinuwux.so -- an LD_PRELOAD library carrying all of
 # LinUwUx's CPUID spoofing, SIGSYS/DenuvOwO redirect, HwProfileGuid,
 # faketime, and DLL-override handling. Nothing else: no Proton/Wine
+<<<<<<< HEAD
 # source is cloned, patched, or built. See src/linuwux.c for
 # the mechanism.
 # ============================================================
@@ -35,6 +36,16 @@ VERSION="26.08.13"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SCRIPT_DIR}/src/linuwux.c"
+=======
+# source is cloned, patched, or built. See src/linuwux_preload.c for
+# the mechanism.
+# ============================================================
+
+VERSION="26.08.13"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="${SCRIPT_DIR}/src/linuwux_preload.c"
+>>>>>>> origin/main
 DIST_DIR="${SCRIPT_DIR}/dist"
 INSTALL=0
 
@@ -78,7 +89,11 @@ Options:
   -h, --help                  Show this help
 
 Environment:
+<<<<<<< HEAD
   LINUWUX_DEBUG=1             Runtime: event tracing from liblinuwux.so
+=======
+  LINUWUX_DEBUG=1             Runtime: event tracing from liblinuwux_preload.so
+>>>>>>> origin/main
   LINUWUX_REDIRECT_ALL=1      Runtime: disable SIGSYS Wine-PE scope filter
   PROTON_AVX=1                Runtime: AVX/XSAVE in spoofed CPUID/KUSER data
 
@@ -94,7 +109,11 @@ Steam's own overlay preload entry):
   LD_PRELOAD="\${LD_PRELOAD}:/path/to/liblinuwux.so" %command%
 
 Required files:
+<<<<<<< HEAD
   src/linuwux.c
+=======
+  src/linuwux_preload.c
+>>>>>>> origin/main
   src/linuwux.sh          (only for --install)
 
 EOF
@@ -112,6 +131,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 already_installed() {
+<<<<<<< HEAD
     [[ -f "${HOME}/.local/lib/liblinuwux.so" ]]
 }
 
@@ -121,20 +141,39 @@ build_linuwux() {
     local out="${DIST_DIR}/liblinuwux.so"
 
     info "Building liblinuwux.so ..."
+=======
+    [[ -f "${HOME}/.local/lib/liblinuwux_preload.so" ]]
+}
+
+# Compile liblinuwux_preload.so and drop it in dist/. No Proton/Wine
+# source is touched or needed.
+build_preload() {
+    local out="${DIST_DIR}/liblinuwux_preload.so"
+
+    info "Building liblinuwux_preload.so ..."
+>>>>>>> origin/main
     [[ -f "$SRC" ]] || die "$SRC not found"
     need gcc
 
     mkdir -p "$DIST_DIR"
+<<<<<<< HEAD
     gcc -std=gnu11 -O2 -fPIC -shared -Wall -DLINUWUX_VERSION=\"${VERSION}\" \
         -o "$out" "$SRC" -ldl \
         || die "Failed to compile liblinuwux.so"
+=======
+    gcc -std=gnu11 -O2 -fPIC -shared -Wall -o "$out" "$SRC" -ldl \
+        || die "Failed to compile liblinuwux_preload.so"
+>>>>>>> origin/main
 
     echo
     header "$HR"
     header "  BUILD SUCCESSFUL"
     header "$HR"
     echo -e "  ${BOLD}Library${RESET}  : $out"
+<<<<<<< HEAD
     echo -e "  ${BOLD}Version${RESET}  : $VERSION"
+=======
+>>>>>>> origin/main
     header "$HR"
     echo
 
@@ -155,8 +194,13 @@ build_linuwux() {
 # "installed once" stays current on every plain rebuild too, not just
 # when --install is passed again.
 refresh_installed_copy() {
+<<<<<<< HEAD
     local out="${DIST_DIR}/liblinuwux.so"
     local dest="${HOME}/.local/lib/liblinuwux.so"
+=======
+    local out="${DIST_DIR}/liblinuwux_preload.so"
+    local dest="${HOME}/.local/lib/liblinuwux_preload.so"
+>>>>>>> origin/main
 
     cp -f "$out" "$dest"
     info "Refreshed installed copy → $dest"
@@ -164,6 +208,7 @@ refresh_installed_copy() {
 
 # Install the library plus a 'linuwux' wrapper under ~/.local so launch
 # options don't need a raw LD_PRELOAD path.
+<<<<<<< HEAD
 install_linuwux() {
     local src="${DIST_DIR}/liblinuwux.so"
     local wrapper_src="${SCRIPT_DIR}/src/linuwux.sh"
@@ -173,6 +218,17 @@ install_linuwux() {
     local wrapper="${bindir}/linuwux"
 
     [[ -f "$src" ]] || die "Nothing to install -- build liblinuwux.so first"
+=======
+install_preload() {
+    local src="${DIST_DIR}/liblinuwux_preload.so"
+    local wrapper_src="${SCRIPT_DIR}/src/linuwux.sh"
+    local libdir="${HOME}/.local/lib"
+    local bindir="${HOME}/.local/bin"
+    local dest="${libdir}/liblinuwux_preload.so"
+    local wrapper="${bindir}/linuwux"
+
+    [[ -f "$src" ]] || die "Nothing to install -- build liblinuwux_preload.so first"
+>>>>>>> origin/main
     [[ -f "$wrapper_src" ]] || die "$wrapper_src not found"
 
     mkdir -p "$libdir" "$bindir"
@@ -214,9 +270,15 @@ install_linuwux() {
     echo
 }
 
+<<<<<<< HEAD
 build_linuwux
 if [[ $INSTALL -eq 1 ]]; then
     install_linuwux
+=======
+build_preload
+if [[ $INSTALL -eq 1 ]]; then
+    install_preload
+>>>>>>> origin/main
 elif already_installed; then
     refresh_installed_copy
 fi

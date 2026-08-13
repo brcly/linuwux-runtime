@@ -16,11 +16,16 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
+<<<<<<< HEAD
 # linuwux -- launch helper for liblinuwux.so
+=======
+# linuwux -- launch helper for liblinuwux_preload.so
+>>>>>>> origin/main
 #
 # Installed to ~/.local/bin/linuwux by build.sh --install. Steam launch
 # option: ~/.local/bin/linuwux %command%
 
+<<<<<<< HEAD
 lib="${LINUWUX_PRELOAD:-${HOME}/.local/lib/liblinuwux.so}"
 
 if [ "${1-}" = "--version" ] || [ "${1-}" = "-V" ]; then
@@ -38,6 +43,9 @@ if [ "${1-}" = "--version" ] || [ "${1-}" = "-V" ]; then
     exit 0
 fi
 
+=======
+lib="${LINUWUX_PRELOAD:-${HOME}/.local/lib/liblinuwux_preload.so}"
+>>>>>>> origin/main
 if [ ! -f "$lib" ]; then
     echo "linuwux: library not found: $lib" >&2
     echo "  Build/install it from proton-LinUwUx-patch, or set LINUWUX_PRELOAD to its path" >&2
