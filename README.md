@@ -18,7 +18,7 @@ This project does **not** configure host-side requirements for the bypass (UMIP,
 ./build.sh
 ```
 
-Compiles `patches/preload/linuwux_preload.c` and drops `liblinuwux_preload.so` in `dist/` — no Proton/Wine clone, no container engine, done in seconds. Add it to the game's launch options, **appending** to `LD_PRELOAD` rather than replacing it:
+Compiles `src/linuwux_preload.c` and drops `liblinuwux_preload.so` in `dist/` — no Proton/Wine clone, no container engine, done in seconds. Add it to the game's launch options, **appending** to `LD_PRELOAD` rather than replacing it:
 
 ```
 LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux_preload.so" %command%
@@ -45,13 +45,10 @@ Once installed, plain `./build.sh` (no `--install` needed again) keeps the insta
 ## Layout
 
 ```
-build.sh                 # orchestrator
-lib/
-  common.sh              # logging helpers
-  apply-preload.sh       # fetches patches/, builds liblinuwux_preload.so
-patches/
-  preload/
-    linuwux_preload.c    # LD_PRELOAD library -- all LinUwUx logic lives here
+build.sh                 # self-contained: builds, and optionally installs
+src/
+  linuwux_preload.c      # LD_PRELOAD library -- all LinUwUx logic lives here
+  linuwux.sh            # 'linuwux' wrapper template, installed by --install
 ```
 
 ## How LinUwUx is applied
@@ -112,12 +109,10 @@ Wine build, same as everything else here.
 | Flag | Effect |
 |------|--------|
 | `--install` | Also install to `~/.local/lib` + a `linuwux` wrapper in `~/.local/bin` |
-| `--update-patches` | Re-clone `patches/` from this repo |
 | `-h`, `--help` | Help |
 
 | Environment | Effect |
 |-------------|--------|
-| `PATCH_BRANCH=<name>` | Branch for patch clone when `patches/` is missing |
 | `LINUWUX_DEBUG=1` | Runtime event tracing |
 | `LINUWUX_REDIRECT_ALL=1` | Disable SIGSYS Wine-PE scope filter |
 | `LINUWUX_PRELOAD=<path>` | `linuwux` wrapper only: override the library path it loads |
@@ -140,7 +135,6 @@ Neither is a real "install" in the traditional sense — no compatibility-tool r
 
 ## Behaviour notes
 
-- Local `patches/` is reused unless `--update-patches`.
 - `WINEDLLOVERRIDES` and `PROTON_DISABLE_LSTEAMCLIENT` are set live by the library itself at load time (see Runtime table above) — not baked into any script.
 - `PROTON_DISABLE_LSTEAMCLIENT=1` is needed for the bypass on DenuvOwO packs that dislike Proton's `lsteamclient` translation layer — but it also silences the Steam Overlay's in-game activation, since the overlay goes through `lsteamclient` too. If your pack doesn't need it, set `PROTON_DISABLE_LSTEAMCLIENT=0` yourself via launch options to keep the overlay.
 - Confirmed working launched directly through the real Steam client (not just Lutris/Heroic/Faugus) with GE-Proton/CachyOS — the game's `LD_PRELOAD` does reach the process inside Steam's own pressure-vessel container.
