@@ -126,7 +126,7 @@ build_linuwux() {
     need gcc
 
     mkdir -p "$DIST_DIR"
-    gcc -std=gnu11 -O2 -fPIC -shared -Wall -DLINUWUX_VERSION=\"${VERSION}\" \
+    gcc -std=gnu11 -O2 -fPIC -shared -Wall -DLINUWUX_VERSION=\""${VERSION}"\" \
         -o "$out" "$SRC" -ldl \
         || die "Failed to compile liblinuwux.so"
 

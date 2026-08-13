@@ -1,12 +1,12 @@
 name: Bug report
-description: Report an issue with liblinuwux_preload.so
+description: Report an issue with liblinuwux.so
 title: "[Bug]: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting an issue. Almost every bug we've actually been able to fix so far came from a debug log with `LINUWUX_DEBUG=1` set -- without it, none of `liblinuwux_preload.so`'s own `[linuwux-preload]` lines show up, and we're guessing blind. Please enable it before reproducing (see the Debug log field below).
+        Thanks for reporting an issue. Almost every bug we've actually been able to fix so far came from a debug log with `LINUWUX_DEBUG=1` set -- `liblinuwux.so` always announces its version on load, but the detailed `[linuwux]` event trace (CPUID vendor, WINEDLLOVERRIDES, registry writes, redirects) only shows up with `LINUWUX_DEBUG=1` set, and without it we're guessing blind. Please enable it before reproducing (see the Debug log field below).
 
   - type: dropdown
     id: launch-method
@@ -41,9 +41,9 @@ body:
     attributes:
       label: Exact launch options / command used
       description: |
-        Paste the exact LD_PRELOAD line and any other env vars you set. LD_PRELOAD should be appended, not replace the existing value -- a bare `LD_PRELOAD=/path/to/liblinuwux_preload.so %command%` silently drops Steam's own overlay preload entry:
+        Paste the exact LD_PRELOAD line and any other env vars you set. LD_PRELOAD should be appended, not replace the existing value -- a bare `LD_PRELOAD=/path/to/liblinuwux.so %command%` silently drops Steam's own overlay preload entry:
 
-        LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux_preload.so" %command%
+        LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux.so" %command%
       render: shell
     validations:
       required: true
@@ -53,7 +53,7 @@ body:
     attributes:
       label: Debug log
       description: |
-        Set `LINUWUX_DEBUG=1` and `PROTON_LOG=1` (Steam) or `UMU_LOG=1` (umu-run / Lutris / Heroic / Faugus / Bottles) before launching, reproduce the issue, then paste the full log here. Without `LINUWUX_DEBUG=1`, `liblinuwux_preload.so` won't print anything and we can't tell what it actually did.
+        Set `LINUWUX_DEBUG=1` and `PROTON_LOG=1` (Steam) or `UMU_LOG=1` (umu-run / Lutris / Heroic / Faugus / Bottles) before launching, reproduce the issue, then paste the full log here. Also include `linuwux --version` (or `strings liblinuwux.so | grep linuwux` if you built from source) -- without `LINUWUX_DEBUG=1`, `liblinuwux.so` only prints its version line, not the detailed trace we need to tell what it actually did.
       render: shell
     validations:
       required: true
