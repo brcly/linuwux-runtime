@@ -202,6 +202,10 @@ Preferred credit line for derived builds:
 
 `LinUwUx by brcly (https://github.com/brcly/linuwux-runtime)`
 
+## About the documentation
+
+Parts of this README, the in-source comments, and some debugging discussion were drafted with AI assistance, then reviewed and edited by hand. The library code, design decisions, and testing are human work — AI was not used to invent or implement any of the bypass logic itself.
+
 ## Credits
 - LinUwUx - Original Bypass creator
 - DenuvOwO - Hypervisor Bypass
