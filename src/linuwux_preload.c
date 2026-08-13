@@ -33,6 +33,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,9 +82,9 @@ static inline void *linuwux_get_teb(void)
 
 static uint64_t g_target_sys_handler = 0;
 
-static unsigned int spoof_leaf1_eax, spoof_leaf1_ebx, spoof_leaf1_ecx, spoof_leaf1_edx;
-static unsigned int spoof_leaf40000000_eax, spoof_leaf40000000_ebx, spoof_leaf40000000_ecx, spoof_leaf40000000_edx;
-static unsigned int spoof_leaf40000001_eax, spoof_leaf40000001_ebx, spoof_leaf40000001_ecx, spoof_leaf40000001_edx;
+static unsigned int g_spoof_leaf1_eax, g_spoof_leaf1_ebx, g_spoof_leaf1_ecx, g_spoof_leaf1_edx;
+static unsigned int g_spoof_leaf40000000_eax, g_spoof_leaf40000000_ebx, g_spoof_leaf40000000_ecx, g_spoof_leaf40000000_edx;
+static unsigned int g_spoof_leaf40000001_eax, g_spoof_leaf40000001_ebx, g_spoof_leaf40000001_ecx, g_spoof_leaf40000001_edx;
 
 static void linuwux_detect_cpu_vendor(void)
 {
@@ -96,44 +97,46 @@ static void linuwux_detect_cpu_vendor(void)
 
     if (ebx == 0x756E6547 && edx == 0x49656E69 && ecx == 0x6C65746E) {
         /* GenuineIntel */
-        spoof_leaf1_eax = 0x000A0655;
-        spoof_leaf1_ebx = 0x00200800;
-        spoof_leaf1_ecx = avx ? 0x7BFAFBFF : 0x01FAEBFF;
-        spoof_leaf1_edx = 0xBFEBFBFF;
-        spoof_leaf40000000_eax = 0x40000001;
-        spoof_leaf40000000_ebx = 0x65707948;
-        spoof_leaf40000000_ecx = 0x67624472;
-        spoof_leaf40000000_edx = 0;
-        spoof_leaf40000001_eax = 0x30237648;
-        spoof_leaf40000001_ebx = 0;
-        spoof_leaf40000001_ecx = 0;
-        spoof_leaf40000001_edx = 0;
+        g_spoof_leaf1_eax = 0x000A0655;
+        g_spoof_leaf1_ebx = 0x00200800;
+        g_spoof_leaf1_ecx = avx ? 0x7BFAFBFF : 0x01FAEBFF;
+        g_spoof_leaf1_edx = 0xBFEBFBFF;
+        g_spoof_leaf40000000_eax = 0x40000001;
+        g_spoof_leaf40000000_ebx = 0x65707948;
+        g_spoof_leaf40000000_ecx = 0x67624472;
+        g_spoof_leaf40000000_edx = 0;
+        g_spoof_leaf40000001_eax = 0x30237648;
+        g_spoof_leaf40000001_ebx = 0;
+        g_spoof_leaf40000001_ecx = 0;
+        g_spoof_leaf40000001_edx = 0;
         linuwux_log("detect_cpu_vendor: Intel (avx=%d)\n", avx);
     } else if (ebx == 0x68747541 && edx == 0x69746E65 && ecx == 0x444D4163) {
         /* AuthenticAMD */
-        spoof_leaf1_eax = 0x00A20F12;
-        spoof_leaf1_ebx = 0x00100800;
-        spoof_leaf1_ecx = avx ? 0x7AD8320B : 0x00F8220B;
-        spoof_leaf1_edx = 0x178BFBFF;
-        spoof_leaf40000000_eax = 0x40000001;
-        spoof_leaf40000000_ebx = 0x706D6953;
-        spoof_leaf40000000_ecx = 0x7653656C;
-        spoof_leaf40000000_edx = 0x2020206D;
-        spoof_leaf40000001_eax = 0x30237648;
-        spoof_leaf40000001_ebx = 0;
-        spoof_leaf40000001_ecx = 0;
-        spoof_leaf40000001_edx = 0;
+        g_spoof_leaf1_eax = 0x00A20F12;
+        g_spoof_leaf1_ebx = 0x00100800;
+        g_spoof_leaf1_ecx = avx ? 0x7AD8320B : 0x00F8220B;
+        g_spoof_leaf1_edx = 0x178BFBFF;
+        g_spoof_leaf40000000_eax = 0x40000001;
+        g_spoof_leaf40000000_ebx = 0x706D6953;
+        g_spoof_leaf40000000_ecx = 0x7653656C;
+        g_spoof_leaf40000000_edx = 0x2020206D;
+        g_spoof_leaf40000001_eax = 0x30237648;
+        g_spoof_leaf40000001_ebx = 0;
+        g_spoof_leaf40000001_ecx = 0;
+        g_spoof_leaf40000001_edx = 0;
         linuwux_log("detect_cpu_vendor: AMD (avx=%d)\n", avx);
     } else {
         linuwux_log("detect_cpu_vendor: unknown vendor ebx=%08x edx=%08x ecx=%08x\n", ebx, edx, ecx);
     }
 }
 
+#define LINUWUX_KUSER_SHARED_DATA_ADDR 0x000000007FFE0000UL
+
 static void linuwux_patch_kuser_shared_data(void)
 {
-    uint8_t *kuser = (uint8_t *)0x000000007FFE0000UL;
+    uint8_t *kuser = (uint8_t *)LINUWUX_KUSER_SHARED_DATA_ADDR;
     size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
-    void *page_start = (void *)((uintptr_t)0x000000007FFE0000UL & ~(page_size - 1));
+    void *page_start = (void *)((uintptr_t)LINUWUX_KUSER_SHARED_DATA_ADDR & ~(page_size - 1));
 
     if (mprotect(page_start, page_size, PROT_READ | PROT_WRITE) == -1) {
         linuwux_log("kuser_shared_data: mprotect failed: %s\n", strerror(errno));
@@ -197,14 +200,20 @@ static void linuwux_patch_kuser_shared_data(void)
     linuwux_log("kuser_shared_data: patched\n");
 }
 
-/* Defined below; called from the 0x336967 (faketime) case. */
+/* Defined below; called from the faketime CPUID leaf case. */
 static void linuwux_set_faketime(long long faketime);
 
-/* Defined below; called from the 0x336933 (arm) case, not from
+/* Defined below; called from the arm CPUID leaf case, not from
  * recvmsg() -- calling it there instead nests a second
  * wine_server_call() inside an unfinished one and corrupts
  * wineserver's protocol state. */
 static void linuwux_set_hwprofile_guid(void);
+
+/* DenuvOwO's custom CPUID leaves: not real Intel/AMD leaves, they're
+ * how the hypervisor bypass signals arm/faketime requests through the
+ * trapped CPUID instruction. */
+#define LINUWUX_CPUID_LEAF_ARM      0x336933
+#define LINUWUX_CPUID_LEAF_FAKETIME 0x336967
 
 /* Returns 1 if the fault was ours to handle. */
 static int linuwux_cpuid_spoof(ucontext_t *ctx)
@@ -220,24 +229,24 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
 
     switch (spoof_leaf) {
     case 1:
-        ctx->uc_mcontext.gregs[REG_RAX] = spoof_leaf1_eax;
-        ctx->uc_mcontext.gregs[REG_RBX] = spoof_leaf1_ebx;
-        ctx->uc_mcontext.gregs[REG_RCX] = spoof_leaf1_ecx | (g_target_sys_handler ? 0 : (0x1 << 31));
-        ctx->uc_mcontext.gregs[REG_RDX] = spoof_leaf1_edx;
+        ctx->uc_mcontext.gregs[REG_RAX] = g_spoof_leaf1_eax;
+        ctx->uc_mcontext.gregs[REG_RBX] = g_spoof_leaf1_ebx;
+        ctx->uc_mcontext.gregs[REG_RCX] = g_spoof_leaf1_ecx | (g_target_sys_handler ? 0 : (0x1 << 31));
+        ctx->uc_mcontext.gregs[REG_RDX] = g_spoof_leaf1_edx;
         break;
 
     case 0x40000000:
-        ctx->uc_mcontext.gregs[REG_RAX] = spoof_leaf40000000_eax;
-        ctx->uc_mcontext.gregs[REG_RBX] = spoof_leaf40000000_ebx;
-        ctx->uc_mcontext.gregs[REG_RCX] = spoof_leaf40000000_ecx;
-        ctx->uc_mcontext.gregs[REG_RDX] = spoof_leaf40000000_edx;
+        ctx->uc_mcontext.gregs[REG_RAX] = g_spoof_leaf40000000_eax;
+        ctx->uc_mcontext.gregs[REG_RBX] = g_spoof_leaf40000000_ebx;
+        ctx->uc_mcontext.gregs[REG_RCX] = g_spoof_leaf40000000_ecx;
+        ctx->uc_mcontext.gregs[REG_RDX] = g_spoof_leaf40000000_edx;
         break;
 
     case 0x40000001:
-        ctx->uc_mcontext.gregs[REG_RAX] = spoof_leaf40000001_eax;
-        ctx->uc_mcontext.gregs[REG_RBX] = spoof_leaf40000001_ebx;
-        ctx->uc_mcontext.gregs[REG_RCX] = spoof_leaf40000001_ecx;
-        ctx->uc_mcontext.gregs[REG_RDX] = spoof_leaf40000001_edx;
+        ctx->uc_mcontext.gregs[REG_RAX] = g_spoof_leaf40000001_eax;
+        ctx->uc_mcontext.gregs[REG_RBX] = g_spoof_leaf40000001_ebx;
+        ctx->uc_mcontext.gregs[REG_RCX] = g_spoof_leaf40000001_ecx;
+        ctx->uc_mcontext.gregs[REG_RDX] = g_spoof_leaf40000001_edx;
         break;
 
     case 0x80000002:
@@ -261,8 +270,8 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
         ctx->uc_mcontext.gregs[REG_RDX] = 0x0;
         break;
 
-    case 0x336933:
-        linuwux_log("cpuid 0x336933 arm, TargetSysHandler=%#llx\n",
+    case LINUWUX_CPUID_LEAF_ARM:
+        linuwux_log("cpuid arm leaf, TargetSysHandler=%#llx\n",
                     (unsigned long long)ctx->uc_mcontext.gregs[REG_RCX]);
         g_target_sys_handler = (uint64_t)ctx->uc_mcontext.gregs[REG_RCX];
         linuwux_patch_kuser_shared_data();
@@ -273,7 +282,7 @@ static int linuwux_cpuid_spoof(ucontext_t *ctx)
         ctx->uc_mcontext.gregs[REG_RDX] = 0x0;
         break;
 
-    case 0x336967:
+    case LINUWUX_CPUID_LEAF_FAKETIME:
         linuwux_set_faketime((long long)ctx->uc_mcontext.gregs[REG_RCX]);
         ctx->uc_mcontext.gregs[REG_RAX] = 0x0;
         ctx->uc_mcontext.gregs[REG_RBX] = 0x0;
@@ -320,7 +329,7 @@ static int linuwux_redirect_all_enabled(void)
 /* Syscall User Dispatch: learn the selector from Wine's own prctl().  */
 /* ------------------------------------------------------------------ */
 
-static long g_sud_teb_offset = -1;  /* -1 == not learned yet / no SUD on this tree */
+static ptrdiff_t g_sud_teb_offset = -1;  /* -1 == not learned yet / no SUD on this tree */
 
 static void linuwux_rearm_sud(void)
 {
@@ -331,14 +340,14 @@ static void linuwux_rearm_sud(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* SIGSYS redirect (ported from linuwux_sigsys_route())                */
+/* SIGSYS redirect: DenuvOwO's blocked-syscall handoff                 */
 /* ------------------------------------------------------------------ */
 
 static int linuwux_sigsys_route(ucontext_t *ctx)
 {
     __uint128_t *xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
     unsigned long long syscall_nr, rip, resume;
-    unsigned char *ip, b0, b1;
+    unsigned char *fault_ip, opcode0, opcode1;
 
     if (g_target_sys_handler == 0 ||
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFFULL) == 0x1337133713371337ULL)
@@ -350,10 +359,12 @@ static int linuwux_sigsys_route(ucontext_t *ctx)
     if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system(rip))
         return 0;   /* not a fault we redirect; let Wine's real handler run */
 
-    ip = (unsigned char *)(uintptr_t)rip;
-    b0 = ip[0];
-    b1 = ip[1];
-    resume = (b0 == 0x0f && b1 == 0x05) ? rip + 2 : rip;
+    /* If the fault is on the `syscall` instruction itself (0f 05),
+     * resume past it -- otherwise resume at the fault site unchanged. */
+    fault_ip = (unsigned char *)(uintptr_t)rip;
+    opcode0 = fault_ip[0];
+    opcode1 = fault_ip[1];
+    resume = (opcode0 == 0x0f && opcode1 == 0x05) ? rip + 2 : rip;
 
     linuwux_log("sigsys redirect rax=%llx rip=%llx resume=%llx -> %#llx\n",
                 syscall_nr, rip, resume, (unsigned long long)g_target_sys_handler);
@@ -478,7 +489,7 @@ static void linuwux_ascii_to_utf16(const char *src, uint16_t *dst, size_t count)
 }
 
 /* Same key the old wine.inf content-insert set. Called from the
- * 0x336933 arm case (see forward declaration above). */
+ * LINUWUX_CPUID_LEAF_ARM case (see forward declaration above). */
 static void linuwux_set_hwprofile_guid(void)
 {
     static int done;
@@ -497,6 +508,13 @@ static void linuwux_set_hwprofile_guid(void)
     };
     static const char value_name_str[] = "HwProfileGuid";
     static const char data_str[] = "{12345678-1234-1234-1234-123456789012}";
+
+    /* Catch a too-small buffer at compile time if either string above
+     * ever grows past what value_name_buf/data_buf can hold. */
+    _Static_assert(sizeof(value_name_str) <= sizeof(value_name_buf) / sizeof(value_name_buf[0]),
+                   "value_name_buf too small for value_name_str");
+    _Static_assert(sizeof(data_str) <= sizeof(data_buf) / sizeof(data_buf[0]),
+                   "data_buf too small for data_str");
 
     if (done)
         return;
@@ -522,6 +540,13 @@ static void linuwux_set_hwprofile_guid(void)
         uint16_t comp_buf[32];
         struct linuwux_unicode_string comp_name;
 
+        if (comp_len + 1 > sizeof(comp_buf) / sizeof(comp_buf[0]))
+        {
+            linuwux_log("hwprofile_guid: path component \"%s\" too long for comp_buf -- skipping\n", comp);
+            if (cur)
+                nt_close(cur);
+            return;
+        }
         linuwux_ascii_to_utf16(comp, comp_buf, comp_len + 1);
         comp_name.Length = (uint16_t)(comp_len * sizeof(uint16_t));
         comp_name.MaximumLength = (uint16_t)((comp_len + 1) * sizeof(uint16_t));
@@ -784,7 +809,7 @@ int prctl(int option, ...)
         unsigned char *selector_addr = (unsigned char *)a5;
         unsigned char *teb = (unsigned char *)linuwux_get_teb();
         g_sud_teb_offset = selector_addr - teb;
-        linuwux_log("learned SUD selector: teb-offset=%#lx (teb=%p selector=%p)\n",
+        linuwux_log("learned SUD selector: teb-offset=%#tx (teb=%p selector=%p)\n",
                     g_sud_teb_offset, (void *)teb, (void *)selector_addr);
     }
     return (int)ret;
