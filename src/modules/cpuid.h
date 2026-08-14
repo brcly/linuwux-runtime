@@ -31,8 +31,20 @@ void linuwux_detect_cpu_vendor(void);
 /* Handle a CPUID fault. Returns 1 if handled. */
 int linuwux_cpuid_spoof(siginfo_t *info, ucontext_t *ctx);
 
-/* TargetSysHandler, set by the arm leaf; read by sigsys.c to route
- * blocked syscalls once armed. 0 == not armed yet. */
+/* TargetSysHandler, set by the arm leaf; 0 == not armed yet. */
 uint64_t linuwux_cpuid_target_sys_handler(void);
+
+/*
+ * Protocol-aware syscall redirect target for SIGSYS.
+ * Modern: handler from arm leaf, RAX := resume after syscall.
+ * Legacy can set rax_is_resume = 0 (RAX keeps the pre-redirect RCX).
+ */
+struct linuwux_syscall_route {
+    uint64_t handler;
+    int rax_is_resume;
+};
+
+/* Returns 1 if armed and out is filled; 0 if not armed. */
+int linuwux_cpuid_syscall_route(ucontext_t *ctx, struct linuwux_syscall_route *out);
 
 #endif /* LINUWUX_CPUID_H */

@@ -56,20 +56,21 @@ static void linuwux_rearm_sud(void)
 int linuwux_sigsys_route(ucontext_t *ctx)
 {
     __uint128_t *xmm_regs;
-    unsigned long long syscall_nr, rip, resume, target_sys_handler;
+    struct linuwux_syscall_route route;
+    unsigned long long syscall_nr, rip, resume, saved_rcx;
     unsigned char *fault_ip, opcode0, opcode1;
 
     if (!ctx->uc_mcontext.fpregs)
         return 0;
     xmm_regs = (__uint128_t *)ctx->uc_mcontext.fpregs->_xmm;
 
-    target_sys_handler = linuwux_cpuid_target_sys_handler();
-    if (target_sys_handler == 0 ||
+    if (!linuwux_cpuid_syscall_route(ctx, &route) ||
         (xmm_regs[5] & 0xFFFFFFFFFFFFFFFFULL) == 0x1337133713371337ULL)
         goto not_ours;
 
     syscall_nr = (unsigned long long)ctx->uc_mcontext.gregs[REG_RAX];
     rip = (unsigned long long)ctx->uc_mcontext.gregs[REG_RIP];
+    saved_rcx = (unsigned long long)ctx->uc_mcontext.gregs[REG_RCX];
 
     if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system(rip))
         return 0;
@@ -81,12 +82,12 @@ int linuwux_sigsys_route(ucontext_t *ctx)
     resume = (opcode0 == 0x0f && opcode1 == 0x05) ? rip + 2 : rip;
 
     linuwux_log("sigsys redirect rax=%llx rip=%llx resume=%llx -> %#llx\n",
-                syscall_nr, rip, resume, target_sys_handler);
+                syscall_nr, rip, resume, (unsigned long long)route.handler);
 
     xmm_regs[4] = (xmm_regs[4] & ~(__uint128_t)0xFFFFFFFFULL) | (syscall_nr & 0xFFFFFFFF);
-    ctx->uc_mcontext.gregs[REG_RAX] = (long long)resume;
-    ctx->uc_mcontext.gregs[REG_RCX] = (long long)target_sys_handler;
-    ctx->uc_mcontext.gregs[REG_RIP] = (long long)target_sys_handler;
+    ctx->uc_mcontext.gregs[REG_RAX] = (long long)(route.rax_is_resume ? resume : saved_rcx);
+    ctx->uc_mcontext.gregs[REG_RCX] = (long long)route.handler;
+    ctx->uc_mcontext.gregs[REG_RIP] = (long long)route.handler;
 
     linuwux_rearm_sud();
     return 1;

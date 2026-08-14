@@ -55,7 +55,7 @@ static void linuwux_append_override(char *buf, size_t bufsize, const char *entry
         linuwux_log("WINEDLLOVERRIDES: not enough room to append \"%s\" -- skipping\n", entry);
 }
 
-/* is_game: argv[1] Windows path with reflex.dll in the same directory. */
+/* is_game: argv[1] Windows path with reflex.dll / reflex64.dll beside it. */
 static int linuwux_dir_has_reflex(const char *dir)
 {
     DIR *d;
@@ -67,7 +67,8 @@ static int linuwux_dir_has_reflex(const char *dir)
         return 0;
 
     while ((ent = readdir(d))) {
-        if (!strcasecmp(ent->d_name, "reflex.dll")) {
+        if (!strcasecmp(ent->d_name, "reflex.dll") ||
+            !strcasecmp(ent->d_name, "reflex64.dll")) {
             found = 1;
             linuwux_log("Found %s\n", ent->d_name);
             break;
@@ -197,6 +198,8 @@ static void linuwux_init(int argc, char **argv, char **envp)
             linuwux_append_override(overrides, sizeof(overrides), "version=n,b");
         if (!existing || !strstr(existing, "reflex="))
             linuwux_append_override(overrides, sizeof(overrides), "reflex=n,b");
+        if (!existing || !strstr(existing, "reflex64="))
+            linuwux_append_override(overrides, sizeof(overrides), "reflex64=n,b");
 
         setenv("WINEDLLOVERRIDES", overrides, 1);
         linuwux_log("WINEDLLOVERRIDES=\"%s\"\n", overrides);
