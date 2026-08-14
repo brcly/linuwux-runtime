@@ -8,6 +8,19 @@
 
 This project does **not** set up host-side requirements (UMIP, HV DKMS, etc.) — see [cs.rin.ru](https://csrin.org) for those.
 
+## What it covers
+
+One library (`liblinuwux.so`) handles **modern** and **legacy** DenuvOwO / Reflex layouts. Protocol is detected at runtime — there is no second `.so` or `linuwux-legacy` wrapper.
+
+The process is treated as a game when the Windows target exe sits next to a known marker (existence only, never loaded), for example:
+
+- `reflex.dll` / `reflex64.dll`
+- `DenuvOwO.ini` (older winmm-loader packs without reflex)
+
+### Older packs with `launcher.exe`
+
+Some older DenuvOwO releases ship a Windows `launcher.exe`. **On Linux you do not need it.** Point Steam / Lutris / Heroic / umu at the **game binary** the same way you do for modern titles (e.g. `Game.exe`), with `linuwux` on that game’s launch options only.
+
 ## Install
 
 **Prebuilt** (needs `curl`, `sha256sum`):
@@ -78,4 +91,4 @@ Parts of the docs and in-source comments were drafted with AI assistance, then r
 
 - LinUwUx — original bypass creator  
 - DenuvOwO — hypervisor bypass  
-- [Kurt Himebauch](https://github.com/xXJSONDeruloXx) — legacy Reflex fix (historical; not used by the current LD_PRELOAD design)
+- [Kurt Himebauch](https://github.com/xXJSONDeruloXx) — legacy Reflex / multi-protocol compatibility
