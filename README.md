@@ -43,7 +43,6 @@ linuwux heroic     # wrong
 
 Full setup for **Lutris, Heroic, Faugus, MangoHud order, gamescope limits, and common mistakes**:
 
-- **[Documentation (docs/wiki)](docs/wiki/Home.md)** in this repo  
 - **[GitHub Wiki](https://github.com/brcly/linuwux-runtime/wiki)** (same pages when published)
 
 ## Requirements
