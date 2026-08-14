@@ -29,7 +29,7 @@ jobs:
       - name: Verify export surface stays exactly the 4 interposed libc symbols
         run: |
           exports=$(nm -D dist/liblinuwux.so | awk '$2=="T"{print $3}' | sort)
-          expected=$(printf '%s\n' clock_gettime gettimeofday prctl sigaction | sort)
+          expected=$(printf '%s\n' clock_gettime gettimeofday sigaction | sort)
           if [ "$exports" != "$expected" ]; then
             echo "::error::Unexpected exported symbols -- LD_PRELOAD libraries should only export their interposition targets"
             diff <(echo "$expected") <(echo "$exports")
