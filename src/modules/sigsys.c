@@ -31,20 +31,7 @@
 #include "cpuid.h"
 #include "sigsys.h"
 
-/* Typical Proton/GE ntdll/kernel PE range — skip redirects here unless forced. */
-#define LINUWUX_WINE_SYSTEM_RIP_MIN 0x00006FFFFF000000ULL
-#define LINUWUX_WINE_SYSTEM_RIP_MAX 0x0000700000000000ULL
-
-static int linuwux_rip_is_wine_system(unsigned long long rip)
-{
-    return rip >= LINUWUX_WINE_SYSTEM_RIP_MIN && rip < LINUWUX_WINE_SYSTEM_RIP_MAX;
-}
-
-static int linuwux_redirect_all_enabled(void)
-{
-    const char *env = getenv("LINUWUX_REDIRECT_ALL");
-    return env && env[0] == '1' && env[1] == '\0';
-}
+/* Wine-system RIP helpers: linuwux.h */
 
 /* TEB offset of SUD selector; -1 if unused (seccomp trees). */
 static _Atomic ptrdiff_t g_sud_teb_offset = -1;
