@@ -45,6 +45,22 @@ LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux.so" %command%
 
 Steam sets its own `LD_PRELOAD` earlier in the launch chain to inject the Steam Overlay (`GameOverlayRenderer64.so`); a bare `LD_PRELOAD=/path/to/liblinuwux.so %command%` clobbers that outright and silences the overlay.
 
+**Using MangoHud?** Put `linuwux` (or the `LD_PRELOAD=...` form) *before* MangoHud's own arguments, not before:
+
+```
+linuwux mangohud %command%
+```
+
+not
+
+```
+mangohud linuwux %command%
+```
+
+`mangohud` is itself a wrapper script that sets `LD_PRELOAD` and `exec`s, same trick `linuwux` uses. Chaining them the wrong way round loads `libMangoHud.so` into an extra intermediate shell process it was never meant to survive twice in a launch chain, and the game never starts.
+
+Prefer your launcher's own MangoHud toggle over writing `mangohud` into the launch command by hand, if it has one — Faugus and Heroic (Settings → Other → MangoHud, per-game) both do, and it places MangoHud in the correct position automatically. Manual command-line chaining is only needed for launchers without that option.
+
 #### Simpler: `--install`
 
 ```bash
@@ -175,6 +191,7 @@ Then remove it from the game's launch options.
 - `PROTON_DISABLE_LSTEAMCLIENT=1` bypasses Steam DRM/Steamworks checks some DenuvOwO packs trip on. It doesn't affect the Steam Overlay — that keeps working as long as `LD_PRELOAD` is appended rather than replaced (see Quick start).
 - The library announces its version on every load (`[linuwux] vX.Y.Z loaded (pid=...)`, printed to stderr regardless of `LINUWUX_DEBUG`) so it shows up in whatever log gets pasted for a bug report. Check it any time without launching a game via `linuwux --version` or `strings liblinuwux.so | grep linuwux`.
 - Confirmed working launched directly through the real Steam client (not just Lutris/Heroic/Faugus) with GE-Proton/CachyOS — the game's `LD_PRELOAD` does reach the process inside Steam's own pressure-vessel container.
+- With MangoHud, order matters: `linuwux mangohud %command%`, not `mangohud linuwux %command%` — or better, use your launcher's own MangoHud toggle instead of chaining it by hand (see Quick start).
 
 ## Reporting issues
 
