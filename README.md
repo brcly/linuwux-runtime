@@ -37,7 +37,7 @@ Re-running the command later re-installs whatever the newest release is — that
 ./build.sh
 ```
 
-Compiles `src/linuwux.c` and drops `liblinuwux.so` in `dist/` — no Proton/Wine clone, no container engine, done in seconds. Add it to the game's launch options, **appending** to `LD_PRELOAD` rather than replacing it:
+Compiles `src/linuwux.c` and `src/modules/*.c` and drops `liblinuwux.so` in `dist/` — no Proton/Wine clone, no container engine, done in seconds. Add it to the game's launch options, **appending** to `LD_PRELOAD` rather than replacing it:
 
 ```
 LD_PRELOAD="${LD_PRELOAD}:/path/to/liblinuwux.so" %command%
@@ -83,9 +83,19 @@ Once installed, plain `./build.sh` (no `--install` needed again) keeps the insta
 build.sh                 # self-contained: builds, and optionally installs
 install.sh                # fetches + installs the latest prebuilt release
 src/
-  linuwux.c              # LD_PRELOAD library -- all LinUwUx logic lives here
+  linuwux.c              # constructor only -- ties the modules below together
   linuwux.sh            # 'linuwux' wrapper template, installed by --install
+  modules/
+    linuwux.h            # shared logging/TEB declarations
+    common.c             # linuwux_log()
+    cpuid.c              # CPUID spoof, KUSER_SHARED_DATA patch, arm/faketime leaves
+    sigsys.c             # SIGSYS/DenuvOwO syscall redirect
+    registry.c           # HwProfileGuid via the real NT registry API
+    faketime.c           # clock_gettime()/gettimeofday() interposition
+    hooks.c              # sigaction()/prctl() interposition, handler chaining
 ```
+
+`build.sh` globs `src/linuwux.c` and `src/modules/*.c` into one `liblinuwux.so`; the split is source organization only, not separate libraries. `-fvisibility=hidden` keeps everything except the four interposition targets (`sigaction`, `prctl`, `clock_gettime`, `gettimeofday`) out of the shared object's exported symbol table, same as when it was a single file.
 
 A tagged push (`vYY.MM.DD`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds `liblinuwux.so` from that exact commit, stamps it with the tag's version, and publishes it plus `linuwux.sh` and a `SHA256SUMS` file as a GitHub Release — what `install.sh` downloads.
 

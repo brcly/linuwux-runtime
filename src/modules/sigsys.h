@@ -1,0 +1,32 @@
+/*
+ * Copyright (C) 2026 brcly
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
+#ifndef LINUWUX_SIGSYS_H
+#define LINUWUX_SIGSYS_H
+
+#include <stddef.h>
+#include <ucontext.h>
+
+/* Redirect blocked syscalls into TargetSysHandler after arm. Returns 1 if handled. */
+int linuwux_sigsys_route(ucontext_t *ctx);
+
+/* Learned from prctl(PR_SET_SYSCALL_USER_DISPATCH, ...) in hooks.c. */
+void linuwux_sigsys_learn_sud_offset(ptrdiff_t teb_offset);
+
+#endif /* LINUWUX_SIGSYS_H */

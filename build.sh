@@ -24,18 +24,17 @@ set -euo pipefail
 # Compiles liblinuwux.so -- an LD_PRELOAD library carrying all of
 # LinUwUx's CPUID spoofing, SIGSYS/DenuvOwO redirect, HwProfileGuid,
 # faketime, and DLL-override handling. Nothing else: no Proton/Wine
-# source is cloned, patched, or built. See src/linuwux.c for
-# the mechanism.
+# source is cloned, patched, or built. See src/modules/ for the mechanism.
 # ============================================================
 
 # YY.MM.DD; add a .N suffix for same-day hotfixes (26.08.13 -> 26.08.13.1).
 # Baked into the .so as LINUWUX_VERSION -- announced on load and readable
 # via 'linuwux --version'. LINUWUX_VERSION_OVERRIDE lets the release
 # workflow stamp the exact tag without editing this file.
-VERSION="${LINUWUX_VERSION_OVERRIDE:-26.08.14}"
+VERSION="${LINUWUX_VERSION_OVERRIDE:-26.08.14.1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/src/linuwux.c"
+SRC_DIR="${SCRIPT_DIR}/src"
 DIST_DIR="${SCRIPT_DIR}/dist"
 INSTALL=0
 
@@ -95,7 +94,7 @@ Steam's own overlay preload entry):
   LD_PRELOAD="\${LD_PRELOAD}:/path/to/liblinuwux.so" %command%
 
 Required files:
-  src/linuwux.c
+  src/linuwux.c, src/modules/*.c, src/modules/*.h
   src/linuwux.sh          (only for --install)
 
 EOF
@@ -120,14 +119,22 @@ already_installed() {
 # source is touched or needed.
 build_linuwux() {
     local out="${DIST_DIR}/liblinuwux.so"
+    local -a sources=("${SRC_DIR}"/*.c "${SRC_DIR}"/modules/*.c)
 
     info "Building liblinuwux.so ..."
-    [[ -f "$SRC" ]] || die "$SRC not found"
+    [[ ${#sources[@]} -gt 0 && -f "${sources[0]}" ]] || die "No .c files found under $SRC_DIR"
     need gcc
 
     mkdir -p "$DIST_DIR"
-    gcc -std=gnu11 -O2 -fPIC -shared -Wall -DLINUWUX_VERSION=\""${VERSION}"\" \
-        -o "$out" "$SRC" -ldl \
+    # -fvisibility=hidden keeps cross-file helpers (modules/cpuid.c,
+    # modules/sigsys.c, etc.) out of the .so's dynamic symbol table --
+    # only the 4 libc symbols we actually interpose mark themselves
+    # default-visibility (see modules/hooks.c and modules/faketime.c).
+    # An LD_PRELOAD library should only ever export its interposition
+    # targets.
+    gcc -std=gnu11 -O2 -fPIC -fvisibility=hidden -shared -Wall \
+        -DLINUWUX_VERSION=\""${VERSION}"\" \
+        -o "$out" "${sources[@]}" -ldl \
         || die "Failed to compile liblinuwux.so"
 
     echo

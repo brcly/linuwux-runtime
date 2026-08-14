@@ -21,7 +21,7 @@ jobs:
         run: shellcheck build.sh install.sh src/linuwux.sh
 
       - name: Build liblinuwux.so (-Wall -Wextra)
-        run: gcc -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -o /tmp/strict-check.so src/linuwux.c -ldl
+        run: gcc -std=gnu11 -O2 -fPIC -fvisibility=hidden -shared -Wall -Wextra -o /tmp/strict-check.so src/linuwux.c src/modules/*.c -ldl
 
       - name: Build via build.sh
         run: ./build.sh
