@@ -2,8 +2,6 @@
   <img src="assets/banner.png" alt="LinUwUx — LD_PRELOAD runtime" width="880">
 </p>
 
-`liblinuwux.so` — an `LD_PRELOAD` library that applies the **LinUwUx** DenuvOwO hypervisor-bypass set under **GE-Proton** or **CachyOS Proton**. No Proton/Wine source patches, no prefix registry imports, no launcher script rewrites.Ux
-
 `liblinuwux.so` — an `LD_PRELOAD` library that applies the **LinUwUx** DenuvOwO hypervisor-bypass set under **GE-Proton** or **CachyOS Proton**. No Proton/Wine source patches, no prefix registry imports, no launcher script rewrites.
 
 **Official Valve Proton is not supported.** Use GE-Proton or CachyOS Proton.
