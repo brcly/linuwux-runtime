@@ -164,6 +164,21 @@ static void linuwux_patch_kuser_shared_data(void)
     linuwux_log("kuser_shared_data: patched\n");
 }
 
+/* Real CPUID with faulting briefly disabled. */
+static void linuwux_cpuid_passthrough(ucontext_t *ctx, unsigned int leaf, unsigned int subleaf)
+{
+    syscall(SYS_arch_prctl, ARCH_SET_CPUID, 1);
+    __asm__ volatile(
+        "cpuid"
+        : "=a"(ctx->uc_mcontext.gregs[REG_RAX]),
+          "=b"(ctx->uc_mcontext.gregs[REG_RBX]),
+          "=c"(ctx->uc_mcontext.gregs[REG_RCX]),
+          "=d"(ctx->uc_mcontext.gregs[REG_RDX])
+        : "a"(leaf), "c"(subleaf)
+        : "memory");
+    syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);
+}
+
 /* DenuvOwO protocol leaves (not real CPUID leaves). */
 #define LINUWUX_CPUID_LEAF_ARM      0x336933
 #define LINUWUX_CPUID_LEAF_FAKETIME 0x336967
@@ -181,6 +196,13 @@ int linuwux_cpuid_spoof(siginfo_t *info, ucontext_t *ctx)
 
     if (!info || info->si_code != SI_KERNEL)
         return 0;
+
+    if (!linuwux_redirect_all_enabled() && linuwux_rip_is_wine_system((unsigned long long)(uintptr_t)rip)) {
+        /* Wine system PE range — real CPUID, not spoof. */
+        linuwux_cpuid_passthrough(ctx, spoof_leaf, spoof_subleaf);
+        ctx->uc_mcontext.gregs[REG_RIP] += 2;
+        return 1;
+    }
 
     switch (spoof_leaf) {
     case 1:
@@ -246,17 +268,7 @@ int linuwux_cpuid_spoof(siginfo_t *info, ucontext_t *ctx)
         break;
 
     default:
-        /* Pass through real CPUID while faulting is briefly disabled. */
-        syscall(SYS_arch_prctl, ARCH_SET_CPUID, 1);
-        __asm__ volatile(
-            "cpuid"
-            : "=a"(ctx->uc_mcontext.gregs[REG_RAX]),
-              "=b"(ctx->uc_mcontext.gregs[REG_RBX]),
-              "=c"(ctx->uc_mcontext.gregs[REG_RCX]),
-              "=d"(ctx->uc_mcontext.gregs[REG_RDX])
-            : "a"(spoof_leaf), "c"(spoof_subleaf)
-            : "memory");
-        syscall(SYS_arch_prctl, ARCH_SET_CPUID, 0);
+        linuwux_cpuid_passthrough(ctx, spoof_leaf, spoof_subleaf);
     }
 
     ctx->uc_mcontext.gregs[REG_RIP] += 2;

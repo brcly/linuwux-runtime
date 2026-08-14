@@ -66,6 +66,9 @@ int clock_gettime(clockid_t id, struct timespec *ts)
     if (!real_clock_gettime)
         real_clock_gettime = (clock_gettime_fn)dlsym(RTLD_NEXT, "clock_gettime");
 
+    if (!linuwux_is_game_process())
+        return real_clock_gettime(id, ts);
+
     ret = real_clock_gettime(id, ts);
 
     if (ret == 0 && atomic_load(&g_faketime_active) &&
@@ -93,6 +96,9 @@ int gettimeofday(struct timeval *tv, void *tz)
 
     if (!real_gettimeofday)
         real_gettimeofday = (gettimeofday_fn)dlsym(RTLD_NEXT, "gettimeofday");
+
+    if (!linuwux_is_game_process())
+        return real_gettimeofday(tv, tz);
 
     ret = real_gettimeofday(tv, tz);
 

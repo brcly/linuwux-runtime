@@ -28,10 +28,23 @@
 
 #include "linuwux.h"
 
+/* Default 1 so test harnesses without set_game_process still log. */
+static int g_is_game_process = 1;
+
+void linuwux_set_game_process(int is_game)
+{
+    g_is_game_process = is_game;
+}
+
+int linuwux_is_game_process(void)
+{
+    return g_is_game_process;
+}
+
 void linuwux_log(const char *fmt, ...)
 {
     va_list ap;
-    if (!getenv("LINUWUX_DEBUG"))
+    if (!g_is_game_process || !getenv("LINUWUX_DEBUG"))
         return;
     fprintf(stderr, "[linuwux] ");
     va_start(ap, fmt);

@@ -20,6 +20,8 @@
 #ifndef LINUWUX_H
 #define LINUWUX_H
 
+#include <stdlib.h>
+
 /* From -DLINUWUX_VERSION; "dev" if built by hand. */
 #ifndef LINUWUX_VERSION
 #define LINUWUX_VERSION "dev"
@@ -29,8 +31,29 @@
 #define ARCH_SET_CPUID 0x1012
 #endif
 
+/* Proton/GE builtin system PE range — exclude from CPUID/SIGSYS.
+ * Exclusion (not allow-list) so relocated DRM still gets spoofed. */
+#define LINUWUX_WINE_SYSTEM_RIP_MIN 0x00006FFFFF000000ULL
+#define LINUWUX_WINE_SYSTEM_RIP_MAX 0x0000700000000000ULL
+
+static inline int linuwux_rip_is_wine_system(unsigned long long rip)
+{
+    return rip >= LINUWUX_WINE_SYSTEM_RIP_MIN && rip < LINUWUX_WINE_SYSTEM_RIP_MAX;
+}
+
+/* LINUWUX_REDIRECT_ALL=1 disables the Wine-system exclusion. */
+static inline int linuwux_redirect_all_enabled(void)
+{
+    const char *env = getenv("LINUWUX_REDIRECT_ALL");
+    return env && env[0] == '1' && env[1] == '\0';
+}
+
 /* Shared by every module; implemented in common.c. */
 void linuwux_log(const char *fmt, ...);
+
+/* is_game: set once in the constructor. Gates log/hooks/overrides. */
+void linuwux_set_game_process(int is_game);
+int linuwux_is_game_process(void);
 
 /* Win64 TEB: %gs:0x30 (NtTib.Self). Header-only: each TU gets its own
  * static copy, which is fine for a one-instruction inline. */

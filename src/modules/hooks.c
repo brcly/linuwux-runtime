@@ -110,6 +110,9 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     if (!real_sigaction)
         real_sigaction = (sigaction_fn)dlsym(RTLD_NEXT, "sigaction");
 
+    if (!linuwux_is_game_process())
+        return real_sigaction(signum, act, oldact);
+
     if (act && signum == SIGSEGV && act->sa_sigaction != linuwux_segv_wrapper) {
         struct sigaction ours = *act;
         ours.sa_sigaction = linuwux_segv_wrapper;
@@ -153,7 +156,8 @@ int prctl(int option, ...)
 
     long ret = real_prctl(option, a2, a3, a4, a5);
 
-    if (ret >= 0 && option == PR_SET_SYSCALL_USER_DISPATCH && a2 == PR_SYS_DISPATCH_ON) {
+    if (linuwux_is_game_process() &&
+        ret >= 0 && option == PR_SET_SYSCALL_USER_DISPATCH && a2 == PR_SYS_DISPATCH_ON) {
         unsigned char *selector_addr = (unsigned char *)a5;
         unsigned char *teb = (unsigned char *)linuwux_get_teb();
         ptrdiff_t teb_offset = selector_addr - teb;
