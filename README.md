@@ -1,5 +1,3 @@
-# LinUwUx
-
 <p align="center">
   <img src="assets/banner.png" alt="LinUwUx — LD_PRELOAD runtime" width="880">
 </p>
