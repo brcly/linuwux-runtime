@@ -23,4 +23,8 @@
 /* Arms faketime from the CPUID faketime leaf's requested high-32-bit value. */
 void linuwux_set_faketime(long long requested);
 
+/* Opens/creates the prefix-shared faketime file. Call once from the
+ * constructor, only in the game process and wineserver -- see faketime.c. */
+void linuwux_faketime_prefix_init(void);
+
 #endif /* LINUWUX_FAKETIME_H */

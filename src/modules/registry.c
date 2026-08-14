@@ -32,8 +32,8 @@
 #include "registry.h"
 
 /*
- * Resolve a symbol from ntdll.so (not visible via RTLD_DEFAULT).
- * Path comes from /proc/self/maps + RTLD_NOLOAD.
+ * Resolve a symbol from already-loaded ntdll.so (not via RTLD_DEFAULT).
+ * Try bare SONAME first; fall back to /proc/self/maps path + RTLD_NOLOAD.
  * May run under SIGSEGV (arm -> hwprofile); fopen/dlopen are not AS-safe.
  * Late callers do not wait on a stuck resolver — return NULL instead.
  */
@@ -48,51 +48,58 @@ static void *linuwux_find_ntdll_symbol(const char *name)
 
     if (atomic_compare_exchange_strong(&state, &expected_state, LINUWUX_NTDLL_IN_PROGRESS))
     {
-        FILE *f;
-        char line[4096], path[4096];
-
-        handle = NULL;
-        path[0] = '\0';
-        f = fopen("/proc/self/maps", "r");
-        if (f)
+        handle = dlopen("ntdll.so", RTLD_NOW | RTLD_NOLOAD);
+        if (handle)
         {
-            while (fgets(line, sizeof(line), f))
-            {
-                size_t len = strlen(line);
-                const char *field;
-                int i;
-
-                if (len && line[len - 1] == '\n')
-                    line[--len] = '\0';
-
-                /* Pathname is field 6; may contain spaces. */
-                field = line;
-                for (i = 0; i < 5 && field; i++)
-                {
-                    field = strchr(field, ' ');
-                    if (field)
-                        while (*field == ' ')
-                            field++;
-                }
-                if (!field || !*field)
-                    continue;
-
-                len = strlen(field);
-                if (len > 9 && strcmp(field + len - 9, "/ntdll.so") == 0)
-                {
-                    snprintf(path, sizeof(path), "%s", field);
-                    break;
-                }
-            }
-            fclose(f);
-        }
-        if (path[0])
-        {
-            handle = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
-            linuwux_log("linuwux_find_ntdll_symbol: ntdll.so at %s -> handle=%p\n", path, handle);
+            linuwux_log("linuwux_find_ntdll_symbol: matched ntdll.so by name -> handle=%p\n", handle);
         }
         else
-            linuwux_log("linuwux_find_ntdll_symbol: could not find ntdll.so in /proc/self/maps\n");
+        {
+            FILE *f;
+            char line[4096], path[4096];
+
+            path[0] = '\0';
+            f = fopen("/proc/self/maps", "r");
+            if (f)
+            {
+                while (fgets(line, sizeof(line), f))
+                {
+                    size_t len = strlen(line);
+                    const char *field;
+                    int i;
+
+                    if (len && line[len - 1] == '\n')
+                        line[--len] = '\0';
+
+                    /* Pathname is field 6; may contain spaces. */
+                    field = line;
+                    for (i = 0; i < 5 && field; i++)
+                    {
+                        field = strchr(field, ' ');
+                        if (field)
+                            while (*field == ' ')
+                                field++;
+                    }
+                    if (!field || !*field)
+                        continue;
+
+                    len = strlen(field);
+                    if (len > 9 && strcmp(field + len - 9, "/ntdll.so") == 0)
+                    {
+                        snprintf(path, sizeof(path), "%s", field);
+                        break;
+                    }
+                }
+                fclose(f);
+            }
+            if (path[0])
+            {
+                handle = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
+                linuwux_log("linuwux_find_ntdll_symbol: maps fallback %s -> handle=%p\n", path, handle);
+            }
+            else
+                linuwux_log("linuwux_find_ntdll_symbol: ntdll.so not found by name or maps\n");
+        }
 
         atomic_store_explicit(&ntdll_handle, handle, memory_order_release);
         atomic_store_explicit(&state, LINUWUX_NTDLL_DONE, memory_order_release);

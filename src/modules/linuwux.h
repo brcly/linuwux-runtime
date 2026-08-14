@@ -55,6 +55,10 @@ void linuwux_log(const char *fmt, ...);
 void linuwux_set_game_process(int is_game);
 int linuwux_is_game_process(void);
 
+/* Set once in the constructor alongside is_game. See faketime.c. */
+void linuwux_set_is_wineserver(int is_wineserver);
+int linuwux_is_wineserver(void);
+
 /* Win64 TEB: %gs:0x30 (NtTib.Self). Header-only: each TU gets its own
  * static copy, which is fine for a one-instruction inline. */
 static inline void *linuwux_get_teb(void)

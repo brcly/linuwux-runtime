@@ -26,6 +26,7 @@
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +36,7 @@
 
 #include "modules/linuwux.h"
 #include "modules/cpuid.h"
+#include "modules/faketime.h"
 
 /* Kept for `strings` / `linuwux --version`. */
 static const char linuwux_version_tag[] __attribute__((used)) =
@@ -67,6 +69,7 @@ static int linuwux_dir_has_reflex(const char *dir)
     while ((ent = readdir(d))) {
         if (!strcasecmp(ent->d_name, "reflex.dll")) {
             found = 1;
+            linuwux_log("Found %s\n", ent->d_name);
             break;
         }
     }
@@ -84,11 +87,8 @@ static int linuwux_game_dir_has_reflex(const char *argv0)
     size_t i;
     int found;
 
-    if (!argv0 || !argv0[0] || argv0[1] != ':') {
-        linuwux_log("is_game: argv path missing or not X:\\... (%s)\n",
-                    argv0 ? argv0 : "(null)");
+    if (!argv0 || !argv0[0] || argv0[1] != ':')
         return 0;
-    }
 
     drive = (char)tolower((unsigned char)argv0[0]);
 
@@ -100,7 +100,7 @@ static int linuwux_game_dir_has_reflex(const char *argv0)
         /* dosdevices/<drive>: */
         prefix = getenv("WINEPREFIX");
         if (!prefix) {
-            linuwux_log("is_game: no WINEPREFIX for drive %c:\n", drive);
+            /* dosdevices mapping missing for this drive. */
             return 0;
         }
 
@@ -118,8 +118,30 @@ static int linuwux_game_dir_has_reflex(const char *argv0)
     *slash = '\0';
 
     found = linuwux_dir_has_reflex(path);
-    linuwux_log("is_game: dir=%s reflex=%s\n", path, found ? "yes" : "no");
     return found;
+}
+
+/* /proc/self/comm holds the kernel task name (<=15 chars + NUL); wineserver
+ * fits comfortably. Cheaper and simpler than resolving /proc/self/exe and
+ * comparing basenames. */
+static int linuwux_proc_comm_is_wineserver(void)
+{
+    char comm[32];
+    int fd;
+    ssize_t n;
+
+    fd = open("/proc/self/comm", O_RDONLY);
+    if (fd < 0)
+        return 0;
+    n = read(fd, comm, sizeof(comm) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    if (comm[n - 1] == '\n')
+        n--;
+    comm[n] = '\0';
+
+    return strcmp(comm, "wineserver") == 0;
 }
 
 /* GNU constructor extension: glibc passes real argc/argv/envp. */
@@ -128,16 +150,33 @@ static void linuwux_init(int argc, char **argv, char **envp)
 {
     char overrides[4096];
     const char *existing;
-    int n, is_game;
+    int n, is_game, is_wineserver;
 
     (void)envp;
 
     /* Wine: argv[0] is the loader; argv[1] is the Windows target path. */
     is_game = linuwux_game_dir_has_reflex(argc > 1 ? argv[1] : NULL);
-    linuwux_log("is_game: argv[1]=%s -> %s\n",
-                (argc > 1 && argv[1]) ? argv[1] : "(none)",
-                is_game ? "game" : "helper");
     linuwux_set_game_process(is_game);
+    if (is_game && argc > 1 && argv[1]) {
+        const char *exe = argv[1];
+        const char *slash = exe;
+        for (const char *p = exe; *p; p++)
+            if (*p == '\\' || *p == '/')
+                slash = p + 1;
+        linuwux_log("Found game: %s\n", *slash ? slash : exe);
+    }
+
+    /* wineserver is never also the game (argv[1] would have to be
+     * both "-w" and a reflex.dll-adjacent X:\...exe path), so these
+     * two flags are mutually exclusive in practice. */
+    is_wineserver = linuwux_proc_comm_is_wineserver();
+    linuwux_set_is_wineserver(is_wineserver);
+
+    /* Only the game (to publish a faketime handshake) and wineserver
+     * (to serve it back out through gettimeofday) ever touch the
+     * prefix-shared faketime state -- see faketime.c. */
+    if (is_game || is_wineserver)
+        linuwux_faketime_prefix_init();
 
     /* Spoof leaves only needed in the game process (CPUID path gated). */
     if (is_game)

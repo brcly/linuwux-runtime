@@ -36,6 +36,21 @@ void linuwux_set_game_process(int is_game)
     g_is_game_process = is_game;
 }
 
+/* wineserver is the process Wine clients route their "current time"
+ * through -- see faketime.c for why that matters. Set once alongside
+ * is_game, never true at the same time as it. */
+static int g_is_wineserver;
+
+void linuwux_set_is_wineserver(int is_wineserver)
+{
+    g_is_wineserver = is_wineserver;
+}
+
+int linuwux_is_wineserver(void)
+{
+    return g_is_wineserver;
+}
+
 int linuwux_is_game_process(void)
 {
     return g_is_game_process;
@@ -44,7 +59,9 @@ int linuwux_is_game_process(void)
 void linuwux_log(const char *fmt, ...)
 {
     va_list ap;
-    if (!g_is_game_process || !getenv("LINUWUX_DEBUG"))
+    /* wineserver now does real, intentional work too (see faketime.c),
+     * so its debug output is worth keeping, same as the game's. */
+    if ((!g_is_game_process && !g_is_wineserver) || !getenv("LINUWUX_DEBUG"))
         return;
     fprintf(stderr, "[linuwux] ");
     va_start(ap, fmt);

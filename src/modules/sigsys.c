@@ -22,7 +22,6 @@
  */
 
 #define _GNU_SOURCE
-#include <stdatomic.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <ucontext.h>
@@ -33,21 +32,25 @@
 
 /* Wine-system RIP helpers: linuwux.h */
 
-/* TEB offset of SUD selector; -1 if unused (seccomp trees). */
-static _Atomic ptrdiff_t g_sud_teb_offset = -1;
-
-void linuwux_sigsys_learn_sud_offset(ptrdiff_t teb_offset)
-{
-    atomic_store(&g_sud_teb_offset, teb_offset);
-}
+/*
+ * Wine amd64 keeps the SUD filter byte at TEB+0x340
+ * (amd64_thread_data.syscall_dispatch). No prctl interpose needed.
+ * ALLOW=0, BLOCK=1; only poke if it already looks like a filter byte
+ * so seccomp-only trees (Proton 10) are left alone.
+ */
+#define LINUWUX_WINE_SUD_TEB_OFFSET 0x340
 
 static void linuwux_rearm_sud(void)
 {
-    ptrdiff_t teb_offset = atomic_load(&g_sud_teb_offset);
-    if (teb_offset < 0)
-        return;
     unsigned char *teb = (unsigned char *)linuwux_get_teb();
-    teb[teb_offset] = 1;  /* BLOCK */
+    unsigned char *sel;
+
+    if (!teb)
+        return;
+
+    sel = teb + LINUWUX_WINE_SUD_TEB_OFFSET;
+    if (*sel == 0 || *sel == 1)
+        *sel = 1;  /* BLOCK before resuming TargetSysHandler */
 }
 
 int linuwux_sigsys_route(ucontext_t *ctx)

@@ -26,7 +26,4 @@
 /* Redirect blocked syscalls into TargetSysHandler after arm. Returns 1 if handled. */
 int linuwux_sigsys_route(ucontext_t *ctx);
 
-/* Learned from prctl(PR_SET_SYSCALL_USER_DISPATCH, ...) in hooks.c. */
-void linuwux_sigsys_learn_sud_offset(ptrdiff_t teb_offset);
-
 #endif /* LINUWUX_SIGSYS_H */
