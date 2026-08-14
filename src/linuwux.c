@@ -55,7 +55,11 @@ static void linuwux_append_override(char *buf, size_t bufsize, const char *entry
         linuwux_log("WINEDLLOVERRIDES: not enough room to append \"%s\" -- skipping\n", entry);
 }
 
-/* is_game: argv[1] Windows path with reflex.dll / reflex64.dll beside it. */
+/*
+ * is_game markers beside the Windows target exe (existence only, never loaded):
+ *   reflex.dll / reflex64.dll  — reflex-loader scene layout
+ *   DenuvOwO.ini               — older winmm-loader layout (no reflex.dll)
+ */
 static int linuwux_dir_has_reflex(const char *dir)
 {
     DIR *d;
@@ -68,7 +72,8 @@ static int linuwux_dir_has_reflex(const char *dir)
 
     while ((ent = readdir(d))) {
         if (!strcasecmp(ent->d_name, "reflex.dll") ||
-            !strcasecmp(ent->d_name, "reflex64.dll")) {
+            !strcasecmp(ent->d_name, "reflex64.dll") ||
+            !strcasecmp(ent->d_name, "DenuvOwO.ini")) {
             found = 1;
             linuwux_log("Found %s\n", ent->d_name);
             break;
