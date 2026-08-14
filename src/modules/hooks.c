@@ -18,8 +18,8 @@
  */
 
 /*
- * linuwux -- sigaction() interposition: installs the SIGSEGV/
- * SIGSYS wrappers, chains to whatever Wine originally registered.
+ * linuwux -- libc interposition: installs the SIGSEGV/SIGSYS wrappers and
+ * chains to whatever Wine originally registered.
  */
 
 #define _GNU_SOURCE
@@ -27,6 +27,7 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <stddef.h>
+#include <string.h>
 #include <sys/syscall.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -38,6 +39,9 @@
 
 typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
 static sigaction_fn real_sigaction;
+static void (*real_free)(void *);
+static _Thread_local int resolving_free;
+static _Thread_local void *last_win32u_free;
 
 /* Only sa_sigaction is chained; store it atomically to avoid torn struct copies. */
 typedef void (*linuwux_sig_handler_fn)(int, siginfo_t *, void *);
@@ -79,6 +83,35 @@ static void linuwux_sigsys_wrapper(int sig, siginfo_t *info, void *uctx)
     if (linuwux_sigsys_route(ctx))
         return;
     linuwux_chain_sigsys(sig, info, uctx);
+}
+
+__attribute__((visibility("default")))
+void free(void *ptr)
+{
+    Dl_info caller_info;
+    void *caller;
+    int from_win32u = 0;
+
+    if (!real_free && !resolving_free) {
+        resolving_free = 1;
+        real_free = (void (*)(void *))dlsym(RTLD_NEXT, "free");
+        resolving_free = 0;
+    }
+
+    caller = __builtin_return_address(0);
+    if (ptr && linuwux_is_game_process() && linuwux_cpuid_legacy_active() &&
+        dladdr(caller, &caller_info) && caller_info.dli_fname &&
+        strstr(caller_info.dli_fname, "/win32u.so"))
+        from_win32u = 1;
+
+    if (from_win32u && last_win32u_free == ptr)
+        return;
+
+    if (from_win32u)
+        last_win32u_free = ptr;
+
+    if (real_free)
+        real_free(ptr);
 }
 
 /* Enable CPUID faults once; TIF_NOCPUID is inherited by new threads on clone. */
@@ -124,4 +157,3 @@ int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
     }
     return real_sigaction(signum, act, oldact);
 }
-

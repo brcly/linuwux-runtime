@@ -31,6 +31,9 @@ void linuwux_detect_cpu_vendor(void);
 /* Handle a CPUID fault. Returns 1 if handled. */
 int linuwux_cpuid_spoof(siginfo_t *info, ucontext_t *ctx);
 
+/* True after a legacy Reflex init leaf selects the compatibility protocol. */
+int linuwux_cpuid_legacy_active(void);
+
 /* TargetSysHandler, set by the arm leaf; 0 == not armed yet. */
 uint64_t linuwux_cpuid_target_sys_handler(void);
 
