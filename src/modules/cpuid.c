@@ -386,8 +386,6 @@ static const struct linuwux_kuser_op kuser_ops_legacy_single[] = {
     KUSER_STORE4(KUSER_NtBuildNumber, 0x00006658),
     KUSER_STORE4(KUSER_NtMajorVersion, 0x0A),
     KUSER_STORE4(KUSER_NtMinorVersion, 0),
-    /* Legacy DenuvOwO.dll waits for the shared cookie before continuing. */
-    KUSER_STORE4(KUSER_CookieMagic,  KUSER_VAL_COOKIE_MAGIC),
 };
 
 static const struct linuwux_kuser_op kuser_ops_legacy_dual[] = {
@@ -414,8 +412,6 @@ static const struct linuwux_kuser_op kuser_ops_legacy_dual[] = {
     KUSER_STORE4(KUSER_SharedDataFlags + 4, 0),
     KUSER_STORE4(KUSER_NtProductType, 0x1),
     KUSER_STORE4(KUSER_NtMinorVersion, 0),
-    /* Keep the DenuvOwO cookie available to the dual-handler layout too. */
-    KUSER_STORE4(KUSER_CookieMagic,  KUSER_VAL_COOKIE_MAGIC),
 };
 
 static const struct linuwux_kuser_profile kuser_profile_legacy_single = {

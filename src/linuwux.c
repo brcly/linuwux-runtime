@@ -58,7 +58,7 @@ static void linuwux_append_override(char *buf, size_t bufsize, const char *entry
 /*
  * is_game markers beside the Windows target exe (existence only, never loaded):
  *   reflex.dll / reflex64.dll  — reflex-loader scene layout
- *   DenuvOwO.ini               — older winmm-loader layout (no reflex.dll)
+ *   DenuvOwO.dll               — DenuvOwO loader layout (no reflex.dll)
  */
 enum linuwux_game_marker {
     LINUWUX_GAME_NONE = 0,
@@ -77,7 +77,7 @@ static int linuwux_dir_game_marker(const char *dir)
         return 0;
 
     while ((ent = readdir(d))) {
-        if (!strcasecmp(ent->d_name, "DenuvOwO.ini")) {
+        if (!strcasecmp(ent->d_name, "DenuvOwO.dll")) {
             marker = LINUWUX_GAME_DENUVOWO;
             linuwux_log("Found %s\n", ent->d_name);
             break;
