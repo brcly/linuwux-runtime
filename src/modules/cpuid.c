@@ -74,7 +74,6 @@ void linuwux_cpuid_hint_denuvowo(void)
     /* DenuvOwO's 0x69696969 leaf is a target marker; its actual
      * 0x336933 handshake uses the modern SimpleSvm trampoline. */
     atomic_store(&g_proto.protocol, LINUWUX_PROTO_MODERN);
-    atomic_store(&g_proto.rax_is_resume, 1);
     linuwux_log("selected DenuvOwO SimpleSvm identity from marker\n");
 }
 
@@ -695,28 +694,15 @@ static const struct linuwux_cpuid_static_leaf cpuid_static_leaves[] = {
         .ecx = &g_spoof_leaf1.ecx, .edx = &g_spoof_leaf1.edx,
     },
     {
-        /* Legacy DenuvOwO expects the SimpleSvm hypervisor identity. */
+        /* Shared across protocols — not identity-sensitive brand strings. */
         .leaf = 0x40000000,
-        .profile = LINUWUX_CPUID_STATIC_LEGACY,
+        .profile = LINUWUX_CPUID_STATIC_ANY,
         .eax = &g_spoof_hypervisor_info.eax, .ebx = &g_spoof_hypervisor_info.ebx,
         .ecx = &g_spoof_hypervisor_info.ecx, .edx = &g_spoof_hypervisor_info.edx,
     },
     {
         .leaf = 0x40000001,
-        .profile = LINUWUX_CPUID_STATIC_LEGACY,
-        .eax = &g_spoof_hypervisor_feat.eax, .ebx = &g_spoof_hypervisor_feat.ebx,
-        .ecx = &g_spoof_hypervisor_feat.ecx, .edx = &g_spoof_hypervisor_feat.edx,
-    },
-    {
-        /* Modern Reflex uses the Hyper-V-compatible identity. */
-        .leaf = 0x40000000,
-        .profile = LINUWUX_CPUID_STATIC_MODERN,
-        .eax = &g_spoof_hypervisor_info.eax, .ebx = &g_spoof_hypervisor_info.ebx,
-        .ecx = &g_spoof_hypervisor_info.ecx, .edx = &g_spoof_hypervisor_info.edx,
-    },
-    {
-        .leaf = 0x40000001,
-        .profile = LINUWUX_CPUID_STATIC_MODERN,
+        .profile = LINUWUX_CPUID_STATIC_ANY,
         .eax = &g_spoof_hypervisor_feat.eax, .ebx = &g_spoof_hypervisor_feat.ebx,
         .ecx = &g_spoof_hypervisor_feat.ecx, .edx = &g_spoof_hypervisor_feat.edx,
     },
