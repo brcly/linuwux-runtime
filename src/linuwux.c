@@ -60,31 +60,39 @@ static void linuwux_append_override(char *buf, size_t bufsize, const char *entry
  *   reflex.dll / reflex64.dll  — reflex-loader scene layout
  *   DenuvOwO.ini               — older winmm-loader layout (no reflex.dll)
  */
-static int linuwux_dir_has_reflex(const char *dir)
+static int linuwux_dir_has_reflex(const char *dir, int *legacy_denuvowo)
 {
     DIR *d;
     struct dirent *ent;
     int found = 0;
+    int legacy = 0;
 
     d = opendir(dir);
     if (!d)
         return 0;
 
     while ((ent = readdir(d))) {
-        if (!strcasecmp(ent->d_name, "reflex.dll") ||
-            !strcasecmp(ent->d_name, "reflex64.dll") ||
-            !strcasecmp(ent->d_name, "DenuvOwO.ini")) {
+        if (!strcasecmp(ent->d_name, "DenuvOwO.ini")) {
             found = 1;
+            legacy = 1;
             linuwux_log("Found %s\n", ent->d_name);
             break;
+        }
+        if (!strcasecmp(ent->d_name, "reflex.dll") ||
+            !strcasecmp(ent->d_name, "reflex64.dll")) {
+            found = 1;
+            linuwux_log("Found %s\n", ent->d_name);
         }
     }
     closedir(d);
 
+    if (legacy_denuvowo)
+        *legacy_denuvowo = legacy;
+
     return found;
 }
 
-static int linuwux_game_dir_has_reflex(const char *argv0)
+static int linuwux_game_dir_has_reflex(const char *argv0, int *legacy_denuvowo)
 {
     const char *prefix;
     char path[PATH_MAX];
@@ -92,6 +100,9 @@ static int linuwux_game_dir_has_reflex(const char *argv0)
     char *slash;
     size_t i;
     int found;
+
+    if (legacy_denuvowo)
+        *legacy_denuvowo = 0;
 
     if (!argv0 || !argv0[0] || argv0[1] != ':')
         return 0;
@@ -123,7 +134,7 @@ static int linuwux_game_dir_has_reflex(const char *argv0)
         return 0;
     *slash = '\0';
 
-    found = linuwux_dir_has_reflex(path);
+    found = linuwux_dir_has_reflex(path, legacy_denuvowo);
     return found;
 }
 
@@ -156,12 +167,13 @@ static void linuwux_init(int argc, char **argv, char **envp)
 {
     char overrides[4096];
     const char *existing;
-    int n, is_game, is_wineserver;
+    int n, is_game, is_wineserver, legacy_denuvowo;
 
     (void)envp;
 
     /* Wine: argv[0] is the loader; argv[1] is the Windows target path. */
-    is_game = linuwux_game_dir_has_reflex(argc > 1 ? argv[1] : NULL);
+    is_game = linuwux_game_dir_has_reflex(argc > 1 ? argv[1] : NULL,
+                                          &legacy_denuvowo);
     linuwux_set_game_process(is_game);
     if (is_game && argc > 1 && argv[1]) {
         const char *exe = argv[1];
@@ -185,8 +197,11 @@ static void linuwux_init(int argc, char **argv, char **envp)
         linuwux_faketime_prefix_init();
 
     /* Spoof leaves only needed in the game process (CPUID path gated). */
-    if (is_game)
+    if (is_game) {
+        if (legacy_denuvowo)
+            linuwux_cpuid_hint_denuvowo();
         linuwux_detect_cpu_vendor();
+    }
 
     /* Overrides only in the game process (Wine reads env at PE load). */
     if (is_game) {

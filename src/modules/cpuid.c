@@ -66,6 +66,18 @@ static struct linuwux_protocol_state g_proto = {
     .full_id = 0xffffffffu,
 };
 
+void linuwux_cpuid_hint_denuvowo(void)
+{
+    if (atomic_load(&g_proto.protocol) != LINUWUX_PROTO_NONE)
+        return;
+
+    /* DenuvOwO's 0x69696969 leaf is a target marker; its actual
+     * 0x336933 handshake uses the modern SimpleSvm trampoline. */
+    atomic_store(&g_proto.protocol, LINUWUX_PROTO_MODERN);
+    atomic_store(&g_proto.rax_is_resume, 1);
+    linuwux_log("selected DenuvOwO SimpleSvm identity from marker\n");
+}
+
 /* Spoofed CPUID identity, filled once in the constructor. */
 struct linuwux_cpuid_regs {
     unsigned int eax, ebx, ecx, edx;
@@ -375,6 +387,8 @@ static const struct linuwux_kuser_op kuser_ops_legacy_single[] = {
     KUSER_STORE4(KUSER_NtBuildNumber, 0x00006658),
     KUSER_STORE4(KUSER_NtMajorVersion, 0x0A),
     KUSER_STORE4(KUSER_NtMinorVersion, 0),
+    /* Legacy DenuvOwO.dll waits for the shared cookie before continuing. */
+    KUSER_STORE4(KUSER_CookieMagic,  KUSER_VAL_COOKIE_MAGIC),
 };
 
 static const struct linuwux_kuser_op kuser_ops_legacy_dual[] = {
@@ -401,6 +415,8 @@ static const struct linuwux_kuser_op kuser_ops_legacy_dual[] = {
     KUSER_STORE4(KUSER_SharedDataFlags + 4, 0),
     KUSER_STORE4(KUSER_NtProductType, 0x1),
     KUSER_STORE4(KUSER_NtMinorVersion, 0),
+    /* Keep the DenuvOwO cookie available to the dual-handler layout too. */
+    KUSER_STORE4(KUSER_CookieMagic,  KUSER_VAL_COOKIE_MAGIC),
 };
 
 static const struct linuwux_kuser_profile kuser_profile_legacy_single = {
@@ -679,15 +695,28 @@ static const struct linuwux_cpuid_static_leaf cpuid_static_leaves[] = {
         .ecx = &g_spoof_leaf1.ecx, .edx = &g_spoof_leaf1.edx,
     },
     {
-        /* Shared across protocols — not identity-sensitive brand strings. */
+        /* Legacy DenuvOwO expects the SimpleSvm hypervisor identity. */
         .leaf = 0x40000000,
-        .profile = LINUWUX_CPUID_STATIC_ANY,
+        .profile = LINUWUX_CPUID_STATIC_LEGACY,
         .eax = &g_spoof_hypervisor_info.eax, .ebx = &g_spoof_hypervisor_info.ebx,
         .ecx = &g_spoof_hypervisor_info.ecx, .edx = &g_spoof_hypervisor_info.edx,
     },
     {
         .leaf = 0x40000001,
-        .profile = LINUWUX_CPUID_STATIC_ANY,
+        .profile = LINUWUX_CPUID_STATIC_LEGACY,
+        .eax = &g_spoof_hypervisor_feat.eax, .ebx = &g_spoof_hypervisor_feat.ebx,
+        .ecx = &g_spoof_hypervisor_feat.ecx, .edx = &g_spoof_hypervisor_feat.edx,
+    },
+    {
+        /* Modern Reflex uses the Hyper-V-compatible identity. */
+        .leaf = 0x40000000,
+        .profile = LINUWUX_CPUID_STATIC_MODERN,
+        .eax = &g_spoof_hypervisor_info.eax, .ebx = &g_spoof_hypervisor_info.ebx,
+        .ecx = &g_spoof_hypervisor_info.ecx, .edx = &g_spoof_hypervisor_info.edx,
+    },
+    {
+        .leaf = 0x40000001,
+        .profile = LINUWUX_CPUID_STATIC_MODERN,
         .eax = &g_spoof_hypervisor_feat.eax, .ebx = &g_spoof_hypervisor_feat.ebx,
         .ecx = &g_spoof_hypervisor_feat.ecx, .edx = &g_spoof_hypervisor_feat.edx,
     },

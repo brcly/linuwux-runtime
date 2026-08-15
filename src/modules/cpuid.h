@@ -28,6 +28,9 @@
  * Must run in the constructor, before any other thread exists. */
 void linuwux_detect_cpu_vendor(void);
 
+/* Select the DenuvOwO SimpleSvm identity before its early CPUID checks. */
+void linuwux_cpuid_hint_denuvowo(void);
+
 /* Handle a CPUID fault. Returns 1 if handled. */
 int linuwux_cpuid_spoof(siginfo_t *info, ucontext_t *ctx);
 
