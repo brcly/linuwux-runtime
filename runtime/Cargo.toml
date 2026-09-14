@@ -1,0 +1,30 @@
+[package]
+name = "linuwux-runtime"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Linux x86_64 runtime for the LinUwUx Rust migration"
+license-file = "../LICENSE"
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[features]
+default = ["cpuid", "hooks", "reflex", "syscall", "kuser", "faketime", "gamescope", "debug", "environment"]
+cpuid = []
+hooks = []
+reflex = []
+syscall = []
+kuser = []
+faketime = ["kuser"]
+gamescope = []
+debug = []
+environment = []
+
+[dependencies]
+linuwux = { package = "linuwux-rust", path = ".." }
+libc = "0.2"
+
+[lints]
+workspace = true

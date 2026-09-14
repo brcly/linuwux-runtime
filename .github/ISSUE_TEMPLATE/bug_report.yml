@@ -1,0 +1,118 @@
+name: Bug report
+description: Report a game, launcher, compatibility, or runtime problem
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please complete every required field and attach the requested logs. Reports without enough diagnostic information may not be actionable.
+
+        To create a LinUwUx log in Steam, add `LINUWUX_DEBUG=1 LINUWUX_LOG=/tmp/linuwux.log` before the existing launch options. For example: `LINUWUX_DEBUG=1 LINUWUX_LOG=/tmp/linuwux.log linuwux %command%`.
+
+        In another launcher, add `LINUWUX_DEBUG=1` and `LINUWUX_LOG=/tmp/linuwux.log` through its environment or launch-arguments settings.
+
+        Add `PROTON_LOG=1` to the same launch options to create Steam's `steam-APPID.log` in your home directory. Other launchers provide their own output or log viewer.
+
+        Review files for account details, tokens, email addresses, and personal paths before uploading them.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing open and closed issues for this problem.
+          required: true
+        - label: I tested the game without LinUwUx and recorded the result below.
+          required: true
+        - label: I reviewed the attached logs and removed private or sensitive information.
+          required: true
+
+  - type: input
+    id: summary
+    attributes:
+      label: Problem summary
+      description: Describe the failure in one sentence.
+      placeholder: The game exits during startup when launched through Lutris with Gamescope enabled.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Game and system information
+      description: Include every item listed in the placeholder.
+      placeholder: |
+        Game and store:
+        LinUwUx version, release tag, or installed library SHA-256:
+        Installation method:
+        Launcher and launcher version:
+        Proton/Wine name and version:
+        Linux distribution:
+        Kernel version (`uname -r`):
+        Kernel command line (`cat /proc/cmdline`):
+        UMIP and CPUID fault flags (`grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(umip|cpuid_fault)$'`):
+        CPUID emulation DKMS status, if required (`dkms status`):
+        CPUID emulation module status, if required (`lsmod | grep -w cpuid_fault_emulation`):
+        glibc version (`ldd --version`):
+        CPU:
+        GPU and driver:
+    validations:
+      required: true
+
+  - type: textarea
+    id: launch_configuration
+    attributes:
+      label: Exact launch configuration
+      description: Paste the complete launch options, command prefix, relevant environment variables, and any Gamescope, MangoHud, or GameMode settings. State whether the launcher is native, Flatpak, or another container format.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the shortest reliable sequence from launching the game to observing the problem.
+      placeholder: |
+        1. Select the game in the launcher.
+        2. Start it with the configuration above.
+        3. Observe the error before the game window appears.
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      placeholder: |
+        Expected:
+        Actual:
+        Exact error message:
+    validations:
+      required: true
+
+  - type: textarea
+    id: linuwux_log
+    attributes:
+      label: LinUwUx debug log
+      description: Drag `/tmp/linuwux.log` into this field. If GitHub rejects the extension, rename it to `.txt` or place it in a zip archive. If no file was created, write `Log was not created` and explain where startup stopped.
+      placeholder: Drag the LinUwUx log file here; do not paste only the last few lines.
+    validations:
+      required: true
+
+  - type: textarea
+    id: runner_log
+    attributes:
+      label: Proton or launcher log
+      description: Drag the complete `steam-APPID.log`, Lutris output, Faugus log, UMU log, or equivalent launcher output into this field. Rename it to `.txt` or compress it if necessary. If unavailable, explain why.
+      placeholder: Drag the complete Proton or launcher log here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add screenshots, regression details, other launchers tested, or anything else that may help.

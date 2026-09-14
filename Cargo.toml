@@ -1,0 +1,33 @@
+[package]
+name = "linuwux-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Rust preload runtime and safe protocol core for LinUwUx"
+license-file = "LICENSE"
+publish = false
+
+[workspace]
+members = ["runtime", "xtask"]
+default-members = [".", "runtime"]
+resolver = "3"
+
+[workspace.package]
+rust-version = "1.98"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[lib]
+name = "linuwux"
+path = "src/lib.rs"
+
+[workspace.lints.rust]
+missing_docs = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints]
+workspace = true
