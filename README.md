@@ -1,3 +1,5 @@
+![LinUwUx terminal banner](.github/assets/linuwux-banner.png)
+
 # LinUwUx
 
 LinUwUx is a small Linux compatibility runtime for Windows games running through
@@ -226,6 +228,21 @@ performance regressions.
 ## License
 
 LinUwUx is distributed under the terms in [LICENSE](LICENSE).
+
+## Star History
+
+<a href="https://star-history.com/#brcly/linuwux-runtime&Date">
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset="https://api.star-history.com/svg?repos=brcly/linuwux-runtime&type=Date&theme=dark"
+    >
+    <img
+      alt="LinUwUx star history"
+      src="https://api.star-history.com/svg?repos=brcly/linuwux-runtime&type=Date"
+    >
+  </picture>
+</a>
 
 ## Credits
 
