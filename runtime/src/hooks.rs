@@ -56,6 +56,8 @@ extern "C" fn after_fork() {
     SIGNAL_UPDATE_LOCK.store(false, Ordering::Release);
     SIGSEGV_SLOT.readers.store(0, Ordering::SeqCst);
     SIGSYS_SLOT.readers.store(0, Ordering::SeqCst);
+    #[cfg(feature = "reflex")]
+    crate::registry::after_fork();
 }
 
 unsafe extern "C" {
@@ -72,6 +74,15 @@ fn errno() -> c_int {
 
 fn set_errno(value: c_int) {
     unsafe { *libc::__errno_location() = value };
+}
+
+fn denuvowo_process() -> bool {
+    #[cfg(feature = "environment")]
+    {
+        crate::environment::denuvowo_process()
+    }
+    #[cfg(not(feature = "environment"))]
+    false
 }
 
 fn yield_thread() {
@@ -300,6 +311,8 @@ unsafe fn install_bridge(
         unsafe { ptr::copy_nonoverlapping(previous.as_ptr(), oldact, 1) };
     }
     if sig == libc::SIGSEGV {
+        #[cfg(feature = "reflex")]
+        crate::registry::setup_registry_worker();
         if first_install {
             unsafe {
                 detect_cpu_vendor();
@@ -339,7 +352,10 @@ pub unsafe extern "C" fn sigaction(
     let Some(_guard) = UpdateGuard::acquire() else {
         return -1;
     };
-    if !slot.owned.load(Ordering::Acquire) && !unsafe { handler_is_from_wine_ntdll(act) } {
+    if !slot.owned.load(Ordering::Acquire)
+        && !denuvowo_process()
+        && !unsafe { handler_is_from_wine_ntdll(act) }
+    {
         unsafe { real(signum, act, oldact) }
     } else {
         unsafe { install_bridge(slot, signum, act, oldact, real) }

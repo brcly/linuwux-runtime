@@ -13,6 +13,7 @@ unsafe extern "C" {
     fn debug_log(message: *const c_char);
     fn forward_signal(sig: c_int, info: *mut siginfo_t, context: *mut c_void);
     fn reflex_handle_cpuid(leaf: u32, value: u64) -> c_int;
+    fn reflex_modern_identity_unarmed() -> c_int;
 }
 
 fn native_cpuid(leaf: u32, subleaf: u32) -> Registers {
@@ -23,6 +24,14 @@ fn native_cpuid(leaf: u32, subleaf: u32) -> Registers {
         ecx: result.ecx,
         edx: result.edx,
     }
+}
+
+fn fixed_reply(leaf: u32) -> Option<Registers> {
+    let mut reply = ACTIVE_PROFILE.fixed_reply(leaf)?;
+    if leaf == 1 && unsafe { reflex_modern_identity_unarmed() } != 0 {
+        reply.ecx |= 1 << 31;
+    }
+    Some(reply)
 }
 
 #[unsafe(no_mangle)]
@@ -45,7 +54,7 @@ pub unsafe extern "C" fn cpuid_get_fixed_reply(leaf: u32, result: *mut Registers
     if result.is_null() {
         return 0;
     }
-    let reply = ACTIVE_PROFILE.fixed_reply(leaf);
+    let reply = fixed_reply(leaf);
     unsafe { result.write(reply.unwrap_or_default()) };
     c_int::from(reply.is_some())
 }
@@ -152,7 +161,7 @@ pub unsafe extern "C" fn cpuid_sigsegv_handler(
     let reply = if !redirect_all() && is_wine_system_rip(rip as u64) {
         native_reply(leaf, control as u32)
     } else {
-        match ACTIVE_PROFILE.fixed_reply(leaf) {
+        match fixed_reply(leaf) {
             Some(reply) => reply,
             None => {
                 if unsafe { reflex_handle_cpuid(leaf, control) } == REFLEX_CPUID_CONSUMED {

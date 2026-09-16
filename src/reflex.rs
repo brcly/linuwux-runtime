@@ -1,7 +1,7 @@
 use core::ffi::CStr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-pub const REGISTER_TARGET: u32 = 0x0033_6933;
+pub const ARM_TARGET: u32 = 0x0033_6933;
 pub const SET_TIME: u32 = 0x0033_6967;
 pub const LEGACY_QUERY_SYSTEM_ID: u32 = 0x0033_6943;
 pub const LEGACY_QUERY_ATTRIBUTES_TARGET: u32 = 0x0033_6934;
@@ -78,6 +78,10 @@ impl State {
         }
     }
 
+    pub fn modern_identity_unarmed(&self) -> bool {
+        self.protocol() != Protocol::Legacy && self.modern_target.load(Ordering::Acquire) == 0
+    }
+
     fn log_control(host: &impl Host, leaf: u32, argument: u64) {
         host.log_hex(c"reflex control leaf=", u64::from(leaf));
         host.log_hex(c"reflex control argument=", argument);
@@ -141,6 +145,10 @@ impl State {
                     return true;
                 }
                 PROTOCOL_MODERN => {
+                    if !host.patch_kuser(KuserProfile::Modern) {
+                        host.log(c"reflex KUSER patch failed");
+                        return false;
+                    }
                     self.modern_target.store(target, Ordering::Release);
                     self.active_legacy_target.store(target, Ordering::Release);
                     host.log(c"reflex protocol=modern registered");
@@ -179,6 +187,21 @@ impl State {
         true
     }
 
+    pub fn hint_denuvowo(&self, host: &impl Host) {
+        if self
+            .protocol
+            .compare_exchange(
+                PROTOCOL_UNREGISTERED,
+                PROTOCOL_MODERN,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            host.log(c"reflex protocol=DenuvOwO enabled");
+        }
+    }
+
     pub fn handle_cpuid(&self, leaf: u32, argument: u64, host: &impl Host) -> Action {
         if leaf == KUSER_PROBE && self.protocol() != Protocol::Unregistered {
             Self::log_control(host, leaf, argument);
@@ -187,11 +210,14 @@ impl State {
         match leaf {
             LEGACY_INIT => {
                 Self::log_control(host, leaf, argument);
-                if self.protocol() != Protocol::Modern && !self.activate_legacy(host) {
+                if self.protocol() == Protocol::Modern {
+                    return Action::Native;
+                }
+                if !self.activate_legacy(host) {
                     return Action::Native;
                 }
             }
-            REGISTER_TARGET => {
+            ARM_TARGET => {
                 Self::log_control(host, leaf, argument);
                 host.set_hwprofile_guid();
                 if !self.register_modern(argument, host) {

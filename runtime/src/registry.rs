@@ -22,6 +22,11 @@ const FUTEX_WAKE_PRIVATE: c_int = 129;
 static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static REQUEST: AtomicU32 = AtomicU32::new(REQUEST_IDLE);
 
+pub(crate) fn after_fork() {
+    WORKER_STARTED.store(false, Ordering::Release);
+    REQUEST.store(REQUEST_IDLE, Ordering::Release);
+}
+
 #[repr(C)]
 struct UnicodeString {
     length: u16,
@@ -89,6 +94,15 @@ fn log(message: &'static CStr) {
     unsafe { debug_log(message.as_ptr()) };
 }
 
+fn denuvowo_process() -> bool {
+    #[cfg(feature = "environment")]
+    {
+        crate::environment::denuvowo_process()
+    }
+    #[cfg(not(feature = "environment"))]
+    false
+}
+
 fn write_hwprofile_guid() {
     let handle = find_ntdll_handle();
     if handle.is_null() {
@@ -114,7 +128,7 @@ fn write_hwprofile_guid() {
     unsafe { write_hwprofile_value(set_value, close, key) };
 }
 
-unsafe fn futex_wait(expected: u32) {
+unsafe fn futex_wait(expected: u32, timeout: *const libc::timespec) {
     let address = ptr::addr_of!(REQUEST).cast::<u32>().cast_mut();
     unsafe {
         libc::syscall(
@@ -122,7 +136,7 @@ unsafe fn futex_wait(expected: u32) {
             address,
             FUTEX_WAIT_PRIVATE,
             expected,
-            ptr::null::<libc::timespec>(),
+            timeout,
             0,
             0,
         );
@@ -143,7 +157,7 @@ extern "C" fn registry_worker(_: *mut c_void) -> u32 {
             return 0;
         }
         if state != REQUEST_PENDING {
-            unsafe { futex_wait(state) };
+            unsafe { futex_wait(state, ptr::null()) };
             continue;
         }
         if REQUEST
@@ -165,6 +179,9 @@ extern "C" fn registry_worker(_: *mut c_void) -> u32 {
 }
 
 pub(crate) extern "C" fn setup_registry_worker() {
+    if !denuvowo_process() || WORKER_STARTED.load(Ordering::Acquire) {
+        return;
+    }
     let handle = find_ntdll_handle();
     if handle.is_null() {
         log(c"hwprofile_guid: ntdll.so not loaded; registry worker unavailable");
@@ -199,14 +216,14 @@ pub(crate) extern "C" fn setup_registry_worker() {
         log(c"hwprofile_guid: registry worker could not start");
         return;
     }
+    WORKER_STARTED.store(true, Ordering::Release);
     unsafe {
         close(thread);
     }
-    WORKER_STARTED.store(true, Ordering::Release);
 }
 
 pub(crate) fn set_hwprofile_guid() {
-    if !WORKER_STARTED.load(Ordering::Acquire) {
+    if !denuvowo_process() || !WORKER_STARTED.load(Ordering::Acquire) {
         return;
     }
     if REQUEST
@@ -220,11 +237,23 @@ pub(crate) fn set_hwprofile_guid() {
     {
         unsafe { futex_wake() };
     }
+    let timeout = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 10_000_000,
+    };
+    for _ in 0..200 {
+        match REQUEST.load(Ordering::Acquire) {
+            REQUEST_DONE => return,
+            REQUEST_PENDING | REQUEST_RUNNING => {
+                let state = REQUEST.load(Ordering::Acquire);
+                if state == REQUEST_PENDING || state == REQUEST_RUNNING {
+                    unsafe { futex_wait(state, &timeout) };
+                }
+            }
+            _ => return,
+        }
+    }
 }
-
-#[used]
-#[cfg_attr(not(test), unsafe(link_section = ".init_array.00205"))]
-static INITIALIZE: extern "C" fn() = setup_registry_worker;
 
 fn resolve_symbol(handle: *mut c_void, name: &'static CStr) -> Option<*mut c_void> {
     let raw = unsafe { libc::dlsym(handle, name.as_ptr()) };
@@ -282,7 +311,38 @@ fn loaded_ntdll_path(out: &mut [u8]) -> Option<usize> {
     unsafe {
         libc::dl_iterate_phdr(Some(visit), (&mut search as *mut Search).cast());
     }
-    (search.length > 0).then_some(search.length)
+    if search.length > 0 {
+        return Some(search.length);
+    }
+
+    let file = unsafe { libc::fopen(c"/proc/self/maps".as_ptr(), c"r".as_ptr()) };
+    if file.is_null() {
+        return None;
+    }
+    let mut line = [0u8; 4096];
+    while unsafe { !libc::fgets(line.as_mut_ptr().cast(), line.len() as c_int, file).is_null() } {
+        let bytes = unsafe { CStr::from_ptr(line.as_ptr().cast()) }.to_bytes();
+        let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+        let mut start = 0;
+        while let Some(offset) = bytes[start..].iter().position(|&byte| byte == b'/') {
+            start += offset;
+            let candidate = &bytes[start..];
+            if candidate.ends_with(b"/ntdll.so") && candidate.len() < out.len() {
+                unsafe {
+                    ptr::copy_nonoverlapping(candidate.as_ptr(), out.as_mut_ptr(), candidate.len());
+                }
+                unsafe { *out.as_mut_ptr().add(candidate.len()) = 0 };
+                unsafe { libc::fclose(file) };
+                return Some(candidate.len());
+            }
+            start += 1;
+            if start >= bytes.len() {
+                break;
+            }
+        }
+    }
+    unsafe { libc::fclose(file) };
+    None
 }
 
 fn utf16_string(ascii: &[u8], buffer: &mut [u16], string: &mut UnicodeString) -> bool {

@@ -164,6 +164,7 @@ LinUwUx needs no extra variables by default.
 | Variable | Behaviour |
 | --- | --- |
 | `PROTON_AVX=1` | Enables AVX flags for the modern profile |
+| `LINUWUX_DENUVOWODLL=1` | Experimental: enables native DenuvOwO.dll loading; protocol support activates only for a target game directory containing the DLL |
 | `LINUWUX_DEBUG=1` | Enables runtime diagnostics |
 | `LINUWUX_LOG=/absolute/path.log` | Writes diagnostics to a private `0600` file |
 

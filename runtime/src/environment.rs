@@ -1,6 +1,15 @@
-use core::ffi::{CStr, c_char};
+use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 use linuwux::environment::{OVERRIDES, already_present, override_capacity};
+
+const DENUVOWO_ENV: &CStr = c"LINUWUX_DENUVOWODLL";
+const DENUVOWO_DLL: &CStr = c"DenuvOwO";
+static DENUVOWO_PROCESS: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn denuvowo_process() -> bool {
+    DENUVOWO_PROCESS.load(Ordering::Acquire)
+}
 
 unsafe fn add_override(dll: &CStr) {
     let pointer = unsafe { libc::getenv(c"WINEDLLOVERRIDES".as_ptr()) };
@@ -46,19 +55,126 @@ unsafe fn fill_override(output: *mut c_char, existing: Option<&CStr>, dll: &CStr
     }
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn linuwux_setup_environment() {
+unsafe fn denuvowo_enabled() -> bool {
+    let value = unsafe { libc::getenv(DENUVOWO_ENV.as_ptr()) };
+    !value.is_null() && unsafe { CStr::from_ptr(value) }.to_bytes() == b"1"
+}
+
+unsafe fn denuvowo_dll_in_directory(argc: c_int, argv: *const *const c_char) -> bool {
+    if argc < 2 || argv.is_null() {
+        return false;
+    }
+    let mut executable = ptr::null();
+    for index in 0..argc as usize {
+        let candidate = unsafe { *argv.add(index) };
+        if candidate.is_null() {
+            continue;
+        }
+        let bytes = unsafe { CStr::from_ptr(candidate) }.to_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' {
+            executable = candidate;
+            break;
+        }
+    }
+    if executable.is_null() {
+        return false;
+    }
+    let executable = unsafe { CStr::from_ptr(executable) }.to_bytes();
+    let prefix = unsafe { libc::getenv(c"WINEPREFIX".as_ptr()) };
+    let mut path = [0u8; libc::PATH_MAX as usize];
+    let mut length;
+    if executable[0].eq_ignore_ascii_case(&b'z') {
+        let source = &executable[2..];
+        if source.len() >= path.len() {
+            return false;
+        }
+        path[..source.len()].copy_from_slice(source);
+        length = source.len();
+    } else {
+        let Some(prefix) =
+            (!prefix.is_null()).then(|| unsafe { CStr::from_ptr(prefix) }.to_bytes())
+        else {
+            return false;
+        };
+        let drive = executable[0].to_ascii_lowercase();
+        let rest = &executable[2..];
+        let Some(required) = prefix
+            .len()
+            .checked_add(14)
+            .and_then(|length| length.checked_add(rest.len()))
+        else {
+            return false;
+        };
+        if required >= path.len() {
+            return false;
+        }
+        path[..prefix.len()].copy_from_slice(prefix);
+        length = prefix.len();
+        path[length..length + 12].copy_from_slice(b"/dosdevices/");
+        length += 12;
+        path[length] = drive;
+        length += 1;
+        path[length] = b':';
+        length += 1;
+        path[length..length + rest.len()].copy_from_slice(rest);
+        length += rest.len();
+    }
+    for byte in &mut path[..length] {
+        if *byte == b'\\' {
+            *byte = b'/';
+        }
+    }
+    let Some(slash) = path[..length].iter().rposition(|&byte| byte == b'/') else {
+        return false;
+    };
+    length = slash + 1;
+    let marker = b"DenuvOwO.dll\0";
+    if length
+        .checked_add(marker.len())
+        .is_none_or(|end| end > path.len())
+    {
+        return false;
+    }
+    path[length..length + marker.len()].copy_from_slice(marker);
+    unsafe { libc::access(path.as_ptr().cast(), libc::F_OK) == 0 }
+}
+
+unsafe fn hint_denuvowo() {
+    #[cfg(feature = "reflex")]
+    unsafe extern "C" {
+        fn reflex_hint_denuvowo();
+    }
+    #[cfg(feature = "reflex")]
     unsafe {
-        if !libc::getenv(c"LinUwUx".as_ptr()).is_null() {
-            return;
+        reflex_hint_denuvowo();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn linuwux_setup_environment(
+    argc: c_int,
+    argv: *const *const c_char,
+    _envp: *const *const c_char,
+) {
+    unsafe {
+        let denuvowo_enabled = denuvowo_enabled();
+        let denuvowo_process = denuvowo_enabled && denuvowo_dll_in_directory(argc, argv);
+        DENUVOWO_PROCESS.store(denuvowo_process, Ordering::Release);
+        if libc::getenv(c"LinUwUx".as_ptr()).is_null() {
+            libc::setenv(c"LinUwUx".as_ptr(), c"1".as_ptr(), 0);
+            let value = libc::getenv(c"PROTON_DISABLE_LSTEAMCLIENT".as_ptr());
+            if value.is_null() || value.read() == 0 {
+                libc::setenv(c"PROTON_DISABLE_LSTEAMCLIENT".as_ptr(), c"1".as_ptr(), 0);
+            }
+            for dll in OVERRIDES {
+                add_override(dll);
+            }
         }
-        libc::setenv(c"LinUwUx".as_ptr(), c"1".as_ptr(), 0);
-        let value = libc::getenv(c"PROTON_DISABLE_LSTEAMCLIENT".as_ptr());
-        if value.is_null() || value.read() == 0 {
-            libc::setenv(c"PROTON_DISABLE_LSTEAMCLIENT".as_ptr(), c"1".as_ptr(), 0);
+        if denuvowo_enabled {
+            add_override(DENUVOWO_DLL);
         }
-        for dll in OVERRIDES {
-            add_override(dll);
+        if denuvowo_process {
+            hint_denuvowo();
         }
     }
 }
@@ -66,4 +182,5 @@ pub unsafe extern "C" fn linuwux_setup_environment() {
 #[cfg(not(test))]
 #[used]
 #[unsafe(link_section = ".init_array.00201")]
-static INITIALIZE: unsafe extern "C" fn() = linuwux_setup_environment;
+static INITIALIZE: unsafe extern "C" fn(c_int, *const *const c_char, *const *const c_char) =
+    linuwux_setup_environment;

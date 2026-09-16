@@ -41,6 +41,16 @@ pub extern "C" fn reflex_handle_cpuid(leaf: u32, argument: u64) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn reflex_hint_denuvowo() {
+    REFLEX_STATE.hint_denuvowo(&RuntimeHost);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn reflex_modern_identity_unarmed() -> c_int {
+    c_int::from(REFLEX_STATE.modern_identity_unarmed())
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn reflex_route_syscall(
     context: *const ucontext_t,
     target: *mut u64,
