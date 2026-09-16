@@ -25,6 +25,7 @@ impl Host for RuntimeHost {
         unsafe { patch_kuser_shared_data_profile(profile as c_int) == 0 }
     }
     fn set_hwprofile_guid(&self) {
+        #[cfg(feature = "hooks")]
         crate::registry::set_hwprofile_guid();
     }
     fn log(&self, message: &'static CStr) {

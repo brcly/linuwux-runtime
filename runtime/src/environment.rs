@@ -7,6 +7,7 @@ const DENUVOWO_ENV: &CStr = c"LINUWUX_DENUVOWODLL";
 const DENUVOWO_DLL: &CStr = c"DenuvOwO";
 static DENUVOWO_PROCESS: AtomicBool = AtomicBool::new(false);
 
+#[cfg(all(feature = "reflex", feature = "hooks"))]
 pub(crate) fn denuvowo_process() -> bool {
     DENUVOWO_PROCESS.load(Ordering::Acquire)
 }

@@ -42,7 +42,7 @@ pub mod hooks;
 pub mod kuser;
 #[cfg(feature = "reflex")]
 pub mod reflex;
-#[cfg(feature = "reflex")]
+#[cfg(all(feature = "reflex", feature = "hooks"))]
 pub mod registry;
 #[cfg(feature = "syscall")]
 pub mod syscall;
