@@ -13,6 +13,11 @@ jobs:
       - run: rustup toolchain install stable --profile minimal
       - run: cargo xtask build
       - run: readelf -W --version-info target/runtime/LinUwUx.so
-      - run: gh release create "$GITHUB_REF_NAME" target/runtime/LinUwUx.so --title "$GITHUB_REF_NAME" --generate-notes
+      - run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" target/runtime/LinUwUx.so --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" target/runtime/LinUwUx.so --title "$GITHUB_REF_NAME" --generate-notes
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
