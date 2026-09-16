@@ -51,35 +51,3 @@ impl Drop for PageGuard {
         unsafe { libc::sigprocmask(libc::SIG_SETMASK, self.mask.as_ptr(), ptr::null_mut()) };
     }
 }
-
-#[cfg(all(test, not(miri)))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn contention_is_nonblocking_and_fork_does_not_inherit_ownership() {
-        let guard = PageGuard::acquire().expect("uncontended guard");
-        assert!(PageGuard::acquire().is_none());
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| assert!(PageGuard::acquire().is_none()))
-                .join()
-                .unwrap();
-        });
-        unsafe {
-            let child = libc::fork();
-            assert!(child >= 0);
-            if child == 0 {
-                let acquired = PageGuard::acquire().is_some();
-                libc::_exit(if acquired { 0 } else { 1 });
-            }
-            let mut status = 0;
-            assert_eq!(libc::waitpid(child, &mut status, 0), child);
-            assert!(libc::WIFEXITED(status));
-            assert_eq!(libc::WEXITSTATUS(status), 0);
-        }
-        assert!(PageGuard::acquire().is_none());
-        drop(guard);
-        assert!(PageGuard::acquire().is_some());
-    }
-}

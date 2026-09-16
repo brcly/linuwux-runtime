@@ -165,6 +165,17 @@ pub fn proton_avx_enabled(value: Option<&[u8]>) -> bool {
     value == Some(b"1".as_slice())
 }
 
+pub fn redirect_all_enabled(value: Option<&[u8]>) -> bool {
+    value == Some(b"1".as_slice())
+}
+
+const WINE_SYSTEM_RIP_MIN: u64 = 0x0000_6fff_ff00_0000;
+const WINE_SYSTEM_RIP_MAX: u64 = 0x0000_7000_0000_0000;
+
+pub fn is_wine_system_rip(address: u64) -> bool {
+    (WINE_SYSTEM_RIP_MIN..WINE_SYSTEM_RIP_MAX).contains(&address)
+}
+
 #[derive(Debug)]
 pub struct ActiveProfile {
     raw_profile: AtomicU32,

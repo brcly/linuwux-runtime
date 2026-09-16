@@ -1,6 +1,6 @@
 [package]
 name = "linuwux-runtime"
-version = "0.1.0"
+version = "26.9.16"
 edition = "2024"
 rust-version.workspace = true
 description = "Linux x86_64 runtime for the LinUwUx Rust migration"

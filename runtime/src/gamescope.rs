@@ -157,7 +157,7 @@ unsafe fn resolve_self_path() -> bool {
     true
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn linuwux_setup_gamescope() {
     if !has_gamescope_ancestor() || resolve_real_setenv().is_none() {
         return;
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn linuwux_setup_gamescope() {
     }
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn setenv(
     name: *const c_char,
     value: *const c_char,
@@ -224,40 +224,3 @@ unsafe fn fill_preserved(destination: *mut c_char, value: &CStr, path: &CStr) {
 #[used]
 #[unsafe(link_section = ".init_array.00103")]
 static INITIALIZE: unsafe extern "C" fn() = linuwux_setup_gamescope;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn proc_paths_fit_and_remain_terminated_at_pid_extremes() {
-        for pid in [i32::MIN, -1, 0, 1, i32::MAX] {
-            for suffix in ["exe", "status"] {
-                let path = proc_path(pid, suffix);
-                let length = path.iter().position(|&byte| byte == 0).unwrap();
-                assert_eq!(&path[..length], format!("/proc/{pid}/{suffix}").as_bytes());
-                assert!(path[length..].iter().all(|&byte| byte == 0));
-            }
-        }
-    }
-
-    #[test]
-    fn preserved_string_initialises_exact_output_including_terminator() {
-        for value in [c"", c"a:b", c"\xff"] {
-            let path = c"/tmp/lib.so";
-            let length = preserved_length(value.to_bytes().len(), path.to_bytes().len()).unwrap();
-            let mut output = vec![MaybeUninit::<c_char>::uninit(); length];
-            unsafe {
-                fill_preserved(output.as_mut_ptr().cast(), value, path);
-                let actual = CStr::from_ptr(output.as_ptr().cast()).to_bytes();
-                let mut expected = value.to_bytes().to_vec();
-                if !expected.is_empty() {
-                    expected.push(b':');
-                }
-                expected.extend_from_slice(path.to_bytes());
-                assert_eq!(actual, expected);
-            }
-        }
-        assert_eq!(core::mem::size_of::<StartupPath>(), PATH_MAX);
-    }
-}

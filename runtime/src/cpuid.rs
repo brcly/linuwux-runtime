@@ -3,7 +3,7 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
 
 use libc::{greg_t, siginfo_t, ucontext_t};
-use linuwux::cpuid::{ActiveProfile, Registers, Vendor, proton_avx_enabled};
+use linuwux::cpuid::{ActiveProfile, Registers, Vendor, is_wine_system_rip, proton_avx_enabled};
 
 const ARCH_SET_CPUID: c_int = 0x1012;
 const REFLEX_CPUID_CONSUMED: c_int = 1;
@@ -89,6 +89,15 @@ fn is_cpuid_instruction_at(address: usize) -> bool {
     result == 2 && instruction == [0x0f, 0xa2]
 }
 
+fn redirect_all() -> bool {
+    let value = unsafe { libc::getenv(c"LINUWUX_REDIRECT_ALL".as_ptr()) };
+    if value.is_null() {
+        false
+    } else {
+        linuwux::cpuid::redirect_all_enabled(Some(unsafe { CStr::from_ptr(value) }.to_bytes()))
+    }
+}
+
 fn native_reply(leaf: u32, subleaf: u32) -> Registers {
     if unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_SET_CPUID, 1 as libc::c_ulong) } == -1 {
         unsafe { debug_log(c"CPUID native pass-through enable failed; returning zeros".as_ptr()) };
@@ -140,13 +149,17 @@ pub unsafe extern "C" fn cpuid_sigsegv_handler(
             gregs.add(libc::REG_RCX as usize).read() as u64,
         )
     };
-    let reply = match ACTIVE_PROFILE.fixed_reply(leaf) {
-        Some(reply) => reply,
-        None => {
-            if unsafe { reflex_handle_cpuid(leaf, control) } == REFLEX_CPUID_CONSUMED {
-                Registers::default()
-            } else {
-                native_reply(leaf, control as u32)
+    let reply = if !redirect_all() && is_wine_system_rip(rip as u64) {
+        native_reply(leaf, control as u32)
+    } else {
+        match ACTIVE_PROFILE.fixed_reply(leaf) {
+            Some(reply) => reply,
+            None => {
+                if unsafe { reflex_handle_cpuid(leaf, control) } == REFLEX_CPUID_CONSUMED {
+                    Registers::default()
+                } else {
+                    native_reply(leaf, control as u32)
+                }
             }
         }
     };

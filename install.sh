@@ -31,27 +31,22 @@ mkdir -p "$LIB_DIR" "$BIN_DIR"
 install -m 0644 "$tmp_lib" "$LIB_PATH"
 
 cat >"$BIN_PATH" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-lib="$LIB_PATH"
+#!/bin/sh
+lib="\${LINUWUX_PRELOAD:-$LIB_PATH}"
 
 if [ ! -f "\$lib" ]; then
-    echo "linuwux: \$lib not found; reinstall with install.sh" >&2
+    echo "linuwux: library not found: \$lib" >&2
+    echo "  Reinstall with install.sh, or set LINUWUX_PRELOAD to its path" >&2
     exit 1
 fi
 
-if [ \$# -eq 0 ]; then
-    echo "usage: linuwux <command> [args...]" >&2
+if [ "\$#" -eq 0 ]; then
+    echo "linuwux: no command given -- use it as a launch option:" >&2
+    echo "  $BIN_PATH %command%" >&2
     exit 1
 fi
 
-if [ -n "\${LD_PRELOAD:-}" ]; then
-    export LD_PRELOAD="\$LD_PRELOAD:\$lib"
-else
-    export LD_PRELOAD="\$lib"
-fi
-
+export LD_PRELOAD="\${LD_PRELOAD:+\$LD_PRELOAD:}\$lib"
 exec "\$@"
 EOF
 chmod 0755 "$BIN_PATH"
@@ -59,15 +54,44 @@ chmod 0755 "$BIN_PATH"
 echo "linuwux: installed library to $LIB_PATH"
 echo "linuwux: installed launcher to $BIN_PATH"
 
-case ":$PATH:" in
-*":$BIN_DIR:"*) ;;
+echo
+echo "Set your game's launch command to:"
+echo "  $BIN_PATH %command%"
+
+session_path=""
+if command -v systemctl >/dev/null 2>&1; then
+    session_path="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^PATH=//p')" || session_path=""
+fi
+
+case ":$session_path:" in
+*":$BIN_DIR:"*)
+    echo
+    echo "$BIN_DIR is on your desktop session's PATH, so a bare 'linuwux' works in"
+    echo "GUI launchers as well:"
+    echo "  linuwux %command%"
+    ;;
 *)
     echo
-    echo "Note: $BIN_DIR is not on your PATH. Add this to your shell profile:"
-    echo "  export PATH=\"$BIN_DIR:\$PATH\""
+    if [ -z "$session_path" ]; then
+        echo "Could not read your desktop session's PATH. GUI launchers (Steam,"
+        echo "Faugus, Lutris, ...) do not inherit a shell PATH, so use the absolute"
+        echo "path above rather than a bare 'linuwux'."
+    else
+        echo "$BIN_DIR is not on your desktop session's PATH, which is what GUI"
+        echo "launchers (Steam, Faugus, Lutris, ...) inherit. A bare 'linuwux' will"
+        echo "not be found there, and some launchers only appear to hang instead of"
+        echo "reporting it. Use the absolute path above, or extend the session PATH"
+        echo "(takes effect after you log out and back in):"
+        echo
+        echo "  mkdir -p \"\$HOME/.config/environment.d\""
+        echo "  echo 'PATH=$BIN_DIR:$session_path' > \"\$HOME/.config/environment.d/50-linuwux-path.conf\""
+    fi
     ;;
 esac
 
 echo
-echo "Set your game's launch command to:"
-echo "  linuwux %command%"
+echo "In a launcher that only accepts environment variables, set:"
+echo "  LD_PRELOAD=$LIB_PATH"
+echo "Keep any existing LD_PRELOAD value and append LinUwUx with a colon."
+echo
+echo "LINUWUX_PRELOAD=/other/path overrides the library the wrapper loads."

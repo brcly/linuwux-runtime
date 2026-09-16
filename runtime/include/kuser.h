@@ -6,7 +6,8 @@
 
 enum kuser_profile {
     KUSER_PROFILE_MODERN = 0,
-    KUSER_PROFILE_LEGACY = 1,
+    KUSER_PROFILE_LEGACY_DUAL = 1,
+    KUSER_PROFILE_LEGACY_SINGLE = 2,
 };
 
 int kuser_apply_to_buffer(uint8_t *page, size_t length, enum kuser_profile profile, int avx_enabled);

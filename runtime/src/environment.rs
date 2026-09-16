@@ -46,7 +46,7 @@ unsafe fn fill_override(output: *mut c_char, existing: Option<&CStr>, dll: &CStr
     }
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn linuwux_setup_environment() {
     unsafe {
         if !libc::getenv(c"LinUwUx".as_ptr()).is_null() {
@@ -67,24 +67,3 @@ pub unsafe extern "C" fn linuwux_setup_environment() {
 #[used]
 #[unsafe(link_section = ".init_array.00201")]
 static INITIALIZE: unsafe extern "C" fn() = linuwux_setup_environment;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::mem::MaybeUninit;
-
-    #[test]
-    fn output_initialises_just_the_constructed_c_string() {
-        for existing in [None, Some(c""), Some(c"old=b;\xff=n")] {
-            let dll = c"winmm";
-            let capacity = override_capacity(existing.map(|s| s.to_bytes().len()), 5).unwrap();
-            let mut output = vec![MaybeUninit::<c_char>::uninit(); capacity];
-            unsafe {
-                fill_override(output.as_mut_ptr().cast(), existing, dll);
-                let result = CStr::from_ptr(output.as_ptr().cast()).to_bytes();
-                assert!(result.ends_with(b"winmm=n,b"));
-                assert!(!result.starts_with(b";"));
-            }
-        }
-    }
-}

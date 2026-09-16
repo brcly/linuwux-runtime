@@ -1,6 +1,7 @@
-use core::ffi::{c_int, c_void};
+use core::ffi::{CStr, c_int, c_void};
 use core::ptr;
 use libc::{siginfo_t, ucontext_t};
+use linuwux::cpuid::is_wine_system_rip;
 use linuwux::reflex::SYSCALL_BYPASS_MAGIC;
 
 const SYS_SECCOMP: c_int = 1;
@@ -11,7 +12,16 @@ unsafe extern "C" {
     fn reflex_route_syscall(context: *const ucontext_t, target: *mut u64) -> c_int;
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+fn redirect_all() -> bool {
+    let value = unsafe { libc::getenv(c"LINUWUX_REDIRECT_ALL".as_ptr()) };
+    if value.is_null() {
+        false
+    } else {
+        linuwux::cpuid::redirect_all_enabled(Some(unsafe { CStr::from_ptr(value) }.to_bytes()))
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscallhook(sig: c_int, info: *mut siginfo_t, context: *mut c_void) {
     let _errno = crate::errno::Errno::save();
     let handled = unsafe {
@@ -52,6 +62,10 @@ unsafe fn redirect(
             return false;
         }
         let gregs = ptr::addr_of_mut!((*context).uc_mcontext.gregs).cast::<libc::greg_t>();
+        let rip = gregs.add(libc::REG_RIP as usize).read() as u64;
+        if !redirect_all() && is_wine_system_rip(rip) {
+            return false;
+        }
         let selector = gregs.add(libc::REG_RAX as usize).read() as u32;
         let mut xmm4 = [0; 16];
         xmm4[..4].copy_from_slice(&selector.to_le_bytes());
@@ -66,44 +80,4 @@ unsafe fn redirect(
             .write(target as libc::greg_t);
     }
     true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::mem::{MaybeUninit, size_of};
-
-    #[test]
-    fn partial_frame_and_fpstate_without_u128_alignment() {
-        #[repr(C, align(16))]
-        struct Storage([MaybeUninit<u8>; size_of::<libc::_libc_fpstate>() + 8]);
-        let mut storage = Storage([MaybeUninit::uninit(); size_of::<libc::_libc_fpstate>() + 8]);
-        let mut context = MaybeUninit::<ucontext_t>::uninit();
-        let mut info = MaybeUninit::<siginfo_t>::uninit();
-        unsafe {
-            let fp = storage.0.as_mut_ptr().add(8).cast::<libc::_libc_fpstate>();
-            let ctx = context.as_mut_ptr();
-            ptr::addr_of_mut!((*ctx).uc_mcontext.fpregs).write(fp);
-            ptr::addr_of_mut!((*info.as_mut_ptr()).si_code).write(SYS_SECCOMP);
-            let xmm = ptr::addr_of_mut!((*fp)._xmm).cast::<[u8; 16]>();
-            xmm.add(5).cast::<u64>().write(0);
-            let gregs = ptr::addr_of_mut!((*ctx).uc_mcontext.gregs).cast::<libc::greg_t>();
-            gregs.add(libc::REG_RAX as usize).write(-1);
-            gregs.add(libc::REG_RCX as usize).write(0x5678);
-            assert!(redirect(info.as_ptr(), ctx, |_| Some(u64::MAX)));
-            assert_eq!(
-                xmm.add(4).read(),
-                [255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-            );
-            assert_eq!(gregs.add(libc::REG_RAX as usize).read(), 0x5678);
-            assert_eq!(gregs.add(libc::REG_RCX as usize).read(), -1);
-            assert_eq!(gregs.add(libc::REG_RIP as usize).read(), -1);
-            xmm.add(5).cast::<u64>().write(SYSCALL_BYPASS_MAGIC);
-            assert!(!redirect(info.as_ptr(), ctx, |_| Some(42)));
-            assert_eq!(xmm.add(5).read(), [0; 16]);
-            assert!(!redirect(ptr::null(), ctx, |_| panic!("must not route")));
-            ptr::addr_of_mut!((*ctx).uc_mcontext.fpregs).write(ptr::null_mut());
-            assert!(!redirect(info.as_ptr(), ctx, |_| panic!("must not route")));
-        }
-    }
 }

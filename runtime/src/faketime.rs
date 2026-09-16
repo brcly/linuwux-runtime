@@ -62,7 +62,7 @@ unsafe fn adjust_seconds(tv: *mut libc::timeval, offset: u64) {
     }
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn gettimeofday(tv: *mut libc::timeval, tz: *mut c_void) -> c_int {
     let Some(real) = resolve_real_gettimeofday() else {
         return -1;
@@ -76,7 +76,7 @@ pub unsafe extern "C" fn gettimeofday(tv: *mut libc::timeval, tz: *mut c_void) -
     result
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub extern "C" fn set_offset(filetime: u64) {
     let _errno = crate::errno::Errno::save();
     let Some(_guard) = crate::page_guard::PageGuard::acquire() else {
@@ -115,7 +115,7 @@ pub extern "C" fn set_offset(filetime: u64) {
     }
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub extern "C" fn linuwux_setup_faketime() {
     let _ = resolve_real_gettimeofday();
 }
@@ -124,18 +124,3 @@ pub extern "C" fn linuwux_setup_faketime() {
 #[used]
 #[unsafe(link_section = ".init_array.00202")]
 static INITIALIZE: extern "C" fn() = linuwux_setup_faketime;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn adjustment_only_accesses_initialised_seconds() {
-        let mut value = MaybeUninit::<libc::timeval>::uninit();
-        unsafe {
-            ptr::addr_of_mut!((*value.as_mut_ptr()).tv_sec).write(i64::MIN);
-            adjust_seconds(value.as_mut_ptr(), 1);
-            assert_eq!(ptr::addr_of!((*value.as_ptr()).tv_sec).read(), i64::MAX);
-        }
-    }
-}

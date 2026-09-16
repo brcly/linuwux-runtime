@@ -1,6 +1,6 @@
 [package]
 name = "linuwux-rust"
-version = "0.1.0"
+version = "26.9.16"
 edition = "2024"
 rust-version.workspace = true
 description = "Rust preload runtime and safe protocol core for LinUwUx"

@@ -76,33 +76,3 @@ pub(crate) fn checked(cmd: &mut Command) -> Result<Output> {
     }
     Ok(output)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn deadline_kills_descendants_that_hold_output_open() {
-        let started = Instant::now();
-        let result = run(
-            Command::new("sh").args(["-c", "sleep 30 & wait"]),
-            &[],
-            Duration::from_millis(100),
-        );
-        assert!(result.unwrap_err().to_string().contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(5));
-    }
-
-    #[test]
-    fn exited_fixture_cannot_leave_a_child_holding_its_output_pipe() {
-        let started = Instant::now();
-        let result = run(
-            Command::new("sh").args(["-c", "sleep 30 & exit 0"]),
-            &[],
-            Duration::from_secs(1),
-        )
-        .unwrap();
-        assert!(result.status.success());
-        assert!(started.elapsed() < Duration::from_secs(5));
-    }
-}

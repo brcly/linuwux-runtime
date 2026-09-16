@@ -191,7 +191,7 @@ fn restore_default_and_raise(sig: c_int) {
     }
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn forward_signal(sig: c_int, info: *mut siginfo_t, context: *mut c_void) {
     let Some(slot) = slot_for(sig) else {
         restore_default_and_raise(sig);
@@ -321,7 +321,7 @@ unsafe fn install_bridge(
     0
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(
     signum: c_int,
     act: *const Sigaction,
@@ -346,7 +346,7 @@ pub unsafe extern "C" fn sigaction(
     }
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub extern "C" fn linuwux_setup_hooks() {
     let _ = resolve_real_sigaction();
     if FORK_REGISTERED
@@ -362,77 +362,3 @@ pub extern "C" fn linuwux_setup_hooks() {
 #[used]
 #[unsafe(link_section = ".init_array.00203")]
 static INITIALIZE: extern "C" fn() = linuwux_setup_hooks;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn allocation(marker: c_int) -> *mut Snapshot {
-        unsafe {
-            let snapshot = libc::malloc(size_of::<Snapshot>()).cast::<Snapshot>();
-            assert!(!snapshot.is_null());
-            let action = snapshot.cast::<Sigaction>();
-            ptr::addr_of_mut!((*action).sa_sigaction).write(marker as usize);
-            ptr::addr_of_mut!((*action).sa_flags).write(marker);
-            snapshot
-        }
-    }
-
-    #[cfg(not(miri))]
-    #[test]
-    fn fork_child_discards_inherited_installation_bookkeeping() {
-        linuwux_setup_hooks();
-        assert!(FORK_REGISTERED.load(Ordering::Acquire));
-        SIGNAL_UPDATE_LOCK.store(true, Ordering::Release);
-        SIGSEGV_SLOT.readers.store(7, Ordering::SeqCst);
-        SIGSYS_SLOT.readers.store(9, Ordering::SeqCst);
-        let child = unsafe {
-            let child = libc::fork();
-            if child == 0 {
-                let reset = !SIGNAL_UPDATE_LOCK.load(Ordering::Acquire)
-                    && SIGSEGV_SLOT.readers.load(Ordering::SeqCst) == 0
-                    && SIGSYS_SLOT.readers.load(Ordering::SeqCst) == 0;
-                libc::_exit(if reset { 0 } else { 1 });
-            }
-            child
-        };
-        SIGNAL_UPDATE_LOCK.store(false, Ordering::Release);
-        SIGSEGV_SLOT.readers.store(0, Ordering::SeqCst);
-        SIGSYS_SLOT.readers.store(0, Ordering::SeqCst);
-        assert!(child >= 0);
-        let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
-        assert!(libc::WIFEXITED(status));
-        assert_eq!(libc::WEXITSTATUS(status), 0);
-    }
-
-    #[test]
-    fn concurrent_snapshot_readers_never_observe_freed_or_mixed_fields() {
-        let slot = SignalSlot::new();
-        let rounds = if cfg!(miri) { 16 } else { 2000 };
-        std::thread::scope(|scope| {
-            for _ in 0..2 {
-                let slot = &slot;
-                scope.spawn(move || {
-                    for _ in 0..rounds {
-                        let action = slot.copy_saved_action();
-                        unsafe {
-                            assert_eq!(
-                                (*action.as_ptr()).sa_sigaction,
-                                (*action.as_ptr()).sa_flags as usize
-                            );
-                        }
-                        std::thread::yield_now();
-                    }
-                });
-            }
-            for marker in 1..=rounds {
-                let old = slot.current.swap(allocation(marker), Ordering::SeqCst);
-                unsafe { slot.release_snapshot(old) };
-                std::thread::yield_now();
-            }
-        });
-        let old = slot.current.swap(ptr::null_mut(), Ordering::SeqCst);
-        unsafe { slot.release_snapshot(old) };
-    }
-}

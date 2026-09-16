@@ -8,3 +8,4 @@ pub mod faketime;
 pub mod gamescope;
 pub mod kuser;
 pub mod reflex;
+pub mod registry;

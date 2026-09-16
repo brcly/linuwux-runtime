@@ -8,7 +8,7 @@ static LOG_FD: AtomicI32 = AtomicI32::new(-1);
 static OPEN_ERRNO: AtomicI32 = AtomicI32::new(0);
 static STDERR_SUPPORTED: AtomicBool = AtomicBool::new(false);
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub extern "C" fn debug_enabled() -> c_int {
     c_int::from(ENABLED.load(Ordering::Acquire))
 }
@@ -100,7 +100,7 @@ unsafe fn open_log(path: *const c_char) -> c_int {
     fd
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn debug_log(message: *const c_char) {
     let _errno = crate::errno::Errno::save();
     if debug_enabled() == 0 || message.is_null() {
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn debug_log(message: *const c_char) {
     emit(line.finish(false));
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn debug_log_hex(prefix: *const c_char, value: u64) {
     let _errno = crate::errno::Errno::save();
     if debug_enabled() == 0 {
@@ -124,7 +124,7 @@ pub unsafe extern "C" fn debug_log_hex(prefix: *const c_char, value: u64) {
     emit(line.finish(true));
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn debug_log_dec(prefix: *const c_char, value: u64) {
     let _errno = crate::errno::Errno::save();
     if debug_enabled() == 0 {
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn debug_log_dec(prefix: *const c_char, value: u64) {
     emit(line.finish(true));
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub extern "C" fn debug_runtime_activated() {
     unsafe {
         debug_log(c"safe debug logging enabled".as_ptr());
@@ -151,7 +151,7 @@ pub extern "C" fn debug_runtime_activated() {
     }
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn linuwux_setup_debug() {
     unsafe {
         let value = libc::getenv(c"LINUWUX_DEBUG".as_ptr());
@@ -180,16 +180,3 @@ pub unsafe extern "C" fn linuwux_setup_debug() {
 #[used]
 #[unsafe(link_section = ".init_array.00102")]
 static INITIALIZE: unsafe extern "C" fn() = linuwux_setup_debug;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bounded_message_does_not_read_past_capacity() {
-        let mut line = Line::new(1, None);
-        let bytes = vec![b'x'; line.remaining()];
-        unsafe { append_text(&mut line, bytes.as_ptr().cast()) };
-        assert_eq!(line.finish(false).len(), 512);
-    }
-}

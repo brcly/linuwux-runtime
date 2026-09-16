@@ -11,21 +11,24 @@ pub const SHARED_TIME_PUBLISHED_MARKER: u8 = 1;
 #[repr(i32)]
 pub enum Profile {
     Modern = 0,
-    Legacy = 1,
+    LegacyDual = 1,
+    LegacySingle = 2,
 }
 
 impl Profile {
     pub const fn from_raw(value: i32) -> Option<Self> {
         match value {
             0 => Some(Self::Modern),
-            1 => Some(Self::Legacy),
+            1 => Some(Self::LegacyDual),
+            2 => Some(Self::LegacySingle),
             _ => None,
         }
     }
 
     pub fn visit_writes(self, avx_enabled: bool, mut write: impl FnMut(usize, u8)) {
         let ops: &[(usize, usize, u64)] = match self {
-            Self::Legacy => LEGACY_OPS,
+            Self::LegacySingle => LEGACY_SINGLE_OPS,
+            Self::LegacyDual => LEGACY_DUAL_OPS,
             Self::Modern => {
                 for (index, byte) in b"C:\\Windows\0".iter().copied().enumerate() {
                     write(0x30 + index * 2, byte);
@@ -115,7 +118,22 @@ const MODERN_OPS: &[(usize, usize, u64)] = &[
     (0xffc, 4, 0x13371337),
 ];
 
-const LEGACY_OPS: &[(usize, usize, u64)] = &[
+const LEGACY_SINGLE_OPS: &[(usize, usize, u64)] = &[
+    (0x2d6, 4, 0x0001_0034),
+    (0x2e8, 4, 0x00bf_9c8f),
+    (0x3c0, 4, 0x0000_0010),
+    (0x288, 4, 0x0101_0101),
+    (0x268, 4, 0x0009_0001),
+    (0x2f4, 4, 0),
+    (0x264, 4, 1),
+    (0x2d0, 4, 0x0000_0310),
+    (0x260, 4, 0x0000_6658),
+    (0x26c, 4, 0x0a),
+    (0x270, 4, 0),
+    (0xffc, 4, 0x1337_1337),
+];
+
+const LEGACY_DUAL_OPS: &[(usize, usize, u64)] = &[
     (0x26e, 8, 0),
     (0x288, 8, 0x0000000001010101),
     (0x268, 8, 0x0000000A00090001),
@@ -139,6 +157,8 @@ const LEGACY_OPS: &[(usize, usize, u64)] = &[
     (0x281, 4, 0x00000101),
     (0x286, 4, 0x01010000),
     (0x287, 4, 0x01010100),
+    (0x285, 1, 1),
+    (0xffc, 4, 0x1337_1337),
 ];
 
 const _: () = {
@@ -148,7 +168,7 @@ const _: () = {
     );
     assert!(SHARED_TIME_PUBLISHED < PAGE_SIZE);
     let reserved_end = SHARED_TIME_PUBLISHED + 1;
-    let tables = [MODERN_OPS, LEGACY_OPS];
+    let tables = [MODERN_OPS, LEGACY_DUAL_OPS, LEGACY_SINGLE_OPS];
     let mut table = 0;
     while table < tables.len() {
         let mut i = 0;
@@ -176,9 +196,12 @@ const PATCH_UNAPPLIED: u32 = 0;
 const PATCH_MODERN_APPLYING: u32 = 1;
 const PATCH_MODERN_READY: u32 = 2;
 const PATCH_MODERN_FAILED: u32 = 3;
-const PATCH_LEGACY_APPLYING: u32 = 4;
-const PATCH_LEGACY_READY: u32 = 5;
-const PATCH_LEGACY_FAILED: u32 = 6;
+const PATCH_LEGACY_SINGLE_APPLYING: u32 = 4;
+const PATCH_LEGACY_SINGLE_READY: u32 = 5;
+const PATCH_LEGACY_SINGLE_FAILED: u32 = 6;
+const PATCH_LEGACY_DUAL_APPLYING: u32 = 7;
+const PATCH_LEGACY_DUAL_READY: u32 = 8;
+const PATCH_LEGACY_DUAL_FAILED: u32 = 9;
 
 #[derive(Debug, Default)]
 pub struct PatchState(AtomicU32);
@@ -193,7 +216,8 @@ impl PatchState {
             .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
                 PATCH_MODERN_APPLYING => Some(PATCH_MODERN_FAILED),
-                PATCH_LEGACY_APPLYING => Some(PATCH_LEGACY_FAILED),
+                PATCH_LEGACY_SINGLE_APPLYING => Some(PATCH_LEGACY_SINGLE_FAILED),
+                PATCH_LEGACY_DUAL_APPLYING => Some(PATCH_LEGACY_DUAL_FAILED),
                 _ => None,
             });
     }
@@ -210,10 +234,15 @@ impl PatchState {
                 PATCH_MODERN_READY,
                 PATCH_MODERN_FAILED,
             ),
-            Profile::Legacy => (
-                PATCH_LEGACY_APPLYING,
-                PATCH_LEGACY_READY,
-                PATCH_LEGACY_FAILED,
+            Profile::LegacySingle => (
+                PATCH_LEGACY_SINGLE_APPLYING,
+                PATCH_LEGACY_SINGLE_READY,
+                PATCH_LEGACY_SINGLE_FAILED,
+            ),
+            Profile::LegacyDual => (
+                PATCH_LEGACY_DUAL_APPLYING,
+                PATCH_LEGACY_DUAL_READY,
+                PATCH_LEGACY_DUAL_FAILED,
             ),
         };
         let mut completion_state = failed_state;
@@ -222,8 +251,26 @@ impl PatchState {
             if current == ready_state {
                 return Ok(());
             }
+            let another_legacy_apply = matches!(
+                current,
+                PATCH_LEGACY_SINGLE_APPLYING | PATCH_LEGACY_DUAL_APPLYING
+            );
+            if another_legacy_apply && current != applying_state {
+                wait();
+                continue;
+            }
             if current != PATCH_UNAPPLIED && !(applying_state..=failed_state).contains(&current) {
-                if profile != Profile::Legacy || current != PATCH_MODERN_READY {
+                let can_transition_from_legacy =
+                    matches!(profile, Profile::LegacyDual | Profile::LegacySingle)
+                        && matches!(
+                            current,
+                            PATCH_MODERN_READY
+                                | PATCH_LEGACY_SINGLE_READY
+                                | PATCH_LEGACY_SINGLE_FAILED
+                                | PATCH_LEGACY_DUAL_READY
+                                | PATCH_LEGACY_DUAL_FAILED
+                        );
+                if !can_transition_from_legacy {
                     return Err(PatchError::Conflict);
                 }
                 completion_state = current;

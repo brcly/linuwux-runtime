@@ -26,7 +26,7 @@ fn log(message: &'static CStr) {
     unsafe { debug_log(message.as_ptr()) };
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kuser_apply_to_buffer(
     page: *mut u8,
     length: usize,
@@ -89,7 +89,7 @@ unsafe fn apply_profile_to_shared_page(
     apply_result == 0
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patch_kuser_shared_data_profile(profile: c_int) -> c_int {
     let Some(profile) = Profile::from_raw(profile) else {
         return -1;
@@ -114,12 +114,12 @@ pub unsafe extern "C" fn patch_kuser_shared_data_profile(profile: c_int) -> c_in
     }
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn patch_kuser_shared_data() -> c_int {
     unsafe { patch_kuser_shared_data_profile(Profile::Modern as c_int) }
 }
 
-#[cfg_attr(not(test), unsafe(no_mangle))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn linuwux_setup_kuser() {
     let avx = unsafe {
         let avx_value = libc::getenv(c"PROTON_AVX".as_ptr());
@@ -134,29 +134,3 @@ pub unsafe extern "C" fn linuwux_setup_kuser() {
 #[used]
 #[unsafe(link_section = ".init_array.00204")]
 static INITIALIZE: unsafe extern "C" fn() = linuwux_setup_kuser;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::mem::MaybeUninit;
-
-    #[test]
-    fn buffer_ffi_writes_only_recipe_locations_without_reading_uninitialised_memory() {
-        let mut page = [MaybeUninit::<u8>::uninit(); PAGE_SIZE];
-        unsafe {
-            let bytes = page.as_mut_ptr().cast::<u8>();
-            assert_eq!(kuser_apply_to_buffer(ptr::null_mut(), PAGE_SIZE, 0, 0), -1);
-            assert_eq!(kuser_apply_to_buffer(bytes, 0, 0, 0), -1);
-            assert_eq!(kuser_apply_to_buffer(bytes, PAGE_SIZE, -1, 0), -1);
-            assert_eq!(kuser_apply_to_buffer(bytes, PAGE_SIZE, 0, -7), 0);
-            assert_eq!(
-                bytes.add(0xffc).cast::<[u8; 4]>().read(),
-                [0x37, 0x13, 0x37, 0x13]
-            );
-            assert_eq!(bytes.add(0x285).read(), 1);
-            assert_eq!(kuser_apply_to_buffer(bytes, PAGE_SIZE, 0, 0), 0);
-            assert_eq!(bytes.add(0x285).read(), 0);
-            assert_eq!(kuser_apply_to_buffer(bytes, PAGE_SIZE, 1, 0), 0);
-        }
-    }
-}

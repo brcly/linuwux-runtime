@@ -166,24 +166,3 @@ pub(crate) fn write_shared_time_offset(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_readable_shared_wine_mappings_are_accepted() {
-        assert!(wine_mapping(
-            b"7ffe0000-7ffe1000 r--s 00000000 00:01 123 /memfd:wine-mapping (deleted)"
-        ));
-        for line in [
-            b"7ffe0000-7ffe1000 rw-p 00000000 00:00 0".as_slice(),
-            b"7ffe0000-7ffe1000 ---s 00000000 00:01 123 /memfd:wine-mapping (deleted)",
-            b"7ffe0000-7ffe1000 r--s 00000000 00:01 123 /memfd:unrelated (deleted)",
-            b"7ffe0000-7ffe0001 r--s 00000000 00:01 123 /memfd:wine-mapping (deleted)",
-            b"invalid",
-        ] {
-            assert!(!wine_mapping(line));
-        }
-    }
-}

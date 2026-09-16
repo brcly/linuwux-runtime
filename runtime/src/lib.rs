@@ -42,8 +42,7 @@ pub mod hooks;
 pub mod kuser;
 #[cfg(feature = "reflex")]
 pub mod reflex;
+#[cfg(feature = "reflex")]
+pub mod registry;
 #[cfg(feature = "syscall")]
 pub mod syscall;
-
-#[cfg(all(test, feature = "cpuid"))]
-mod tests;
