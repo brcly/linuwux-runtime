@@ -14,7 +14,12 @@ pub extern "C" fn debug_enabled() -> c_int {
 }
 
 fn new_line() -> Line {
-    let (tid, pid) = unsafe { (libc::syscall(libc::SYS_gettid), libc::getpid()) };
+    let (tid, pid) = unsafe {
+        (
+            libc::syscall(libc::SYS_gettid),
+            libc::syscall(libc::SYS_getpid),
+        )
+    };
     Line::new(pid as u64, (tid > 0).then_some(tid as u64))
 }
 
@@ -176,7 +181,6 @@ pub unsafe extern "C" fn linuwux_setup_debug() {
     }
 }
 
-#[cfg(not(test))]
 #[used]
 #[unsafe(link_section = ".init_array.00102")]
 static INITIALIZE: unsafe extern "C" fn() = linuwux_setup_debug;

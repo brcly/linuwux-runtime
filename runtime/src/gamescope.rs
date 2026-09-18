@@ -3,11 +3,16 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use linuwux::gamescope::{ANCESTRY_LIMIT, is_gamescope_path, preload_has_path, preserved_length};
+use linuwux::gamescope::{
+    ANCESTRY_LIMIT, is_gamescope_path, is_gamescope_session as session_has_gamescope,
+    preload_has_path, preserved_length,
+};
 
 const PATH_MAX: usize = libc::PATH_MAX as usize;
 type Setenv = unsafe extern "C" fn(*const c_char, *const c_char, c_int) -> c_int;
+type Unsetenv = unsafe extern "C" fn(*const c_char) -> c_int;
 static REAL_SETENV: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static REAL_UNSETENV: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static ENABLED: AtomicBool = AtomicBool::new(false);
 struct StartupPath(UnsafeCell<[c_char; PATH_MAX]>);
 unsafe impl Sync for StartupPath {}
@@ -28,6 +33,19 @@ fn resolve_real_setenv() -> Option<Setenv> {
         REAL_SETENV.store(symbol, Ordering::Release);
     }
     Some(unsafe { core::mem::transmute::<*mut c_void, Setenv>(symbol) })
+}
+
+fn resolve_real_unsetenv() -> Option<Unsetenv> {
+    let mut symbol = REAL_UNSETENV.load(Ordering::Acquire);
+    if symbol.is_null() {
+        symbol = unsafe { libc::dlsym(libc::RTLD_NEXT, c"unsetenv".as_ptr()) };
+        if symbol.is_null() {
+            set_errno(libc::ENOSYS);
+            return None;
+        }
+        REAL_UNSETENV.store(symbol, Ordering::Release);
+    }
+    Some(unsafe { core::mem::transmute::<*mut c_void, Unsetenv>(symbol) })
 }
 
 fn proc_path(pid: libc::pid_t, suffix: &str) -> [u8; 64] {
@@ -112,7 +130,7 @@ fn parent_process_id(pid: libc::pid_t) -> libc::pid_t {
 }
 
 fn has_gamescope_ancestor() -> bool {
-    let mut pid = unsafe { libc::getpid() };
+    let mut pid = unsafe { libc::syscall(libc::SYS_getpid) as libc::pid_t };
     for _ in 0..ANCESTRY_LIMIT {
         if pid <= 0 {
             break;
@@ -130,6 +148,27 @@ fn has_gamescope_ancestor() -> bool {
         pid = parent;
     }
     false
+}
+
+fn is_gamescope_session() -> bool {
+    let current = unsafe { libc::getenv(c"XDG_CURRENT_DESKTOP".as_ptr()) };
+    let session = unsafe { libc::getenv(c"XDG_SESSION_DESKTOP".as_ptr()) };
+    let current = if current.is_null() {
+        &[][..]
+    } else {
+        unsafe { CStr::from_ptr(current) }.to_bytes()
+    };
+    let session = if session.is_null() {
+        &[][..]
+    } else {
+        unsafe { CStr::from_ptr(session) }.to_bytes()
+    };
+    session_has_gamescope(current, session)
+}
+
+fn gamescope_detected() -> bool {
+    let process = unsafe { libc::syscall(libc::SYS_getpid) as libc::pid_t };
+    process_is_gamescope(process) || is_gamescope_session() || has_gamescope_ancestor()
 }
 
 unsafe fn resolve_self_path() -> bool {
@@ -159,7 +198,8 @@ unsafe fn resolve_self_path() -> bool {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn linuwux_setup_gamescope() {
-    if !has_gamescope_ancestor() || resolve_real_setenv().is_none() {
+    if !gamescope_detected() || resolve_real_setenv().is_none() || resolve_real_unsetenv().is_none()
+    {
         return;
     }
     if unsafe { resolve_self_path() } {
@@ -177,8 +217,12 @@ pub unsafe extern "C" fn setenv(
         return -1;
     };
     let should_check = ENABLED.load(Ordering::Acquire)
+        && !name.is_null()
         && unsafe { CStr::from_ptr(name) }.to_bytes() == b"LD_PRELOAD";
     if !should_check {
+        return unsafe { real(name, value, overwrite) };
+    }
+    if value.is_null() {
         return unsafe { real(name, value, overwrite) };
     }
     let path = unsafe { CStr::from_ptr(SELF_PATH.0.get().cast()) };
@@ -205,6 +249,24 @@ pub unsafe extern "C" fn setenv(
     }
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unsetenv(name: *const c_char) -> c_int {
+    let Some(real) = resolve_real_unsetenv() else {
+        return -1;
+    };
+    let should_check = ENABLED.load(Ordering::Acquire)
+        && !name.is_null()
+        && unsafe { CStr::from_ptr(name) }.to_bytes() == b"LD_PRELOAD";
+    if !should_check {
+        return unsafe { real(name) };
+    }
+    let Some(setenv) = resolve_real_setenv() else {
+        return -1;
+    };
+    let path = unsafe { CStr::from_ptr(SELF_PATH.0.get().cast()) };
+    unsafe { setenv(name, path.as_ptr(), 1) }
+}
+
 unsafe fn fill_preserved(destination: *mut c_char, value: &CStr, path: &CStr) {
     let length = value.to_bytes().len();
     unsafe {
@@ -220,7 +282,6 @@ unsafe fn fill_preserved(destination: *mut c_char, value: &CStr, path: &CStr) {
     }
 }
 
-#[cfg(not(test))]
 #[used]
 #[unsafe(link_section = ".init_array.00103")]
 static INITIALIZE: unsafe extern "C" fn() = linuwux_setup_gamescope;

@@ -12,11 +12,13 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const EXPORTS: &[&str] = &[
     "cpuid_configure_profile",
-    "cpuid_activate_legacy_profile",
+    "cpuid_activate_dispatch_profile",
     "cpuid_get_fixed_reply",
     "cpuid_sigsegv_handler",
     "detect_cpu_vendor",
     "sigaction",
+    "free",
+    "unsetenv",
     "linuwux_setup_hooks",
     "forward_signal",
     "reflex_handle_cpuid",
@@ -100,17 +102,14 @@ impl Context {
 
     fn compiler(&self) -> Command {
         let mut cmd = Command::new(&self.cc);
-        cmd.current_dir(&self.root)
-            .args([
-                "-std=gnu11",
-                "-O2",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-Wl,-z,now",
-                "-I",
-            ])
-            .arg(self.root.join("runtime/include"));
+        cmd.current_dir(&self.root).args([
+            "-std=gnu11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wl,-z,now",
+        ]);
         cmd
     }
 
@@ -166,9 +165,10 @@ impl Context {
         fs::copy(&library, temporary.path())?;
         temporary.persist(output)?;
         println!(
-            "Built {} ({} bytes, 23 C ABI exports)",
+            "Built {} ({} bytes, {} C ABI exports)",
             output.display(),
-            fs::metadata(output)?.len()
+            fs::metadata(output)?.len(),
+            EXPORTS.len()
         );
         Ok(())
     }

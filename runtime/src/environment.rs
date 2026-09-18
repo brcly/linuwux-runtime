@@ -3,13 +3,11 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use linuwux::environment::{OVERRIDES, already_present, override_capacity};
 
-const DENUVOWO_ENV: &CStr = c"LINUWUX_DENUVOWODLL";
-const DENUVOWO_DLL: &CStr = c"DenuvOwO";
-static DENUVOWO_PROCESS: AtomicBool = AtomicBool::new(false);
+static GAME_PROCESS: AtomicBool = AtomicBool::new(false);
 
-#[cfg(all(feature = "reflex", feature = "hooks"))]
-pub(crate) fn denuvowo_process() -> bool {
-    DENUVOWO_PROCESS.load(Ordering::Acquire)
+#[cfg(feature = "hooks")]
+pub(crate) fn game_process() -> bool {
+    GAME_PROCESS.load(Ordering::Acquire)
 }
 
 unsafe fn add_override(dll: &CStr) {
@@ -56,99 +54,124 @@ unsafe fn fill_override(output: *mut c_char, existing: Option<&CStr>, dll: &CStr
     }
 }
 
-unsafe fn denuvowo_enabled() -> bool {
-    let value = unsafe { libc::getenv(DENUVOWO_ENV.as_ptr()) };
-    !value.is_null() && unsafe { CStr::from_ptr(value) }.to_bytes() == b"1"
+fn equal_name(actual: &[u8], expected: &[u8]) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|(&left, &right)| left.eq_ignore_ascii_case(&right))
 }
 
-unsafe fn denuvowo_dll_in_directory(argc: c_int, argv: *const *const c_char) -> bool {
-    if argc < 2 || argv.is_null() {
+fn is_exe(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && equal_name(&bytes[bytes.len() - 4..], b".exe")
+}
+
+fn is_helper_basename(executable: &[u8]) -> bool {
+    let basename = executable
+        .rsplit(|&byte| byte == b'/' || byte == b'\\')
+        .next()
+        .unwrap_or(executable);
+    const HELPERS: [&[u8]; 10] = [
+        b"steam.exe",
+        b"steamwebhelper.exe",
+        b"crashhandler.exe",
+        b"winecfg.exe",
+        b"start.exe",
+        b"rundll32.exe",
+        b"dllhost.exe",
+        b"conhost.exe",
+        b"explorer.exe",
+        b"xalia.exe",
+    ];
+    HELPERS.iter().any(|name| equal_name(basename, name))
+}
+
+fn is_system32_helper(executable: &[u8]) -> bool {
+    let mut lowered = [0u8; 512];
+    if executable.len() >= lowered.len() {
         return false;
     }
-    let mut executable = ptr::null();
+    for (index, &byte) in executable.iter().enumerate() {
+        lowered[index] = if byte == b'\\' {
+            b'/'
+        } else {
+            byte.to_ascii_lowercase()
+        };
+    }
+    let path = &lowered[..executable.len()];
+    path.windows(b"/windows/system32/".len())
+        .any(|window| window == b"/windows/system32/")
+        || path
+            .windows(b"/windows/syswow64/".len())
+            .any(|window| window == b"/windows/syswow64/")
+}
+
+fn argv0_is_unix_loader(bytes: &[u8]) -> bool {
+    bytes
+        .windows(b"wine-preloader".len())
+        .any(|window| window == b"wine-preloader")
+        || bytes
+            .windows(b"wine64-preloader".len())
+            .any(|window| window == b"wine64-preloader")
+        || bytes
+            .windows(b"wineserver".len())
+            .any(|window| window == b"wineserver")
+        || bytes
+            .windows(b"pressure-vessel".len())
+            .any(|window| window == b"pressure-vessel")
+}
+
+fn game_executable_argument(argc: c_int, argv: *const *const c_char) -> Option<*const c_char> {
+    if argc < 1 || argv.is_null() {
+        return None;
+    }
+    let argv0 = unsafe { *argv };
+    if !argv0.is_null() && argv0_is_unix_loader(unsafe { CStr::from_ptr(argv0) }.to_bytes()) {
+        // Preloader/wineserver may mention the game path without being the PE.
+        // Only count a Windows-drive .exe that is not a system helper.
+        let mut windows_game = None;
+        for index in 1..argc as usize {
+            let candidate = unsafe { *argv.add(index) };
+            if candidate.is_null() {
+                continue;
+            }
+            let bytes = unsafe { CStr::from_ptr(candidate) }.to_bytes();
+            if !is_exe(bytes) {
+                continue;
+            }
+            if bytes.len() < 2 || bytes[1] != b':' {
+                continue;
+            }
+            if is_system32_helper(bytes) || is_helper_basename(bytes) {
+                return None;
+            }
+            windows_game = Some(candidate);
+        }
+        return windows_game;
+    }
+    let mut windows_game = None;
+    let mut unix_game = None;
+    let mut windows_helper = false;
     for index in 0..argc as usize {
         let candidate = unsafe { *argv.add(index) };
         if candidate.is_null() {
             continue;
         }
         let bytes = unsafe { CStr::from_ptr(candidate) }.to_bytes();
+        if !is_exe(bytes) {
+            continue;
+        }
+        if is_system32_helper(bytes) || is_helper_basename(bytes) {
+            windows_helper = true;
+            continue;
+        }
         if bytes.len() >= 2 && bytes[1] == b':' {
-            executable = candidate;
-            break;
+            windows_game = Some(candidate);
+        } else if bytes.starts_with(b"/") {
+            unix_game = Some(candidate);
         }
     }
-    if executable.is_null() {
-        return false;
-    }
-    let executable = unsafe { CStr::from_ptr(executable) }.to_bytes();
-    let prefix = unsafe { libc::getenv(c"WINEPREFIX".as_ptr()) };
-    let mut path = [0u8; libc::PATH_MAX as usize];
-    let mut length;
-    if executable[0].eq_ignore_ascii_case(&b'z') {
-        let source = &executable[2..];
-        if source.len() >= path.len() {
-            return false;
-        }
-        path[..source.len()].copy_from_slice(source);
-        length = source.len();
-    } else {
-        let Some(prefix) =
-            (!prefix.is_null()).then(|| unsafe { CStr::from_ptr(prefix) }.to_bytes())
-        else {
-            return false;
-        };
-        let drive = executable[0].to_ascii_lowercase();
-        let rest = &executable[2..];
-        let Some(required) = prefix
-            .len()
-            .checked_add(14)
-            .and_then(|length| length.checked_add(rest.len()))
-        else {
-            return false;
-        };
-        if required >= path.len() {
-            return false;
-        }
-        path[..prefix.len()].copy_from_slice(prefix);
-        length = prefix.len();
-        path[length..length + 12].copy_from_slice(b"/dosdevices/");
-        length += 12;
-        path[length] = drive;
-        length += 1;
-        path[length] = b':';
-        length += 1;
-        path[length..length + rest.len()].copy_from_slice(rest);
-        length += rest.len();
-    }
-    for byte in &mut path[..length] {
-        if *byte == b'\\' {
-            *byte = b'/';
-        }
-    }
-    let Some(slash) = path[..length].iter().rposition(|&byte| byte == b'/') else {
-        return false;
-    };
-    length = slash + 1;
-    let marker = b"DenuvOwO.dll\0";
-    if length
-        .checked_add(marker.len())
-        .is_none_or(|end| end > path.len())
-    {
-        return false;
-    }
-    path[length..length + marker.len()].copy_from_slice(marker);
-    unsafe { libc::access(path.as_ptr().cast(), libc::F_OK) == 0 }
-}
-
-unsafe fn hint_denuvowo() {
-    #[cfg(feature = "reflex")]
-    unsafe extern "C" {
-        fn reflex_hint_denuvowo();
-    }
-    #[cfg(feature = "reflex")]
-    unsafe {
-        reflex_hint_denuvowo();
-    }
+    windows_game.or(if windows_helper { None } else { unix_game })
 }
 
 #[unsafe(no_mangle)]
@@ -158,29 +181,24 @@ pub unsafe extern "C" fn linuwux_setup_environment(
     _envp: *const *const c_char,
 ) {
     unsafe {
-        let denuvowo_enabled = denuvowo_enabled();
-        let denuvowo_process = denuvowo_enabled && denuvowo_dll_in_directory(argc, argv);
-        DENUVOWO_PROCESS.store(denuvowo_process, Ordering::Release);
+        crate::registry::init_registry();
+        let game_process = game_executable_argument(argc, argv).is_some();
+        GAME_PROCESS.store(game_process, Ordering::Release);
         if libc::getenv(c"LinUwUx".as_ptr()).is_null() {
             libc::setenv(c"LinUwUx".as_ptr(), c"1".as_ptr(), 0);
             let value = libc::getenv(c"PROTON_DISABLE_LSTEAMCLIENT".as_ptr());
             if value.is_null() || value.read() == 0 {
                 libc::setenv(c"PROTON_DISABLE_LSTEAMCLIENT".as_ptr(), c"1".as_ptr(), 0);
             }
+        }
+        if game_process {
             for dll in OVERRIDES {
                 add_override(dll);
             }
         }
-        if denuvowo_enabled {
-            add_override(DENUVOWO_DLL);
-        }
-        if denuvowo_process {
-            hint_denuvowo();
-        }
     }
 }
 
-#[cfg(not(test))]
 #[used]
 #[unsafe(link_section = ".init_array.00201")]
 static INITIALIZE: unsafe extern "C" fn(c_int, *const *const c_char, *const *const c_char) =

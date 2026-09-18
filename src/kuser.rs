@@ -1,40 +1,35 @@
-use core::fmt;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub const PAGE_SIZE: usize = 4096;
 
-pub const SHARED_TIME_OFFSET: usize = 0x7f8;
-pub const SHARED_TIME_PUBLISHED: usize = SHARED_TIME_OFFSET + 8;
-pub const SHARED_TIME_PUBLISHED_MARKER: u8 = 1;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum Profile {
-    Modern = 0,
-    LegacyDual = 1,
-    LegacySingle = 2,
+    ResumeTarget = 0,
+    DualDispatch = 1,
+    SingleDispatch = 2,
 }
 
 impl Profile {
     pub const fn from_raw(value: i32) -> Option<Self> {
         match value {
-            0 => Some(Self::Modern),
-            1 => Some(Self::LegacyDual),
-            2 => Some(Self::LegacySingle),
+            0 => Some(Self::ResumeTarget),
+            1 => Some(Self::DualDispatch),
+            2 => Some(Self::SingleDispatch),
             _ => None,
         }
     }
 
     pub fn visit_writes(self, avx_enabled: bool, mut write: impl FnMut(usize, u8)) {
         let ops: &[(usize, usize, u64)] = match self {
-            Self::LegacySingle => LEGACY_SINGLE_OPS,
-            Self::LegacyDual => LEGACY_DUAL_OPS,
-            Self::Modern => {
+            Self::SingleDispatch => SINGLE_DISPATCH_OPS,
+            Self::DualDispatch => DUAL_DISPATCH_OPS,
+            Self::ResumeTarget => {
                 for (index, byte) in b"C:\\Windows\0".iter().copied().enumerate() {
                     write(0x30 + index * 2, byte);
                     write(0x31 + index * 2, 0);
                 }
-                MODERN_OPS
+                RESUME_TARGET_OPS
             }
         };
         for &(offset, size, value) in ops {
@@ -42,7 +37,7 @@ impl Profile {
                 write(offset + index, byte);
             }
         }
-        if self == Self::Modern {
+        if self == Self::ResumeTarget {
             for offset in [0x290, 0x294, 0x295, 0x297] {
                 write(offset, 0);
             }
@@ -51,36 +46,14 @@ impl Profile {
                     write(offset, 0);
                 }
             }
-            for offset in (0x3f0..0x5f0)
-                .chain(0x604..SHARED_TIME_OFFSET)
-                .chain(SHARED_TIME_PUBLISHED + 1..0x804)
-            {
+            for offset in (0x3f0..0x5f0).chain(0x604..0x804) {
                 write(offset, 0);
             }
         }
     }
-
-    pub fn apply_to_buffer(self, page: &mut [u8], avx_enabled: bool) -> Result<(), BufferTooSmall> {
-        if page.len() < PAGE_SIZE {
-            return Err(BufferTooSmall);
-        }
-        self.visit_writes(avx_enabled, |offset, byte| page[offset] = byte);
-        Ok(())
-    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BufferTooSmall;
-
-impl fmt::Display for BufferTooSmall {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("KUSER buffer must contain at least 4096 bytes")
-    }
-}
-
-impl core::error::Error for BufferTooSmall {}
-
-const MODERN_OPS: &[(usize, usize, u64)] = &[
+const RESUME_TARGET_OPS: &[(usize, usize, u64)] = &[
     (0x260, 8, 0x0000000100006658),
     (0x268, 4, 0x00090001),
     (0x26c, 4, 0x0000000a),
@@ -118,7 +91,7 @@ const MODERN_OPS: &[(usize, usize, u64)] = &[
     (0xffc, 4, 0x13371337),
 ];
 
-const LEGACY_SINGLE_OPS: &[(usize, usize, u64)] = &[
+const SINGLE_DISPATCH_OPS: &[(usize, usize, u64)] = &[
     (0x2d6, 4, 0x0001_0034),
     (0x2e8, 4, 0x00bf_9c8f),
     (0x3c0, 4, 0x0000_0010),
@@ -133,7 +106,7 @@ const LEGACY_SINGLE_OPS: &[(usize, usize, u64)] = &[
     (0xffc, 4, 0x1337_1337),
 ];
 
-const LEGACY_DUAL_OPS: &[(usize, usize, u64)] = &[
+const DUAL_DISPATCH_OPS: &[(usize, usize, u64)] = &[
     (0x26e, 8, 0),
     (0x288, 8, 0x0000000001010101),
     (0x268, 8, 0x0000000A00090001),
@@ -161,31 +134,6 @@ const LEGACY_DUAL_OPS: &[(usize, usize, u64)] = &[
     (0xffc, 4, 0x1337_1337),
 ];
 
-const _: () = {
-    assert!(
-        SHARED_TIME_OFFSET.is_multiple_of(8),
-        "value cell must be 8-byte aligned"
-    );
-    assert!(SHARED_TIME_PUBLISHED < PAGE_SIZE);
-    let reserved_end = SHARED_TIME_PUBLISHED + 1;
-    let tables = [MODERN_OPS, LEGACY_DUAL_OPS, LEGACY_SINGLE_OPS];
-    let mut table = 0;
-    while table < tables.len() {
-        let mut i = 0;
-        while i < tables[table].len() {
-            let (offset, size, _) = tables[table][i];
-            assert!(size <= 8 && offset <= PAGE_SIZE && size <= PAGE_SIZE - offset);
-            let disjoint = offset + size <= SHARED_TIME_OFFSET || offset >= reserved_end;
-            assert!(
-                disjoint,
-                "patch table write collides with the shared faketime cell"
-            );
-            i += 1;
-        }
-        table += 1;
-    }
-};
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PatchError {
     Conflict,
@@ -193,15 +141,16 @@ pub enum PatchError {
 }
 
 const PATCH_UNAPPLIED: u32 = 0;
-const PATCH_MODERN_APPLYING: u32 = 1;
-const PATCH_MODERN_READY: u32 = 2;
-const PATCH_MODERN_FAILED: u32 = 3;
-const PATCH_LEGACY_SINGLE_APPLYING: u32 = 4;
-const PATCH_LEGACY_SINGLE_READY: u32 = 5;
-const PATCH_LEGACY_SINGLE_FAILED: u32 = 6;
-const PATCH_LEGACY_DUAL_APPLYING: u32 = 7;
-const PATCH_LEGACY_DUAL_READY: u32 = 8;
-const PATCH_LEGACY_DUAL_FAILED: u32 = 9;
+const PATCH_RESUME_TARGET_APPLYING: u32 = 1;
+const PATCH_RESUME_TARGET_READY: u32 = 2;
+const PATCH_RESUME_TARGET_FAILED: u32 = 3;
+const PATCH_SINGLE_DISPATCH_APPLYING: u32 = 4;
+const PATCH_SINGLE_DISPATCH_READY: u32 = 5;
+const PATCH_SINGLE_DISPATCH_FAILED: u32 = 6;
+const PATCH_DUAL_DISPATCH_APPLYING: u32 = 7;
+const PATCH_DUAL_DISPATCH_READY: u32 = 8;
+const PATCH_DUAL_DISPATCH_FAILED: u32 = 9;
+const PATCH_WAIT_LIMIT: u32 = 4096;
 
 #[derive(Debug, Default)]
 pub struct PatchState(AtomicU32);
@@ -215,9 +164,9 @@ impl PatchState {
         let _ = self
             .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
-                PATCH_MODERN_APPLYING => Some(PATCH_MODERN_FAILED),
-                PATCH_LEGACY_SINGLE_APPLYING => Some(PATCH_LEGACY_SINGLE_FAILED),
-                PATCH_LEGACY_DUAL_APPLYING => Some(PATCH_LEGACY_DUAL_FAILED),
+                PATCH_RESUME_TARGET_APPLYING => Some(PATCH_RESUME_TARGET_FAILED),
+                PATCH_SINGLE_DISPATCH_APPLYING => Some(PATCH_SINGLE_DISPATCH_FAILED),
+                PATCH_DUAL_DISPATCH_APPLYING => Some(PATCH_DUAL_DISPATCH_FAILED),
                 _ => None,
             });
     }
@@ -229,53 +178,62 @@ impl PatchState {
         mut wait: impl FnMut(),
     ) -> Result<(), PatchError> {
         let (applying_state, ready_state, failed_state) = match profile {
-            Profile::Modern => (
-                PATCH_MODERN_APPLYING,
-                PATCH_MODERN_READY,
-                PATCH_MODERN_FAILED,
+            Profile::ResumeTarget => (
+                PATCH_RESUME_TARGET_APPLYING,
+                PATCH_RESUME_TARGET_READY,
+                PATCH_RESUME_TARGET_FAILED,
             ),
-            Profile::LegacySingle => (
-                PATCH_LEGACY_SINGLE_APPLYING,
-                PATCH_LEGACY_SINGLE_READY,
-                PATCH_LEGACY_SINGLE_FAILED,
+            Profile::SingleDispatch => (
+                PATCH_SINGLE_DISPATCH_APPLYING,
+                PATCH_SINGLE_DISPATCH_READY,
+                PATCH_SINGLE_DISPATCH_FAILED,
             ),
-            Profile::LegacyDual => (
-                PATCH_LEGACY_DUAL_APPLYING,
-                PATCH_LEGACY_DUAL_READY,
-                PATCH_LEGACY_DUAL_FAILED,
+            Profile::DualDispatch => (
+                PATCH_DUAL_DISPATCH_APPLYING,
+                PATCH_DUAL_DISPATCH_READY,
+                PATCH_DUAL_DISPATCH_FAILED,
             ),
         };
         let mut completion_state = failed_state;
+        let mut waits = 0;
         loop {
             let current = self.0.load(Ordering::Acquire);
             if current == ready_state {
                 return Ok(());
             }
-            let another_legacy_apply = matches!(
+            let another_dispatch_apply = matches!(
                 current,
-                PATCH_LEGACY_SINGLE_APPLYING | PATCH_LEGACY_DUAL_APPLYING
+                PATCH_SINGLE_DISPATCH_APPLYING | PATCH_DUAL_DISPATCH_APPLYING
             );
-            if another_legacy_apply && current != applying_state {
+            if another_dispatch_apply && current != applying_state {
+                if waits == PATCH_WAIT_LIMIT {
+                    return Err(PatchError::Conflict);
+                }
+                waits += 1;
                 wait();
                 continue;
             }
             if current != PATCH_UNAPPLIED && !(applying_state..=failed_state).contains(&current) {
-                let can_transition_from_legacy =
-                    matches!(profile, Profile::LegacyDual | Profile::LegacySingle)
+                let can_transition_from_dispatch =
+                    matches!(profile, Profile::DualDispatch | Profile::SingleDispatch)
                         && matches!(
                             current,
-                            PATCH_MODERN_READY
-                                | PATCH_LEGACY_SINGLE_READY
-                                | PATCH_LEGACY_SINGLE_FAILED
-                                | PATCH_LEGACY_DUAL_READY
-                                | PATCH_LEGACY_DUAL_FAILED
+                            PATCH_RESUME_TARGET_READY
+                                | PATCH_SINGLE_DISPATCH_READY
+                                | PATCH_SINGLE_DISPATCH_FAILED
+                                | PATCH_DUAL_DISPATCH_READY
+                                | PATCH_DUAL_DISPATCH_FAILED
                         );
-                if !can_transition_from_legacy {
+                if !can_transition_from_dispatch {
                     return Err(PatchError::Conflict);
                 }
                 completion_state = current;
             }
             if current == applying_state {
+                if waits == PATCH_WAIT_LIMIT {
+                    return Err(PatchError::Conflict);
+                }
+                waits += 1;
                 wait();
                 continue;
             }

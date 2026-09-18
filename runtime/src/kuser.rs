@@ -4,19 +4,24 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use linuwux::kuser::{PAGE_SIZE, PatchError, PatchState, Profile};
 
 const ADDRESS: usize = 0x7ffe_0000;
+const SYSTEM_CALL_OFFSET: usize = 0x308;
+const SYSCALL_HACK_ENV: &CStr = c"LINUWUX_SYSCALL_HACK";
 static PAGE_GEOMETRY_SUPPORTED: AtomicBool = AtomicBool::new(false);
 static AVX_ENABLED: AtomicBool = AtomicBool::new(false);
+static SYSCALL_HACK_ENABLED: AtomicBool = AtomicBool::new(false);
+static SYSCALL_HACK_APPLIED: AtomicBool = AtomicBool::new(false);
 static PATCH_STATE: PatchState = PatchState::new();
 
 pub(crate) fn recover_patch_after_fork() {
     PATCH_STATE.recover_after_fork();
 }
 
-#[cfg(feature = "faketime")]
 #[path = "shared_time.rs"]
 mod shared_time;
-#[cfg(feature = "faketime")]
-pub(crate) use shared_time::{PublishError, read_shared_time_offset, write_shared_time_offset};
+
+pub(crate) fn prepare_shared_page() {
+    shared_time::prepare_shared_page();
+}
 
 unsafe extern "C" {
     fn debug_log(message: *const c_char);
@@ -24,6 +29,15 @@ unsafe extern "C" {
 
 fn log(message: &'static CStr) {
     unsafe { debug_log(message.as_ptr()) };
+}
+
+fn restore_read_only(page: *mut libc::c_void) -> bool {
+    for _ in 0..2 {
+        if unsafe { libc::syscall(libc::SYS_mprotect, page, PAGE_SIZE, libc::PROT_READ) } == 0 {
+            return true;
+        }
+    }
+    false
 }
 
 #[unsafe(no_mangle)]
@@ -53,7 +67,6 @@ unsafe fn apply_profile_to_shared_page(
         log(c"KUSER patch requires a 4096-byte base page");
         return false;
     }
-    #[cfg(feature = "faketime")]
     if !shared_time::shared_page_available_for_write() {
         log(c"KUSER patch requires Wine's shared KUSER mapping");
         return false;
@@ -79,14 +92,71 @@ unsafe fn apply_profile_to_shared_page(
             AVX_ENABLED.load(Ordering::Acquire) as c_int,
         )
     };
-    if unsafe { libc::syscall(libc::SYS_mprotect, page, PAGE_SIZE, libc::PROT_READ) } == -1 {
+    if syscall_hack_enabled() {
+        unsafe { page.add(SYSTEM_CALL_OFFSET).write_volatile(0) };
+    }
+    if !restore_read_only(page.cast()) {
         log(c"failed to restore KUSER_SHARED_DATA read-only protection");
         return false;
+    }
+    if syscall_hack_enabled() {
+        SYSCALL_HACK_APPLIED.store(true, Ordering::Release);
     }
     if apply_result == -1 {
         log(c"failed to apply KUSER_SHARED_DATA profile");
     }
     apply_result == 0
+}
+
+fn syscall_hack_enabled() -> bool {
+    if !SYSCALL_HACK_ENABLED.load(Ordering::Acquire) {
+        return false;
+    }
+    #[cfg(feature = "environment")]
+    {
+        crate::environment::game_process()
+    }
+    #[cfg(not(feature = "environment"))]
+    true
+}
+
+#[cfg(feature = "hooks")]
+pub(crate) fn force_direct_syscall() {
+    if !syscall_hack_enabled()
+        || SYSCALL_HACK_APPLIED.load(Ordering::Acquire)
+        || !PAGE_GEOMETRY_SUPPORTED.load(Ordering::Acquire)
+    {
+        return;
+    }
+    if !shared_time::shared_page_available_for_write() {
+        log(c"KUSER patch requires Wine's shared KUSER mapping");
+        return;
+    }
+    let Some(_guard) = crate::page_guard::PageGuard::acquire() else {
+        return;
+    };
+    if SYSCALL_HACK_APPLIED.load(Ordering::Acquire) {
+        return;
+    }
+    let page = ptr::with_exposed_provenance_mut::<u8>(ADDRESS);
+    if unsafe {
+        libc::syscall(
+            libc::SYS_mprotect,
+            page,
+            PAGE_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+        )
+    } == -1
+    {
+        return;
+    }
+    unsafe { page.add(SYSTEM_CALL_OFFSET).write_volatile(0) };
+    if !restore_read_only(page.cast()) {
+        log(c"failed to restore KUSER_SHARED_DATA read-only protection");
+        return;
+    }
+    SYSCALL_HACK_APPLIED.store(true, Ordering::Release);
+    log(c"KUSER_SHARED_DATA SystemCall forced to direct syscall");
 }
 
 #[unsafe(no_mangle)]
@@ -116,7 +186,7 @@ pub unsafe extern "C" fn patch_kuser_shared_data_profile(profile: c_int) -> c_in
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patch_kuser_shared_data() -> c_int {
-    unsafe { patch_kuser_shared_data_profile(Profile::Modern as c_int) }
+    unsafe { patch_kuser_shared_data_profile(Profile::ResumeTarget as c_int) }
 }
 
 #[unsafe(no_mangle)]
@@ -128,9 +198,14 @@ pub unsafe extern "C" fn linuwux_setup_kuser() {
     let supported = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } == PAGE_SIZE as libc::c_long;
     PAGE_GEOMETRY_SUPPORTED.store(supported, Ordering::Release);
     AVX_ENABLED.store(avx, Ordering::Release);
+    let syscall_hack = unsafe {
+        let value = libc::getenv(SYSCALL_HACK_ENV.as_ptr());
+        !value.is_null() && CStr::from_ptr(value).to_bytes() == b"1"
+    };
+    SYSCALL_HACK_ENABLED.store(syscall_hack, Ordering::Release);
+    prepare_shared_page();
 }
 
-#[cfg(not(test))]
 #[used]
 #[unsafe(link_section = ".init_array.00204")]
 static INITIALIZE: unsafe extern "C" fn() = linuwux_setup_kuser;

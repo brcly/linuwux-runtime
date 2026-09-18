@@ -1,4 +1,4 @@
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::ptr;
 use libc::{siginfo_t, ucontext_t};
 use linuwux::cpuid::is_wine_system_rip;
@@ -9,16 +9,21 @@ const SYS_USER_DISPATCH: c_int = 2;
 
 unsafe extern "C" {
     fn forward_signal(sig: c_int, info: *mut siginfo_t, context: *mut c_void);
-    fn reflex_route_syscall(context: *const ucontext_t, target: *mut u64) -> c_int;
+    fn reflex_route_syscall(
+        context: *const ucontext_t,
+        target: *mut u64,
+        rax_is_resume: *mut c_int,
+    ) -> c_int;
+}
+
+#[derive(Clone, Copy)]
+struct Route {
+    target: u64,
+    rax_is_resume: bool,
 }
 
 fn redirect_all() -> bool {
-    let value = unsafe { libc::getenv(c"LINUWUX_REDIRECT_ALL".as_ptr()) };
-    if value.is_null() {
-        false
-    } else {
-        linuwux::cpuid::redirect_all_enabled(Some(unsafe { CStr::from_ptr(value) }.to_bytes()))
-    }
+    crate::config::redirect_all()
 }
 
 #[unsafe(no_mangle)]
@@ -27,7 +32,11 @@ pub unsafe extern "C" fn syscallhook(sig: c_int, info: *mut siginfo_t, context: 
     let handled = unsafe {
         redirect(info, context.cast(), |ctx| {
             let mut target = 0;
-            (reflex_route_syscall(ctx, &mut target) != 0).then_some(target)
+            let mut rax_is_resume = 0;
+            (reflex_route_syscall(ctx, &mut target, &mut rax_is_resume) != 0).then_some(Route {
+                target,
+                rax_is_resume: rax_is_resume != 0,
+            })
         })
     };
     if !handled {
@@ -38,7 +47,7 @@ pub unsafe extern "C" fn syscallhook(sig: c_int, info: *mut siginfo_t, context: 
 unsafe fn redirect(
     info: *const siginfo_t,
     context: *mut ucontext_t,
-    route: impl FnOnce(*const ucontext_t) -> Option<u64>,
+    route: impl FnOnce(*const ucontext_t) -> Option<Route>,
 ) -> bool {
     if info.is_null() || context.is_null() {
         return false;
@@ -51,7 +60,7 @@ unsafe fn redirect(
     if !matches!(code, SYS_SECCOMP | SYS_USER_DISPATCH) {
         return false;
     }
-    let Some(target) = route(context) else {
+    let Some(selected_route) = route(context) else {
         return false;
     };
     unsafe {
@@ -67,17 +76,31 @@ unsafe fn redirect(
             return false;
         }
         let selector = gregs.add(libc::REG_RAX as usize).read() as u32;
-        let mut xmm4 = [0; 16];
+        let mut xmm4 = xmm.add(4).read();
         xmm4[..4].copy_from_slice(&selector.to_le_bytes());
         xmm.add(4).write(xmm4);
-        let rcx = gregs.add(libc::REG_RCX as usize).read();
-        gregs.add(libc::REG_RAX as usize).write(rcx);
+        let rcx = gregs.add(libc::REG_RCX as usize).read() as u64;
+        let rax = if selected_route.rax_is_resume {
+            syscall_resume(rip, rcx)
+        } else {
+            rcx
+        };
+        gregs.add(libc::REG_RAX as usize).write(rax as libc::greg_t);
         gregs
             .add(libc::REG_RCX as usize)
-            .write(target as libc::greg_t);
+            .write(selected_route.target as libc::greg_t);
         gregs
             .add(libc::REG_RIP as usize)
-            .write(target as libc::greg_t);
+            .write(selected_route.target as libc::greg_t);
     }
     true
+}
+
+unsafe fn syscall_resume(rip: u64, rcx: u64) -> u64 {
+    let instruction = unsafe { ptr::read(rip as *const [u8; 2]) };
+    if instruction == [0x0f, 0x05] {
+        rip.wrapping_add(2)
+    } else {
+        rcx
+    }
 }

@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use libc::{sigaction as Sigaction, siginfo_t, sigset_t};
 
 type RealSigaction = unsafe extern "C" fn(c_int, *const Sigaction, *mut Sigaction) -> c_int;
+type RealFree = unsafe extern "C" fn(*mut c_void);
 type Snapshot = MaybeUninit<Sigaction>;
 
 struct SignalSlot {
@@ -50,18 +51,55 @@ static SIGSEGV_SLOT: SignalSlot = SignalSlot::new();
 static SIGSYS_SLOT: SignalSlot = SignalSlot::new();
 static SIGNAL_UPDATE_LOCK: AtomicBool = AtomicBool::new(false);
 static REAL_SIGACTION: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static REAL_FREE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static WIN32U_START: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static WIN32U_END: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static FORK_REGISTERED: AtomicBool = AtomicBool::new(false);
+static RESOLVING_FREE_KEY: AtomicU32 = AtomicU32::new(u32::MAX);
+static LAST_WIN32U_FREE_KEY: AtomicU32 = AtomicU32::new(u32::MAX);
+
+fn pthread_key(slot: &AtomicU32) -> Option<libc::pthread_key_t> {
+    let existing = slot.load(Ordering::Acquire);
+    if existing != u32::MAX {
+        return Some(existing);
+    }
+    let mut created: libc::pthread_key_t = 0;
+    if unsafe { libc::pthread_key_create(&mut created, None) } != 0 {
+        return None;
+    }
+    match slot.compare_exchange(u32::MAX, created, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Some(created),
+        Err(current) => {
+            unsafe { libc::pthread_key_delete(created) };
+            Some(current)
+        }
+    }
+}
+
+fn tls_ptr(slot: &AtomicU32) -> *mut c_void {
+    pthread_key(slot).map_or(ptr::null_mut(), |key| unsafe {
+        libc::pthread_getspecific(key)
+    })
+}
+
+fn set_tls_ptr(slot: &AtomicU32, value: *mut c_void) {
+    if let Some(key) = pthread_key(slot) {
+        unsafe { libc::pthread_setspecific(key, value) };
+    }
+}
 
 extern "C" fn after_fork() {
     SIGNAL_UPDATE_LOCK.store(false, Ordering::Release);
     SIGSEGV_SLOT.readers.store(0, Ordering::SeqCst);
     SIGSYS_SLOT.readers.store(0, Ordering::SeqCst);
-    #[cfg(feature = "reflex")]
-    crate::registry::after_fork();
+    set_tls_ptr(&LAST_WIN32U_FREE_KEY, ptr::null_mut());
+    set_tls_ptr(&RESOLVING_FREE_KEY, ptr::null_mut());
+    unsafe { cpuid_disable_faulting() };
 }
 
 unsafe extern "C" {
     fn cpuid_sigsegv_handler(sig: c_int, info: *mut siginfo_t, context: *mut c_void);
+    fn cpuid_disable_faulting();
     fn syscallhook(sig: c_int, info: *mut siginfo_t, context: *mut c_void);
     fn detect_cpu_vendor();
     fn debug_runtime_activated();
@@ -76,13 +114,100 @@ fn set_errno(value: c_int) {
     unsafe { *libc::__errno_location() = value };
 }
 
-fn denuvowo_process() -> bool {
+fn game_process() -> bool {
     #[cfg(feature = "environment")]
     {
-        crate::environment::denuvowo_process()
+        crate::environment::game_process()
     }
     #[cfg(not(feature = "environment"))]
     false
+}
+
+fn resolve_real_free() -> Option<RealFree> {
+    if !tls_ptr(&RESOLVING_FREE_KEY).is_null() {
+        return None;
+    }
+    let mut symbol = REAL_FREE.load(Ordering::Acquire);
+    if symbol.is_null() {
+        set_tls_ptr(&RESOLVING_FREE_KEY, ptr::dangling_mut());
+        symbol = unsafe { libc::dlsym(libc::RTLD_NEXT, c"free".as_ptr()) };
+        set_tls_ptr(&RESOLVING_FREE_KEY, ptr::null_mut());
+        if symbol.is_null() {
+            return None;
+        }
+        REAL_FREE.store(symbol, Ordering::Release);
+    }
+    Some(unsafe { core::mem::transmute::<*mut c_void, RealFree>(symbol) })
+}
+
+unsafe extern "C" fn record_win32u(
+    info: *mut libc::dl_phdr_info,
+    _size: usize,
+    _data: *mut c_void,
+) -> c_int {
+    if info.is_null() {
+        return 0;
+    }
+    let name = unsafe { (*info).dlpi_name };
+    if name.is_null() {
+        return 0;
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+    let basename = name.rsplit(|&byte| byte == b'/').next().unwrap_or(name);
+    if basename != b"win32u.so" && basename != b"win32u.dll.so" {
+        return 0;
+    }
+    let base = unsafe { (*info).dlpi_addr } as usize;
+    let mut end = base;
+    let phnum = unsafe { (*info).dlpi_phnum } as usize;
+    let phdr = unsafe { (*info).dlpi_phdr };
+    for index in 0..phnum {
+        let ph = unsafe { &*phdr.add(index) };
+        if ph.p_type != libc::PT_LOAD {
+            continue;
+        }
+        let segment_end = base
+            .wrapping_add(ph.p_vaddr as usize)
+            .wrapping_add(ph.p_memsz as usize);
+        if segment_end > end {
+            end = segment_end;
+        }
+    }
+    WIN32U_START.store(base as *mut c_void, Ordering::Release);
+    WIN32U_END.store(end as *mut c_void, Ordering::Release);
+    1
+}
+
+fn caller_from_win32u(caller: *mut c_void) -> bool {
+    if caller.is_null() {
+        return false;
+    }
+    let mut start = WIN32U_START.load(Ordering::Acquire) as usize;
+    let mut end = WIN32U_END.load(Ordering::Acquire) as usize;
+    if start == 0 || end <= start {
+        unsafe { libc::dl_iterate_phdr(Some(record_win32u), ptr::null_mut()) };
+        start = WIN32U_START.load(Ordering::Acquire) as usize;
+        end = WIN32U_END.load(Ordering::Acquire) as usize;
+        if start == 0 || end <= start {
+            return false;
+        }
+    }
+    let addr = caller as usize;
+    addr >= start && addr < end
+}
+
+unsafe extern "C" fn free_inner(ptr: *mut c_void, caller: *mut c_void) {
+    let Some(real) = resolve_real_free() else {
+        return;
+    };
+    if game_process() && !ptr.is_null() && caller_from_win32u(caller) {
+        if tls_ptr(&LAST_WIN32U_FREE_KEY) == ptr {
+            return;
+        }
+        set_tls_ptr(&LAST_WIN32U_FREE_KEY, ptr);
+    }
+    // SAFETY: `real` is libc `free` resolved with RTLD_NEXT.
+    unsafe { real(ptr) };
 }
 
 fn yield_thread() {
@@ -150,7 +275,7 @@ unsafe fn handler_is_from_wine_ntdll(action: *const Sigaction) -> bool {
     }
     let name = unsafe { CStr::from_ptr(name) }.to_bytes();
     let basename = name.rsplit(|&byte| byte == b'/').next().unwrap_or(name);
-    basename == b"ntdll.so" || basename == b"ntdll.dll.so"
+    basename == b"ntdll.so" || basename == b"ntdll.dll.so" || basename == b"ntdll.dll"
 }
 
 #[repr(C)]
@@ -310,9 +435,11 @@ unsafe fn install_bridge(
     if !oldact.is_null() {
         unsafe { ptr::copy_nonoverlapping(previous.as_ptr(), oldact, 1) };
     }
+    #[cfg(feature = "kuser")]
+    crate::kuser::force_direct_syscall();
     if sig == libc::SIGSEGV {
-        #[cfg(feature = "reflex")]
-        crate::registry::setup_registry_worker();
+        #[cfg(feature = "kuser")]
+        crate::kuser::prepare_shared_page();
         if first_install {
             unsafe {
                 detect_cpu_vendor();
@@ -334,6 +461,20 @@ unsafe fn install_bridge(
     0
 }
 
+#[cfg(not(miri))]
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+pub unsafe extern "C" fn free(_ptr: *mut c_void) {
+    // SAFETY: SysV `free` receives the pointer in `rdi`. The return address is
+    // still at `[rsp]`; copying it into `rsi` and jumping keeps the original
+    // frame so `free_inner` returns to the caller.
+    core::arch::naked_asm!(
+        "mov rsi, qword ptr [rsp]",
+        "jmp {inner}",
+        inner = sym free_inner,
+    );
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(
     signum: c_int,
@@ -352,10 +493,7 @@ pub unsafe extern "C" fn sigaction(
     let Some(_guard) = UpdateGuard::acquire() else {
         return -1;
     };
-    if !slot.owned.load(Ordering::Acquire)
-        && !denuvowo_process()
-        && !unsafe { handler_is_from_wine_ntdll(act) }
-    {
+    if !slot.owned.load(Ordering::Acquire) && !unsafe { handler_is_from_wine_ntdll(act) } {
         unsafe { real(signum, act, oldact) }
     } else {
         unsafe { install_bridge(slot, signum, act, oldact, real) }
@@ -365,6 +503,7 @@ pub unsafe extern "C" fn sigaction(
 #[unsafe(no_mangle)]
 pub extern "C" fn linuwux_setup_hooks() {
     let _ = resolve_real_sigaction();
+    let _ = resolve_real_free();
     if FORK_REGISTERED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
@@ -374,7 +513,6 @@ pub extern "C" fn linuwux_setup_hooks() {
     }
 }
 
-#[cfg(not(test))]
 #[used]
 #[unsafe(link_section = ".init_array.00203")]
 static INITIALIZE: extern "C" fn() = linuwux_setup_hooks;

@@ -4,6 +4,28 @@ pub fn is_gamescope_path(path: &[u8]) -> bool {
     path.rsplit(|&byte| byte == b'/').next() == Some(b"gamescope".as_slice())
 }
 
+pub fn desktop_list_has_gamescope(list: &[u8]) -> bool {
+    let mut start = 0;
+    while start < list.len() {
+        while start < list.len() && (list[start] == b':' || list[start].is_ascii_whitespace()) {
+            start += 1;
+        }
+        let mut end = start;
+        while end < list.len() && list[end] != b':' && !list[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        if &list[start..end] == b"gamescope" {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
+pub fn is_gamescope_session(current_desktop: &[u8], session_desktop: &[u8]) -> bool {
+    desktop_list_has_gamescope(current_desktop) || desktop_list_has_gamescope(session_desktop)
+}
+
 pub fn preload_has_path(list: &[u8], path: &[u8], is_space: impl Fn(u8) -> bool) -> bool {
     !path.is_empty()
         && list

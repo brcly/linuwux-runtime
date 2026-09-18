@@ -1,6 +1,7 @@
 use core::arch::x86_64::__cpuid_count;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use libc::{greg_t, siginfo_t, ucontext_t};
 use linuwux::cpuid::{ActiveProfile, Registers, Vendor, is_wine_system_rip, proton_avx_enabled};
@@ -13,7 +14,7 @@ unsafe extern "C" {
     fn debug_log(message: *const c_char);
     fn forward_signal(sig: c_int, info: *mut siginfo_t, context: *mut c_void);
     fn reflex_handle_cpuid(leaf: u32, value: u64) -> c_int;
-    fn reflex_modern_identity_unarmed() -> c_int;
+    fn reflex_resume_identity_unarmed() -> c_int;
 }
 
 fn native_cpuid(leaf: u32, subleaf: u32) -> Registers {
@@ -26,12 +27,82 @@ fn native_cpuid(leaf: u32, subleaf: u32) -> Registers {
     }
 }
 
+const NATIVE_CACHE_CAP: usize = 32;
+
+struct NativeCache {
+    lock: AtomicBool,
+    len: AtomicU32,
+    keys: [AtomicU64; NATIVE_CACHE_CAP],
+    eax: [AtomicU32; NATIVE_CACHE_CAP],
+    ebx: [AtomicU32; NATIVE_CACHE_CAP],
+    ecx: [AtomicU32; NATIVE_CACHE_CAP],
+    edx: [AtomicU32; NATIVE_CACHE_CAP],
+}
+
+impl NativeCache {
+    const fn new() -> Self {
+        Self {
+            lock: AtomicBool::new(false),
+            len: AtomicU32::new(0),
+            keys: [const { AtomicU64::new(0) }; NATIVE_CACHE_CAP],
+            eax: [const { AtomicU32::new(0) }; NATIVE_CACHE_CAP],
+            ebx: [const { AtomicU32::new(0) }; NATIVE_CACHE_CAP],
+            ecx: [const { AtomicU32::new(0) }; NATIVE_CACHE_CAP],
+            edx: [const { AtomicU32::new(0) }; NATIVE_CACHE_CAP],
+        }
+    }
+
+    fn lookup(&self, leaf: u32, subleaf: u32) -> Option<Registers> {
+        let key = u64::from(leaf) << 32 | u64::from(subleaf);
+        let len = self.len.load(Ordering::Acquire) as usize;
+        for index in 0..len.min(NATIVE_CACHE_CAP) {
+            if self.keys[index].load(Ordering::Acquire) == key {
+                return Some(Registers {
+                    eax: self.eax[index].load(Ordering::Acquire),
+                    ebx: self.ebx[index].load(Ordering::Acquire),
+                    ecx: self.ecx[index].load(Ordering::Acquire),
+                    edx: self.edx[index].load(Ordering::Acquire),
+                });
+            }
+        }
+        None
+    }
+
+    fn insert(&self, leaf: u32, subleaf: u32, regs: Registers) {
+        let key = u64::from(leaf) << 32 | u64::from(subleaf);
+        while self
+            .lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        let len = self.len.load(Ordering::Relaxed) as usize;
+        if len < NATIVE_CACHE_CAP {
+            self.keys[len].store(key, Ordering::Release);
+            self.eax[len].store(regs.eax, Ordering::Release);
+            self.ebx[len].store(regs.ebx, Ordering::Release);
+            self.ecx[len].store(regs.ecx, Ordering::Release);
+            self.edx[len].store(regs.edx, Ordering::Release);
+            self.len.store((len + 1) as u32, Ordering::Release);
+        }
+        self.lock.store(false, Ordering::Release);
+    }
+}
+
+static NATIVE_CACHE: NativeCache = NativeCache::new();
+
 fn fixed_reply(leaf: u32) -> Option<Registers> {
     let mut reply = ACTIVE_PROFILE.fixed_reply(leaf)?;
-    if leaf == 1 && unsafe { reflex_modern_identity_unarmed() } != 0 {
+    if leaf == 1 && unsafe { reflex_resume_identity_unarmed() } != 0 {
         reply.ecx |= 1 << 31;
     }
     Some(reply)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cpuid_disable_faulting() {
+    let _ = unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_SET_CPUID, 1 as libc::c_ulong) };
 }
 
 #[unsafe(no_mangle)]
@@ -45,7 +116,7 @@ pub extern "C" fn cpuid_configure_profile(vendor: c_int, avx_enabled: c_int) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn cpuid_activate_legacy_profile() {
+pub extern "C" fn cpuid_activate_dispatch_profile() {
     ACTIVE_PROFILE.activate_legacy();
 }
 
@@ -87,7 +158,7 @@ fn is_cpuid_instruction_at(address: usize) -> bool {
     let result = unsafe {
         libc::syscall(
             libc::SYS_process_vm_readv,
-            libc::getpid(),
+            libc::syscall(libc::SYS_getpid),
             &local as *const libc::iovec,
             1 as libc::c_ulong,
             &remote as *const libc::iovec,
@@ -99,15 +170,18 @@ fn is_cpuid_instruction_at(address: usize) -> bool {
 }
 
 fn redirect_all() -> bool {
-    let value = unsafe { libc::getenv(c"LINUWUX_REDIRECT_ALL".as_ptr()) };
-    if value.is_null() {
-        false
-    } else {
-        linuwux::cpuid::redirect_all_enabled(Some(unsafe { CStr::from_ptr(value) }.to_bytes()))
-    }
+    crate::config::redirect_all()
+}
+
+fn leaf_varies_per_core(leaf: u32) -> bool {
+    leaf == 0xb || leaf == 0x1f
 }
 
 fn native_reply(leaf: u32, subleaf: u32) -> Registers {
+    let cacheable = !leaf_varies_per_core(leaf);
+    if cacheable && let Some(cached) = NATIVE_CACHE.lookup(leaf, subleaf) {
+        return cached;
+    }
     if unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_SET_CPUID, 1 as libc::c_ulong) } == -1 {
         unsafe { debug_log(c"CPUID native pass-through enable failed; returning zeros".as_ptr()) };
         return Registers::default();
@@ -120,6 +194,9 @@ fn native_reply(leaf: u32, subleaf: u32) -> Registers {
             libc::syscall(libc::SYS_exit_group, 127 as c_int);
             libc::_exit(127);
         }
+    }
+    if cacheable {
+        NATIVE_CACHE.insert(leaf, subleaf, result);
     }
     result
 }

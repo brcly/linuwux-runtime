@@ -93,8 +93,8 @@ This installs:
 ~/.local/share/linuwux/LinUwUx.so
 ```
 
-No root access is needed. If `~/.local/bin` is missing from `PATH`, add this to
-your shell profile and sign out and back in:
+The default install needs no root access. If `~/.local/bin` is missing from
+`PATH`, add this to your shell profile and sign out and back in:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -102,19 +102,33 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Check the install with `command -v linuwux`. Run the installer again to update.
 
+If you want bare `linuwux` to work from desktop launchers whose session `PATH`
+does not include `~/.local/bin`, optionally install the launcher globally:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/brcly/linuwux-runtime/main/install.sh | bash -s -- --global
+```
+
+This asks for a sudo password and installs only the launcher in
+`/usr/local/bin`; the library remains in your home directory.
+
+Some desktop sessions, including UWSM-managed Hyprland sessions, replace the
+user `PATH` after login. An `environment.d` file may be read but still not reach
+Noctalia, Faugus, or other already-managed applications. Use the absolute path
+in launcher settings, or use `--global` if you want the bare command.
+
 ## Steam
 
 Add this under **Properties > Launch Options**:
 
 ```text
-linuwux %command%
+/home/USERNAME/.local/bin/linuwux %command%
 ```
 
-`linuwux` is a command prefix, despite Steam presenting launch options like an
-environment-variable field. Put actual variables before it:
+`linuwux` is a command prefix. Put actual variables before it:
 
 ```text
-PROTON_AVX=1 linuwux %command%
+PROTON_AVX=1 /home/USERNAME/.local/bin/linuwux %command%
 ```
 
 For Flatpak Steam, use the full path if the command cannot be found:
@@ -128,25 +142,39 @@ The Flatpak must also be able to read
 
 ## Gamescope and MangoHud
 
-Ordering matters. Put Gamescope options before `--` and `linuwux` immediately
-before the game command:
+For normal launches, put `linuwux` before the game command:
 
 ```text
-gamescope -f -- linuwux %command%
-mangohud linuwux %command%
-MANGOHUD=1 linuwux %command%
-gamescope --mangoapp -f -- linuwux %command%
-PROTON_AVX=1 gamescope --mangoapp -f -- linuwux %command%
+mangohud /home/USERNAME/.local/bin/linuwux %command%
+MANGOHUD=1 /home/USERNAME/.local/bin/linuwux %command%
 ```
+
+When Gamescope wraps the game, put `linuwux` before Gamescope. This keeps the
+runtime loaded if Gamescope re-executes itself or rewrites the child environment:
+
+```text
+/home/USERNAME/.local/bin/linuwux gamescope -f -- %command%
+/home/USERNAME/.local/bin/linuwux gamescope --mangoapp -f -- %command%
+PROTON_AVX=1 /home/USERNAME/.local/bin/linuwux gamescope --mangoapp -f -- %command%
+```
+
+Putting `linuwux` after Gamescope loads it only in the game process.
+
+The wrapper also drops any `gameoverlayrenderer.so` entry from an inherited
+`LD_PRELOAD` when the wrapped command is `gamescope`, so Gamescope does not
+re-inject a Steam overlay LinUwUx did not request.
 
 ## Other launchers
 
 - **Faugus Launcher:** Edit the game, open **Tools > Launch Settings**, and set
-  **Launch Argument** to `linuwux`. Use **Launch Arguments**, rather than **Game
-  Arguments**. Its built-in GameMode and MangoHud switches can stay enabled.
+  **Launch Argument** to `/home/USERNAME/.local/bin/linuwux`. Use **Launch
+  Arguments**, rather than **Game Arguments**. Its built-in GameMode and MangoHud
+  switches can stay enabled.
+  For Gamescope, use `/home/USERNAME/.local/bin/linuwux gamescope --` as the
+  launch argument.
 - **Lutris:** Open **Configure > Advanced options > System options** and set
-  **Command prefix** to `linuwux`.
-- **Heroic, Bottles, and other frontends:** Put `linuwux` in the per-game
+  **Command prefix** to `/home/USERNAME/.local/bin/linuwux`.
+- **Heroic, Bottles, and other frontends:** Put `/home/USERNAME/.local/bin/linuwux` in the per-game
   **Wrapper** or **Command prefix** field.
 
 For Flatpak launchers, use `/home/USERNAME/.local/bin/linuwux` and allow access
@@ -156,8 +184,8 @@ to the installed library. If a launcher only accepts environment variables, set:
 | --- | --- |
 | `LD_PRELOAD` | `/home/USERNAME/.local/share/linuwux/LinUwUx.so` |
 
-Keep any existing `LD_PRELOAD` value and append LinUwUx with a colon. Use an
-absolute path without spaces or colons.
+The wrapper always loads the installed LinUwUx library and prepends it to any
+existing `LD_PRELOAD` value. Use an absolute path without spaces or colons.
 
 ## Configuration
 
@@ -165,12 +193,39 @@ LinUwUx needs no extra variables by default.
 
 | Variable | Behaviour |
 | --- | --- |
-| `PROTON_AVX=1` | Enables AVX flags for the modern profile |
-| `LINUWUX_DENUVOWODLL=1` | Experimental: enables native DenuvOwO.dll loading; protocol support activates only for a target game directory containing the DLL |
+| `PROTON_AVX=1` | Enables AVX flags for the resume-target profile |
+| `LINUWUX_SYSCALL_HACK=1` | Clears Wine's `KUSER_SHARED_DATA.SystemCall` flag (direct syscall path). Opt-in per title; not implied by Reflex |
+| `LINUWUX_REDIRECT_ALL=1` | Experimental: routes CPUID instructions from Wine system code through LinUwUx instead of allowing native pass-through |
 | `LINUWUX_DEBUG=1` | Enables runtime diagnostics |
 | `LINUWUX_LOG=/absolute/path.log` | Writes diagnostics to a private `0600` file |
 
 `LinUwUx` is an internal process marker and should not be set manually.
+
+The launched game executable (a non-`system32` `.exe`) gets CPUID trapping,
+native DLL overrides, and `win32u` duplicate-`free` suppression. Wine helpers
+only append `HwProfileGuid` to an existing `$WINEPREFIX/system.reg`. LinUwUx
+also sets `PROTON_DISABLE_LSTEAMCLIENT=1` on first run in a process tree,
+unless it is already set to a nonzero value.
+
+Reflex protocol starts every title as a resume-target stub (ACBFR/FC6-style)
+at `0x336933` (ARM_TARGET) and only upgrades to a real dispatch table (HM/LAD)
+if the title later confirms it with a `DISPATCH_SYSTEM_ID`/
+`DISPATCH_ATTRIBUTES_*` leaf; sending `0x69696969` or a page-aligned
+ARM_TARGET alone is not enough (TopSpin 2K25 sends both but is still a
+resume-target stub). `DenuvOwO=n,b` is one of the native overrides applied to
+every detected game process (see above), not gated by any file on disk.
+`LINUWUX_SYSCALL_HACK=1` is independent and is required for titles that need
+the direct syscall path.
+
+If a game still fails during CPUID setup, try routing CPUID instructions from
+Wine system code through LinUwUx as well:
+
+```text
+LINUWUX_REDIRECT_ALL=1 /home/USERNAME/.local/bin/linuwux %command%
+```
+
+This is an experimental compatibility option and should remain unset for
+games that do not need it.
 
 ## Troubleshooting
 
@@ -188,7 +243,10 @@ LINUWUX_DEBUG=1 LINUWUX_LOG=/tmp/linuwux.log linuwux %command%
 
 Remove the debug variables afterwards. To report a problem, open a
 [bug report](https://github.com/brcly/linuwux-runtime/issues/new?template=bug_report.yml)
-and attach the full LinUwUx log plus the Proton, UMU, or launcher log.
+and attach the full LinUwUx log plus the Proton, UMU, or launcher log. See
+[CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+before opening a pull request, and report security issues privately per
+[SECURITY.md](SECURITY.md).
 
 ## Build from source
 
@@ -205,6 +263,8 @@ cargo xtask build --debug
 cargo xtask build --output /absolute/path/LinUwUx.so
 ```
 
+`--debug` writes to `target/runtime-debug/LinUwUx.so` instead.
+
 The build checks the public exports, constructor order, ELF architecture, and
 linker hardening.
 
@@ -213,6 +273,12 @@ linker hardening.
 ```sh
 rm "$HOME/.local/bin/linuwux"
 rm "$HOME/.local/share/linuwux/LinUwUx.so"
+```
+
+If you used `--global`, also remove the optional system launcher:
+
+```sh
+sudo rm /usr/local/bin/linuwux
 ```
 
 Remove `linuwux` or the direct `LD_PRELOAD` entry from each launcher too.

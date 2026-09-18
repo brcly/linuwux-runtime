@@ -7,7 +7,7 @@ static REFLEX_STATE: State = State::new();
 struct RuntimeHost;
 
 unsafe extern "C" {
-    fn cpuid_activate_legacy_profile();
+    fn cpuid_activate_dispatch_profile();
     fn set_offset(filetime: u64);
     fn patch_kuser_shared_data_profile(profile: c_int) -> c_int;
     fn debug_log(message: *const c_char);
@@ -15,8 +15,8 @@ unsafe extern "C" {
 }
 
 impl Host for RuntimeHost {
-    fn activate_legacy_cpuid(&self) {
-        unsafe { cpuid_activate_legacy_profile() };
+    fn activate_dispatch_cpuid(&self) {
+        unsafe { cpuid_activate_dispatch_profile() };
     }
     fn set_offset(&self, filetime: u64) {
         unsafe { set_offset(filetime) };
@@ -25,8 +25,11 @@ impl Host for RuntimeHost {
         unsafe { patch_kuser_shared_data_profile(profile as c_int) == 0 }
     }
     fn set_hwprofile_guid(&self) {
-        #[cfg(feature = "hooks")]
+        #[cfg(feature = "environment")]
         crate::registry::set_hwprofile_guid();
+    }
+    fn yield_thread(&self) {
+        unsafe { libc::syscall(libc::SYS_sched_yield) };
     }
     fn log(&self, message: &'static CStr) {
         unsafe { debug_log(message.as_ptr()) };
@@ -42,21 +45,17 @@ pub extern "C" fn reflex_handle_cpuid(leaf: u32, argument: u64) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn reflex_hint_denuvowo() {
-    REFLEX_STATE.hint_denuvowo(&RuntimeHost);
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn reflex_modern_identity_unarmed() -> c_int {
-    c_int::from(REFLEX_STATE.modern_identity_unarmed())
+pub extern "C" fn reflex_resume_identity_unarmed() -> c_int {
+    c_int::from(REFLEX_STATE.resume_identity_unarmed())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn reflex_route_syscall(
     context: *const ucontext_t,
     target: *mut u64,
+    rax_is_resume: *mut c_int,
 ) -> c_int {
-    if context.is_null() || target.is_null() {
+    if context.is_null() || target.is_null() || rax_is_resume.is_null() {
         return 0;
     }
     let (number, r10, rcx) = unsafe {
@@ -68,8 +67,11 @@ pub unsafe extern "C" fn reflex_route_syscall(
         )
     };
     match REFLEX_STATE.route_syscall(number, r10, rcx) {
-        Some(selected) => {
-            unsafe { target.write(selected) };
+        Some(route) => {
+            unsafe {
+                target.write(route.target);
+                rax_is_resume.write(c_int::from(route.rax_is_resume));
+            }
             1
         }
         None => 0,

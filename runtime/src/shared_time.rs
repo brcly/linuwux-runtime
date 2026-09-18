@@ -1,12 +1,7 @@
-use super::{ADDRESS, PAGE_GEOMETRY_SUPPORTED, PAGE_SIZE, log};
-use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering, fence};
-use linuwux::kuser::{SHARED_TIME_OFFSET, SHARED_TIME_PUBLISHED, SHARED_TIME_PUBLISHED_MARKER};
+use super::{ADDRESS, PAGE_GEOMETRY_SUPPORTED, PAGE_SIZE};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 static VERIFIED: AtomicBool = AtomicBool::new(false);
-static PROBE_COUNT: AtomicU32 = AtomicU32::new(0);
-
-const PROBE_INTERVAL: u32 = 4096;
 
 fn wine_mapping(line: &[u8]) -> bool {
     let mut fields = line
@@ -90,79 +85,23 @@ fn verify_shared_page() -> bool {
     found
 }
 
-pub(crate) fn shared_page_available() -> bool {
+pub(crate) fn prepare_shared_page() -> bool {
+    let verified = verify_shared_page();
+    VERIFIED.store(verified, Ordering::Release);
+    verified
+}
+
+fn ensure_verified() -> bool {
     if VERIFIED.load(Ordering::Acquire) {
         return true;
     }
-    if !PROBE_COUNT
-        .fetch_add(1, Ordering::Relaxed)
-        .is_multiple_of(PROBE_INTERVAL)
-    {
-        return false;
-    }
     let verified = verify_shared_page();
-    VERIFIED.store(verified, Ordering::Release);
+    if verified {
+        VERIFIED.store(true, Ordering::Release);
+    }
     verified
 }
 
 pub(crate) fn shared_page_available_for_write() -> bool {
-    let verified = verify_shared_page();
-    VERIFIED.store(verified, Ordering::Release);
-    PROBE_COUNT.store(0, Ordering::Relaxed);
-    verified
-}
-
-pub(crate) fn read_shared_time_offset() -> Option<u64> {
-    if !shared_page_available() {
-        return None;
-    }
-    unsafe {
-        let flag = &*((ADDRESS + SHARED_TIME_PUBLISHED) as *const AtomicU8);
-        if flag.load(Ordering::Relaxed) != SHARED_TIME_PUBLISHED_MARKER {
-            return None;
-        }
-        fence(Ordering::Acquire);
-        let cell = &*((ADDRESS + SHARED_TIME_OFFSET) as *const AtomicU64);
-        let value = cell.load(Ordering::Relaxed);
-        fence(Ordering::Acquire);
-        Some(value)
-    }
-}
-
-pub(crate) enum PublishError {
-    Unavailable,
-    ProtectionRestore,
-}
-
-pub(crate) fn write_shared_time_offset(
-    value: u64,
-    _guard: &crate::page_guard::PageGuard,
-) -> Result<(), PublishError> {
-    if !shared_page_available_for_write() {
-        return Err(PublishError::Unavailable);
-    }
-    let page = ptr::with_exposed_provenance_mut::<libc::c_void>(ADDRESS);
-    if unsafe {
-        libc::syscall(
-            libc::SYS_mprotect,
-            page,
-            PAGE_SIZE,
-            libc::PROT_READ | libc::PROT_WRITE,
-        )
-    } != 0
-    {
-        log(c"failed to make KUSER_SHARED_DATA writable for the faketime cell");
-        return Err(PublishError::Unavailable);
-    }
-    unsafe {
-        AtomicU64::from_ptr((ADDRESS + SHARED_TIME_OFFSET) as *mut u64)
-            .store(value, Ordering::Release);
-        AtomicU8::from_ptr((ADDRESS + SHARED_TIME_PUBLISHED) as *mut u8)
-            .store(SHARED_TIME_PUBLISHED_MARKER, Ordering::Release);
-    }
-    if unsafe { libc::syscall(libc::SYS_mprotect, page, PAGE_SIZE, libc::PROT_READ) } != 0 {
-        log(c"failed to restore KUSER_SHARED_DATA read-only protection");
-        return Err(PublishError::ProtectionRestore);
-    }
-    Ok(())
+    ensure_verified()
 }

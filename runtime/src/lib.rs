@@ -1,8 +1,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::missing_safety_doc)]
-#![cfg_attr(all(not(test), not(debug_assertions), panic = "abort"), no_std)]
+#![cfg_attr(all(not(debug_assertions), panic = "abort"), no_std)]
 
-#[cfg(all(not(test), not(debug_assertions), panic = "abort"))]
+#[cfg(all(not(debug_assertions), panic = "abort"))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     unsafe { libc::abort() }
@@ -16,6 +16,8 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 )))]
 compile_error!("linuwux-runtime requires Linux x86_64 with glibc and 64-bit pointers");
 
+#[cfg(any(feature = "cpuid", feature = "syscall"))]
+mod config;
 #[cfg(any(
     feature = "cpuid",
     feature = "syscall",
@@ -42,7 +44,7 @@ pub mod hooks;
 pub mod kuser;
 #[cfg(feature = "reflex")]
 pub mod reflex;
-#[cfg(all(feature = "reflex", feature = "hooks"))]
+#[cfg(feature = "environment")]
 pub mod registry;
 #[cfg(feature = "syscall")]
 pub mod syscall;

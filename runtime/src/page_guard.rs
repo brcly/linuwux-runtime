@@ -24,7 +24,7 @@ impl PageGuard {
             return None;
         }
         let mask = previous;
-        let pid = unsafe { libc::getpid() };
+        let pid = unsafe { libc::syscall(libc::SYS_getpid) as libc::c_int };
         let owner = OWNER.load(Ordering::Acquire);
         if owner == pid
             || OWNER

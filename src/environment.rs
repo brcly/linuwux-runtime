@@ -1,10 +1,11 @@
 use core::ffi::CStr;
 
-pub const OVERRIDES: [&CStr; 14] = [
+pub const OVERRIDES: [&CStr; 15] = [
     c"winmm",
     c"version",
     c"reflex",
     c"reflex64",
+    c"DenuvOwO",
     c"d3d9",
     c"d3d10",
     c"d3d11",

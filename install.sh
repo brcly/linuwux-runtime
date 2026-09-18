@@ -1,13 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+case "${1-}" in
+    "") ;;
+    --help|-h)
+        cat <<'USAGE'
+Usage: install.sh [--global]
+
+Install LinUwUx for the current user. The optional --global flag also symlinks
+the launcher into /usr/local/bin and may ask for a sudo password.
+USAGE
+        exit 0
+        ;;
+    --global)
+        if [ "$#" -ne 1 ]; then
+            echo "install.sh: --global does not accept additional arguments" >&2
+            exit 2
+        fi
+        ;;
+    *)
+        echo "install.sh: unknown option: $1" >&2
+        echo "Usage: install.sh [--global]" >&2
+        exit 2
+        ;;
+esac
+
 REPO="${LINUWUX_REPO:-brcly/linuwux-runtime}"
 VERSION="${LINUWUX_VERSION:-latest}"
+INSTALL_GLOBAL=0
+[ "${1-}" = "--global" ] && INSTALL_GLOBAL=1
 
 LIB_DIR="$HOME/.local/share/linuwux"
 BIN_DIR="$HOME/.local/bin"
 LIB_PATH="$LIB_DIR/LinUwUx.so"
 BIN_PATH="$BIN_DIR/linuwux"
+GLOBAL_BIN_PATH="/usr/local/bin/linuwux"
 
 if [ "$VERSION" = "latest" ]; then
     asset_url="https://github.com/$REPO/releases/latest/download/LinUwUx.so"
@@ -32,13 +59,23 @@ install -m 0644 "$tmp_lib" "$LIB_PATH"
 
 cat >"$BIN_PATH" <<EOF
 #!/bin/sh
-lib="\${LINUWUX_PRELOAD:-$LIB_PATH}"
+set -eu
+set -f
 
-if [ ! -f "\$lib" ]; then
+lib="$LIB_PATH"
+
+if [ ! -r "\$lib" ]; then
     echo "linuwux: library not found: \$lib" >&2
-    echo "  Reinstall with install.sh, or set LINUWUX_PRELOAD to its path" >&2
+    echo "  Reinstall with install.sh" >&2
     exit 1
 fi
+
+case "\$lib" in
+    *:*)
+        echo "linuwux: library path cannot contain ':' when used in LD_PRELOAD" >&2
+        exit 1
+        ;;
+esac
 
 if [ "\$#" -eq 0 ]; then
     echo "linuwux: no command given -- use it as a launch option:" >&2
@@ -46,52 +83,61 @@ if [ "\$#" -eq 0 ]; then
     exit 1
 fi
 
-export LD_PRELOAD="\${LD_PRELOAD:+\$LD_PRELOAD:}\$lib"
+preload="\${LD_PRELOAD-}"
+command_name="\${1##*/}"
+filtered=
+old_ifs=\$IFS
+IFS=:
+for entry in \$preload; do
+    [ -n "\$entry" ] || continue
+    case "\$entry" in
+        "\$lib") continue ;;
+    esac
+    if [ "\$command_name" = gamescope ]; then
+        case "\$entry" in
+            *gameoverlayrenderer.so*) continue ;;
+        esac
+    fi
+    filtered="\${filtered:+\$filtered:}\$entry"
+done
+IFS=\$old_ifs
+
+export LD_PRELOAD="\$lib\${filtered:+:\$filtered}"
 exec "\$@"
 EOF
 chmod 0755 "$BIN_PATH"
 
+if [ "$INSTALL_GLOBAL" -eq 1 ]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+        echo "install.sh: --global requires sudo" >&2
+        exit 1
+    fi
+    echo "linuwux: installing global launcher to $GLOBAL_BIN_PATH"
+    sudo ln -sf "$BIN_PATH" "$GLOBAL_BIN_PATH"
+fi
+
 echo "linuwux: installed library to $LIB_PATH"
 echo "linuwux: installed launcher to $BIN_PATH"
+
+if [ "$INSTALL_GLOBAL" -eq 1 ]; then
+    echo "linuwux: global launcher installed to $GLOBAL_BIN_PATH"
+fi
 
 echo
 echo "Set your game's launch command to:"
 echo "  $BIN_PATH %command%"
 
-session_path=""
-if command -v systemctl >/dev/null 2>&1; then
-    session_path="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^PATH=//p')" || session_path=""
+if [ "$INSTALL_GLOBAL" -eq 1 ]; then
+    echo
+    echo "Bare 'linuwux' now resolves through $GLOBAL_BIN_PATH."
+else
+    echo
+    echo "GUI launchers may not inherit $BIN_DIR in PATH. Use the absolute path above"
+    echo "for Steam, Faugus, Lutris, and other desktop launchers."
+    echo "To make bare 'linuwux' available, rerun this installer with --global."
 fi
-
-case ":$session_path:" in
-*":$BIN_DIR:"*)
-    echo
-    echo "$BIN_DIR is on your desktop session's PATH, so a bare 'linuwux' works in"
-    echo "GUI launchers as well:"
-    echo "  linuwux %command%"
-    ;;
-*)
-    echo
-    if [ -z "$session_path" ]; then
-        echo "Could not read your desktop session's PATH. GUI launchers (Steam,"
-        echo "Faugus, Lutris, ...) do not inherit a shell PATH, so use the absolute"
-        echo "path above rather than a bare 'linuwux'."
-    else
-        echo "$BIN_DIR is not on your desktop session's PATH, which is what GUI"
-        echo "launchers (Steam, Faugus, Lutris, ...) inherit. A bare 'linuwux' will"
-        echo "not be found there, and some launchers only appear to hang instead of"
-        echo "reporting it. Use the absolute path above, or extend the session PATH"
-        echo "(takes effect after you log out and back in):"
-        echo
-        echo "  mkdir -p \"\$HOME/.config/environment.d\""
-        echo "  echo 'PATH=$BIN_DIR:$session_path' > \"\$HOME/.config/environment.d/50-linuwux-path.conf\""
-    fi
-    ;;
-esac
 
 echo
 echo "In a launcher that only accepts environment variables, set:"
 echo "  LD_PRELOAD=$LIB_PATH"
-echo "Keep any existing LD_PRELOAD value and append LinUwUx with a colon."
-echo
-echo "LINUWUX_PRELOAD=/other/path overrides the library the wrapper loads."
+echo "Keep any existing LD_PRELOAD value and prepend LinUwUx with a colon."
