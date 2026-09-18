@@ -71,10 +71,6 @@ fn registry_already_present(file: *mut libc::FILE) -> bool {
     false
 }
 
-/// Appends `HwProfileGuid` to an existing Wine `system.reg`.
-///
-/// Does not create the file: wineserver must write a valid hive first.
-/// Safe from `.init_array`; not for use in a signal handler.
 fn mark_done() {
     unsafe { libc::setenv(DONE_ENV.as_ptr(), c"1".as_ptr(), 1) };
 }

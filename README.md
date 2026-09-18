@@ -202,17 +202,23 @@ LinUwUx needs no extra variables by default.
 `LinUwUx` is an internal process marker and should not be set manually.
 
 The launched game executable (a non-`system32` `.exe`) gets CPUID trapping,
-native DLL overrides, and `win32u` duplicate-`free` suppression. Wine helpers
-only append `HwProfileGuid` to an existing `$WINEPREFIX/system.reg`. LinUwUx
-also sets `PROTON_DISABLE_LSTEAMCLIENT=1` on first run in a process tree,
-unless it is already set to a nonzero value.
+native DLL overrides, and `win32u` duplicate-`free` suppression (a same-thread
+consecutive `free()` of the identical, non-reallocated pointer from unix
+`win32u` is always a bug, so the redundant call is always skipped rather than
+gated behind an opt-in). Wine helpers only append `HwProfileGuid` to an
+existing `$WINEPREFIX/system.reg`. LinUwUx also sets
+`PROTON_DISABLE_LSTEAMCLIENT=1` on first run in a process tree, unless it is
+already set to a nonzero value.
 
-Reflex protocol starts every title as a resume-target stub (ACBFR/FC6-style)
-at `0x336933` (ARM_TARGET) and only upgrades to a real dispatch table (HM/LAD)
-if the title later confirms it with a `DISPATCH_SYSTEM_ID`/
-`DISPATCH_ATTRIBUTES_*` leaf; sending `0x69696969` or a page-aligned
-ARM_TARGET alone is not enough (TopSpin 2K25 sends both but is still a
-resume-target stub). `DenuvOwO=n,b` is one of the native overrides applied to
+Reflex protocol: every title starts (and stays) resume-target regardless of
+handshake shape (`0x69696969` DISPATCH_INIT before or after `ARM_TARGET`,
+any stub alignment) — this covers `reflex64.dll`/SMT5V, `winmm.dll`/FC6,
+ACBFR, and TopSpin 2K25 alike, since their stub code is byte-identical and
+handshake ordering/alignment reflects each build's own linker layout, not
+protocol intent. Dual dispatch (HM/LADPIH) is the one unambiguous case: it
+requires an explicit later `DISPATCH_SYSTEM_ID`/`DISPATCH_ATTRIBUTES_*`
+leaf, which is the only reliable signal to upgrade off resume-target.
+`DenuvOwO=n,b` is one of the native overrides applied to
 every detected game process (see above), not gated by any file on disk.
 `LINUWUX_SYSCALL_HACK=1` is independent and is required for titles that need
 the direct syscall path.

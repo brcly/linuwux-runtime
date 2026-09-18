@@ -57,6 +57,9 @@ static WIN32U_END: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static FORK_REGISTERED: AtomicBool = AtomicBool::new(false);
 static RESOLVING_FREE_KEY: AtomicU32 = AtomicU32::new(u32::MAX);
 static LAST_WIN32U_FREE_KEY: AtomicU32 = AtomicU32::new(u32::MAX);
+static LAST_WIN32U_FREE_CALLER_KEY: AtomicU32 = AtomicU32::new(u32::MAX);
+
+const WIN32U_FREE_CALLER_PROXIMITY: usize = 256;
 
 fn pthread_key(slot: &AtomicU32) -> Option<libc::pthread_key_t> {
     let existing = slot.load(Ordering::Acquire);
@@ -93,6 +96,7 @@ extern "C" fn after_fork() {
     SIGSEGV_SLOT.readers.store(0, Ordering::SeqCst);
     SIGSYS_SLOT.readers.store(0, Ordering::SeqCst);
     set_tls_ptr(&LAST_WIN32U_FREE_KEY, ptr::null_mut());
+    set_tls_ptr(&LAST_WIN32U_FREE_CALLER_KEY, ptr::null_mut());
     set_tls_ptr(&RESOLVING_FREE_KEY, ptr::null_mut());
     unsafe { cpuid_disable_faulting() };
 }
@@ -103,7 +107,9 @@ unsafe extern "C" {
     fn syscallhook(sig: c_int, info: *mut siginfo_t, context: *mut c_void);
     fn detect_cpu_vendor();
     fn debug_runtime_activated();
+    fn debug_enabled() -> c_int;
     fn debug_log(message: *const c_char);
+    fn debug_log_hex(prefix: *const c_char, value: u64);
 }
 
 fn errno() -> c_int {
@@ -191,6 +197,10 @@ fn caller_from_win32u(caller: *mut c_void) -> bool {
         if start == 0 || end <= start {
             return false;
         }
+        unsafe {
+            debug_log_hex(c"win32u base=".as_ptr(), start as u64);
+            debug_log_hex(c"win32u end=".as_ptr(), end as u64);
+        }
     }
     let addr = caller as usize;
     addr >= start && addr < end
@@ -201,10 +211,22 @@ unsafe extern "C" fn free_inner(ptr: *mut c_void, caller: *mut c_void) {
         return;
     };
     if game_process() && !ptr.is_null() && caller_from_win32u(caller) {
-        if tls_ptr(&LAST_WIN32U_FREE_KEY) == ptr {
+        let last_ptr = tls_ptr(&LAST_WIN32U_FREE_KEY);
+        let last_caller = tls_ptr(&LAST_WIN32U_FREE_CALLER_KEY) as usize;
+        let nearby = last_caller != 0
+            && (caller as usize).abs_diff(last_caller) <= WIN32U_FREE_CALLER_PROXIMITY;
+        if last_ptr == ptr && nearby {
+            if unsafe { debug_enabled() } != 0 {
+                unsafe {
+                    debug_log(c"win32u consecutive duplicate free".as_ptr());
+                    debug_log_hex(c"win32u free ptr=".as_ptr(), ptr as u64);
+                    debug_log_hex(c"win32u free caller=".as_ptr(), caller as u64);
+                }
+            }
             return;
         }
         set_tls_ptr(&LAST_WIN32U_FREE_KEY, ptr);
+        set_tls_ptr(&LAST_WIN32U_FREE_CALLER_KEY, caller);
     }
     // SAFETY: `real` is libc `free` resolved with RTLD_NEXT.
     unsafe { real(ptr) };

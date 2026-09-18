@@ -269,6 +269,7 @@ impl State {
                 if self.protocol() == Protocol::ResumeTarget {
                     return Action::Native;
                 }
+                host.log(c"reflex dispatch-init observed");
             }
             DISPATCH_SESSION => {
                 Self::log_control(host, leaf, argument);
@@ -276,9 +277,6 @@ impl State {
             ARM_TARGET => {
                 Self::log_control(host, leaf, argument);
                 host.set_hwprofile_guid();
-                // Every title starts as resume-target; only a confirmed
-                // DISPATCH_SYSTEM_ID/DISPATCH_ATTRIBUTES_* leaf (HM/LAD)
-                // upgrades it to a real dispatch table via activate_dispatch.
                 if self.protocol() == Protocol::Unregistered {
                     host.log(c"reflex protocol=resume-target inferred");
                 }
