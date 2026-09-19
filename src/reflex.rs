@@ -82,6 +82,9 @@ pub trait Host {
     fn set_offset(&self, filetime: u64);
     fn patch_kuser(&self, profile: KuserProfile) -> bool;
     fn set_hwprofile_guid(&self) {}
+    fn single_dispatch_forced(&self) -> bool {
+        false
+    }
     fn yield_thread(&self) {
         core::hint::spin_loop();
     }
@@ -281,6 +284,15 @@ impl State {
                     host.log(c"reflex protocol=resume-target inferred");
                 }
                 if !self.register_resume_target(argument, host) {
+                    return Action::Native;
+                }
+                // A title's handshake alone can't distinguish resume-target
+                // from single-dispatch (confirmed identical for FC6 vs
+                // SMT5V), so titles that need single-dispatch are told
+                // explicitly via LINUWUX_SINGLE_DISPATCH. This upgrades the
+                // just-registered handler through the same activate_dispatch
+                // path DISPATCH_SYSTEM_ID/DISPATCH_ATTRIBUTES_* leaves use.
+                if host.single_dispatch_forced() && !self.activate_dispatch(host) {
                     return Action::Native;
                 }
             }

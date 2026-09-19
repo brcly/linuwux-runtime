@@ -28,6 +28,9 @@ impl Host for RuntimeHost {
         #[cfg(feature = "environment")]
         crate::registry::set_hwprofile_guid();
     }
+    fn single_dispatch_forced(&self) -> bool {
+        crate::config::single_dispatch_forced()
+    }
     fn yield_thread(&self) {
         unsafe { libc::syscall(libc::SYS_sched_yield) };
     }

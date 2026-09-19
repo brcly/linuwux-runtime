@@ -1,18 +1,37 @@
+use core::ffi::CStr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 static REDIRECT_ALL: AtomicBool = AtomicBool::new(false);
+static SINGLE_DISPATCH: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn redirect_all() -> bool {
     REDIRECT_ALL.load(Ordering::Acquire)
 }
 
-unsafe extern "C" fn initialize() {
-    let value = unsafe { libc::getenv(c"LINUWUX_REDIRECT_ALL".as_ptr()) };
-    let enabled = !value.is_null()
+// Some titles (e.g. SMT5V's reflex64.dll) use the single-dispatch protocol
+// but send an identical CPUID handshake to resume-target titles like FC6 -
+// confirmed byte-for-byte identical handshake and driver-side redirect
+// mechanism, so there's no observable signal to classify them correctly.
+// Until a real trigger turns up, this is an explicit per-title opt-in set
+// alongside the game's launch command, the same way LINUWUX_SYSCALL_HACK is.
+pub(crate) fn single_dispatch_forced() -> bool {
+    SINGLE_DISPATCH.load(Ordering::Acquire)
+}
+
+fn env_flag_set(name: &CStr) -> bool {
+    let value = unsafe { libc::getenv(name.as_ptr()) };
+    !value.is_null()
         && linuwux::cpuid::redirect_all_enabled(Some(
-            unsafe { core::ffi::CStr::from_ptr(value) }.to_bytes(),
-        ));
-    REDIRECT_ALL.store(enabled, Ordering::Release);
+            unsafe { CStr::from_ptr(value) }.to_bytes(),
+        ))
+}
+
+unsafe extern "C" fn initialize() {
+    REDIRECT_ALL.store(env_flag_set(c"LINUWUX_REDIRECT_ALL"), Ordering::Release);
+    SINGLE_DISPATCH.store(
+        env_flag_set(c"LINUWUX_SINGLE_DISPATCH"),
+        Ordering::Release,
+    );
 }
 
 #[used]
