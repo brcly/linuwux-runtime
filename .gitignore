@@ -1,5 +1,7 @@
 /target/
 __pycache__/
 *.pyc
-reference
 *.log
+*.so
+GAMES/*
+old_source

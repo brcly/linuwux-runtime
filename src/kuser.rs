@@ -4,32 +4,35 @@ pub const PAGE_SIZE: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
-pub enum Profile {
-    ResumeTarget = 0,
-    DualDispatch = 1,
-    SingleDispatch = 2,
+pub enum Recipe {
+    Resume = 0,
+    Selector = 1,
+    Dispatch = 2,
 }
 
-impl Profile {
+impl Recipe {
     pub const fn from_raw(value: i32) -> Option<Self> {
         match value {
-            0 => Some(Self::ResumeTarget),
-            1 => Some(Self::DualDispatch),
-            2 => Some(Self::SingleDispatch),
+            0 => Some(Self::Resume),
+            1 => Some(Self::Selector),
+            2 => Some(Self::Dispatch),
             _ => None,
         }
     }
 
     pub fn visit_writes(self, avx_enabled: bool, mut write: impl FnMut(usize, u8)) {
         let ops: &[(usize, usize, u64)] = match self {
-            Self::SingleDispatch => SINGLE_DISPATCH_OPS,
-            Self::DualDispatch => DUAL_DISPATCH_OPS,
-            Self::ResumeTarget => {
+            Self::Dispatch => DISPATCH_OPS,
+            Self::Selector => SELECTOR_OPS,
+            Self::Resume => {
                 for (index, byte) in b"C:\\Windows\0".iter().copied().enumerate() {
                     write(0x30 + index * 2, byte);
                     write(0x31 + index * 2, 0);
                 }
-                RESUME_TARGET_OPS
+                for offset in 0x46..0x134 {
+                    write(offset, 0);
+                }
+                RESUME_OPS
             }
         };
         for &(offset, size, value) in ops {
@@ -37,7 +40,7 @@ impl Profile {
                 write(offset + index, byte);
             }
         }
-        if self == Self::ResumeTarget {
+        if self == Self::Resume {
             for offset in [0x290, 0x294, 0x295, 0x297] {
                 write(offset, 0);
             }
@@ -53,7 +56,7 @@ impl Profile {
     }
 }
 
-const RESUME_TARGET_OPS: &[(usize, usize, u64)] = &[
+const RESUME_OPS: &[(usize, usize, u64)] = &[
     (0x260, 8, 0x0000000100006658),
     (0x268, 4, 0x00090001),
     (0x26c, 4, 0x0000000a),
@@ -91,29 +94,16 @@ const RESUME_TARGET_OPS: &[(usize, usize, u64)] = &[
     (0xffc, 4, 0x13371337),
 ];
 
-const SINGLE_DISPATCH_OPS: &[(usize, usize, u64)] = &[
-    (0x2d6, 4, 0x0001_0034),
-    (0x2e8, 4, 0x00bf_9c8f),
-    (0x3c0, 4, 0x0000_0010),
-    (0x288, 4, 0x0101_0101),
-    (0x268, 4, 0x0009_0001),
-    (0x2f4, 4, 0),
-    (0x264, 4, 1),
-    (0x2d0, 4, 0x0000_0310),
-    (0x260, 4, 0x0000_6658),
-    (0x26c, 4, 0x0a),
-    (0x270, 4, 0),
-    (0xffc, 4, 0x1337_1337),
-];
-
-const DUAL_DISPATCH_OPS: &[(usize, usize, u64)] = &[
+const DISPATCH_OPS: &[(usize, usize, u64)] = &[
     (0x26e, 8, 0),
+    (0x283, 8, 0x0101010000010000),
     (0x288, 8, 0x0000000001010101),
     (0x268, 8, 0x0000000A00090001),
     (0x261, 8, 0x0100000001000066),
     (0x272, 8, 0x0000010100000000),
     (0x3c0, 4, 0x10),
     (0x260, 8, 0x0000000100006658),
+    (0x282, 8, 0x0101000001000001),
     (0x2d0, 4, 0x0110),
     (0x2e8, 4, 0x007FB10B),
     (0x378, 4, 0),
@@ -127,11 +117,21 @@ const DUAL_DISPATCH_OPS: &[(usize, usize, u64)] = &[
     (0x2f4, 4, 0),
     (0x264, 4, 1),
     (0x270, 4, 0),
-    (0x281, 4, 0x00000101),
-    (0x286, 4, 0x01010000),
-    (0x287, 4, 0x01010100),
-    (0x285, 1, 1),
-    (0xffc, 4, 0x1337_1337),
+    (0x281, 8, 0x0100000100000101),
+];
+
+const SELECTOR_OPS: &[(usize, usize, u64)] = &[
+    (0x2d6, 4, 0x0001_0034),
+    (0x2e8, 4, 0x00bf_9c8f),
+    (0x3c0, 4, 0x0000_0010),
+    (0x288, 4, 0x0101_0101),
+    (0x268, 4, 0x0009_0001),
+    (0x2f4, 4, 0),
+    (0x264, 4, 1),
+    (0x2d0, 4, 0x0000_0310),
+    (0x260, 4, 0x0000_6658),
+    (0x26c, 4, 0x0000_000a),
+    (0x270, 4, 0),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,15 +141,15 @@ pub enum PatchError {
 }
 
 const PATCH_UNAPPLIED: u32 = 0;
-const PATCH_RESUME_TARGET_APPLYING: u32 = 1;
-const PATCH_RESUME_TARGET_READY: u32 = 2;
-const PATCH_RESUME_TARGET_FAILED: u32 = 3;
-const PATCH_SINGLE_DISPATCH_APPLYING: u32 = 4;
-const PATCH_SINGLE_DISPATCH_READY: u32 = 5;
-const PATCH_SINGLE_DISPATCH_FAILED: u32 = 6;
-const PATCH_DUAL_DISPATCH_APPLYING: u32 = 7;
-const PATCH_DUAL_DISPATCH_READY: u32 = 8;
-const PATCH_DUAL_DISPATCH_FAILED: u32 = 9;
+const PATCH_RESUME_APPLYING: u32 = 1;
+const PATCH_RESUME_READY: u32 = 2;
+const PATCH_RESUME_FAILED: u32 = 3;
+const PATCH_DISPATCH_APPLYING: u32 = 4;
+const PATCH_DISPATCH_READY: u32 = 5;
+const PATCH_DISPATCH_FAILED: u32 = 6;
+const PATCH_SELECTOR_APPLYING: u32 = 7;
+const PATCH_SELECTOR_READY: u32 = 8;
+const PATCH_SELECTOR_FAILED: u32 = 9;
 const PATCH_WAIT_LIMIT: u32 = 4096;
 
 #[derive(Debug, Default)]
@@ -164,34 +164,34 @@ impl PatchState {
         let _ = self
             .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
-                PATCH_RESUME_TARGET_APPLYING => Some(PATCH_RESUME_TARGET_FAILED),
-                PATCH_SINGLE_DISPATCH_APPLYING => Some(PATCH_SINGLE_DISPATCH_FAILED),
-                PATCH_DUAL_DISPATCH_APPLYING => Some(PATCH_DUAL_DISPATCH_FAILED),
+                PATCH_RESUME_APPLYING => Some(PATCH_RESUME_FAILED),
+                PATCH_DISPATCH_APPLYING => Some(PATCH_DISPATCH_FAILED),
+                PATCH_SELECTOR_APPLYING => Some(PATCH_SELECTOR_FAILED),
                 _ => None,
             });
     }
 
     pub fn patch(
         &self,
-        profile: Profile,
+        recipe: Recipe,
         apply: impl FnOnce() -> bool,
         mut wait: impl FnMut(),
     ) -> Result<(), PatchError> {
-        let (applying_state, ready_state, failed_state) = match profile {
-            Profile::ResumeTarget => (
-                PATCH_RESUME_TARGET_APPLYING,
-                PATCH_RESUME_TARGET_READY,
-                PATCH_RESUME_TARGET_FAILED,
+        let (applying_state, ready_state, failed_state) = match recipe {
+            Recipe::Resume => (
+                PATCH_RESUME_APPLYING,
+                PATCH_RESUME_READY,
+                PATCH_RESUME_FAILED,
             ),
-            Profile::SingleDispatch => (
-                PATCH_SINGLE_DISPATCH_APPLYING,
-                PATCH_SINGLE_DISPATCH_READY,
-                PATCH_SINGLE_DISPATCH_FAILED,
+            Recipe::Dispatch => (
+                PATCH_DISPATCH_APPLYING,
+                PATCH_DISPATCH_READY,
+                PATCH_DISPATCH_FAILED,
             ),
-            Profile::DualDispatch => (
-                PATCH_DUAL_DISPATCH_APPLYING,
-                PATCH_DUAL_DISPATCH_READY,
-                PATCH_DUAL_DISPATCH_FAILED,
+            Recipe::Selector => (
+                PATCH_SELECTOR_APPLYING,
+                PATCH_SELECTOR_READY,
+                PATCH_SELECTOR_FAILED,
             ),
         };
         let mut completion_state = failed_state;
@@ -201,11 +201,9 @@ impl PatchState {
             if current == ready_state {
                 return Ok(());
             }
-            let another_dispatch_apply = matches!(
-                current,
-                PATCH_SINGLE_DISPATCH_APPLYING | PATCH_DUAL_DISPATCH_APPLYING
-            );
-            if another_dispatch_apply && current != applying_state {
+            let another_recipe_apply =
+                matches!(current, PATCH_DISPATCH_APPLYING | PATCH_SELECTOR_APPLYING);
+            if another_recipe_apply && current != applying_state {
                 if waits == PATCH_WAIT_LIMIT {
                     return Err(PatchError::Conflict);
                 }
@@ -214,17 +212,17 @@ impl PatchState {
                 continue;
             }
             if current != PATCH_UNAPPLIED && !(applying_state..=failed_state).contains(&current) {
-                let can_transition_from_dispatch =
-                    matches!(profile, Profile::DualDispatch | Profile::SingleDispatch)
-                        && matches!(
-                            current,
-                            PATCH_RESUME_TARGET_READY
-                                | PATCH_SINGLE_DISPATCH_READY
-                                | PATCH_SINGLE_DISPATCH_FAILED
-                                | PATCH_DUAL_DISPATCH_READY
-                                | PATCH_DUAL_DISPATCH_FAILED
-                        );
-                if !can_transition_from_dispatch {
+                let can_transition_from_recipe = recipe != Recipe::Resume
+                    && matches!(
+                        current,
+                        PATCH_RESUME_READY
+                            | PATCH_RESUME_FAILED
+                            | PATCH_DISPATCH_READY
+                            | PATCH_DISPATCH_FAILED
+                            | PATCH_SELECTOR_READY
+                            | PATCH_SELECTOR_FAILED
+                    );
+                if !can_transition_from_recipe {
                     return Err(PatchError::Conflict);
                 }
                 completion_state = current;

@@ -1,12 +1,14 @@
+use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::mem::{MaybeUninit, size_of};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
 use libc::{sigaction as Sigaction, siginfo_t, sigset_t};
 
 type RealSigaction = unsafe extern "C" fn(c_int, *const Sigaction, *mut Sigaction) -> c_int;
 type RealFree = unsafe extern "C" fn(*mut c_void);
+type RealMalloc = unsafe extern "C" fn(usize) -> *mut c_void;
 type Snapshot = MaybeUninit<Sigaction>;
 
 struct SignalSlot {
@@ -24,7 +26,7 @@ impl SignalSlot {
         }
     }
 
-    fn copy_saved_action(&self) -> Snapshot {
+    fn copy_saved_action(&self) -> (Snapshot, *mut Snapshot) {
         self.readers.fetch_add(1, Ordering::SeqCst);
         let snapshot = self.current.load(Ordering::SeqCst);
         let action = if snapshot.is_null() {
@@ -33,7 +35,7 @@ impl SignalSlot {
             unsafe { snapshot.read() }
         };
         self.readers.fetch_sub(1, Ordering::SeqCst);
-        action
+        (action, snapshot)
     }
 
     unsafe fn release_snapshot(&self, snapshot: *mut Snapshot) {
@@ -56,11 +58,130 @@ static WIN32U_START: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static WIN32U_END: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static FORK_REGISTERED: AtomicBool = AtomicBool::new(false);
 static RESOLVING_FREE_KEY: AtomicU32 = AtomicU32::new(u32::MAX);
-static LAST_WIN32U_FREE_KEY: AtomicU32 = AtomicU32::new(u32::MAX);
-static LAST_WIN32U_FREE_CALLER_KEY: AtomicU32 = AtomicU32::new(u32::MAX);
+static REAL_MALLOC: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static RESOLVING_MALLOC_KEY: AtomicU32 = AtomicU32::new(u32::MAX);
 
-const WIN32U_FREE_CALLER_PROXIMITY: usize = 256;
+const BOOTSTRAP_POOL_SIZE: usize = 1 << 16;
 
+struct BootstrapPool(UnsafeCell<[u8; BOOTSTRAP_POOL_SIZE]>);
+unsafe impl Sync for BootstrapPool {}
+
+static BOOTSTRAP_POOL: BootstrapPool = BootstrapPool(UnsafeCell::new([0; BOOTSTRAP_POOL_SIZE]));
+static BOOTSTRAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+fn bootstrap_alloc(size: usize) -> *mut c_void {
+    const ALIGN: usize = 16;
+    let aligned = (size.max(1) + ALIGN - 1) & !(ALIGN - 1);
+    let offset = BOOTSTRAP_OFFSET.fetch_add(aligned, Ordering::SeqCst);
+    if offset + aligned > BOOTSTRAP_POOL_SIZE {
+        return ptr::null_mut();
+    }
+    unsafe { BOOTSTRAP_POOL.0.get().cast::<u8>().add(offset).cast() }
+}
+
+fn is_bootstrap_ptr(candidate: *mut c_void) -> bool {
+    let start = BOOTSTRAP_POOL.0.get() as usize;
+    let end = start + BOOTSTRAP_POOL_SIZE;
+    let addr = candidate as usize;
+    addr >= start && addr < end
+}
+
+const WIN32U_PENDING_FREE_CAP: usize = 1024;
+static WIN32U_PENDING_FREE_LOCK: AtomicBool = AtomicBool::new(false);
+static WIN32U_PENDING_FREE_LEN: AtomicU32 = AtomicU32::new(0);
+static WIN32U_PENDING_FREE_NEXT: AtomicU32 = AtomicU32::new(0);
+static WIN32U_PENDING_FREE_PTRS: [AtomicPtr<c_void>; WIN32U_PENDING_FREE_CAP] =
+    [const { AtomicPtr::new(ptr::null_mut()) }; WIN32U_PENDING_FREE_CAP];
+
+fn with_pending_free_lock<R>(f: impl FnOnce() -> R) -> R {
+    while WIN32U_PENDING_FREE_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    let result = f();
+    WIN32U_PENDING_FREE_LOCK.store(false, Ordering::Release);
+    result
+}
+
+fn win32u_free_seen_or_mark(ptr: *mut c_void) -> bool {
+    with_pending_free_lock(|| {
+        let len = WIN32U_PENDING_FREE_LEN.load(Ordering::Relaxed) as usize;
+        let found = WIN32U_PENDING_FREE_PTRS
+            .iter()
+            .take(len)
+            .any(|slot| slot.load(Ordering::Relaxed) == ptr);
+        if !found {
+            let index = (WIN32U_PENDING_FREE_NEXT.load(Ordering::Relaxed) as usize)
+                % WIN32U_PENDING_FREE_CAP;
+            WIN32U_PENDING_FREE_PTRS[index].store(ptr, Ordering::Relaxed);
+            WIN32U_PENDING_FREE_NEXT.store(
+                ((index + 1) % WIN32U_PENDING_FREE_CAP) as u32,
+                Ordering::Relaxed,
+            );
+            if len < WIN32U_PENDING_FREE_CAP {
+                WIN32U_PENDING_FREE_LEN.store((len + 1) as u32, Ordering::Relaxed);
+            }
+        }
+        found
+    })
+}
+
+fn win32u_free_consume_if_pending(candidate: *mut c_void) -> bool {
+    if candidate.is_null() {
+        return false;
+    }
+    with_pending_free_lock(|| {
+        let len = WIN32U_PENDING_FREE_LEN.load(Ordering::Relaxed) as usize;
+        for slot in WIN32U_PENDING_FREE_PTRS.iter().take(len) {
+            if slot.load(Ordering::Relaxed) == candidate {
+                slot.store(ptr::null_mut(), Ordering::Relaxed);
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn resolve_real_malloc() -> Option<RealMalloc> {
+    if !tls_ptr(&RESOLVING_MALLOC_KEY).is_null() {
+        return None;
+    }
+    let mut symbol = REAL_MALLOC.load(Ordering::Acquire);
+    if symbol.is_null() {
+        set_tls_ptr(&RESOLVING_MALLOC_KEY, ptr::dangling_mut());
+        symbol = unsafe { libc::dlsym(libc::RTLD_NEXT, c"malloc".as_ptr()) };
+        set_tls_ptr(&RESOLVING_MALLOC_KEY, ptr::null_mut());
+        if symbol.is_null() {
+            return None;
+        }
+        REAL_MALLOC.store(symbol, Ordering::Release);
+    }
+    Some(unsafe { core::mem::transmute::<*mut c_void, RealMalloc>(symbol) })
+}
+
+unsafe extern "C" fn malloc_inner(size: usize, caller: *mut c_void) -> *mut c_void {
+    let Some(real) = resolve_real_malloc() else {
+        return bootstrap_alloc(size);
+    };
+    let allocated = unsafe { real(size) };
+    if game_process() && caller_from_win32u(caller) {
+        win32u_free_consume_if_pending(allocated);
+    }
+    allocated
+}
+
+#[cfg(not(miri))]
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+pub unsafe extern "C" fn malloc(_size: usize) -> *mut c_void {
+    core::arch::naked_asm!(
+        "mov rsi, qword ptr [rsp]",
+        "jmp {inner}",
+        inner = sym malloc_inner,
+    );
+}
 fn pthread_key(slot: &AtomicU32) -> Option<libc::pthread_key_t> {
     let existing = slot.load(Ordering::Acquire);
     if existing != u32::MAX {
@@ -95,9 +216,9 @@ extern "C" fn after_fork() {
     SIGNAL_UPDATE_LOCK.store(false, Ordering::Release);
     SIGSEGV_SLOT.readers.store(0, Ordering::SeqCst);
     SIGSYS_SLOT.readers.store(0, Ordering::SeqCst);
-    set_tls_ptr(&LAST_WIN32U_FREE_KEY, ptr::null_mut());
-    set_tls_ptr(&LAST_WIN32U_FREE_CALLER_KEY, ptr::null_mut());
     set_tls_ptr(&RESOLVING_FREE_KEY, ptr::null_mut());
+    set_tls_ptr(&RESOLVING_MALLOC_KEY, ptr::null_mut());
+    WIN32U_PENDING_FREE_LOCK.store(false, Ordering::Release);
     unsafe { cpuid_disable_faulting() };
 }
 
@@ -206,21 +327,19 @@ fn caller_from_win32u(caller: *mut c_void) -> bool {
 }
 
 unsafe extern "C" fn free_inner(ptr: *mut c_void, caller: *mut c_void) {
+    if is_bootstrap_ptr(ptr) {
+        return;
+    }
     let Some(real) = resolve_real_free() else {
         return;
     };
-    if game_process() && !ptr.is_null() && caller_from_win32u(caller) {
-        let last_ptr = tls_ptr(&LAST_WIN32U_FREE_KEY);
-        let last_caller = tls_ptr(&LAST_WIN32U_FREE_CALLER_KEY) as usize;
-        let nearby = last_caller != 0
-            && (caller as usize).abs_diff(last_caller) <= WIN32U_FREE_CALLER_PROXIMITY;
-        if last_ptr == ptr && nearby {
-            return;
-        }
-        set_tls_ptr(&LAST_WIN32U_FREE_KEY, ptr);
-        set_tls_ptr(&LAST_WIN32U_FREE_CALLER_KEY, caller);
+    if game_process()
+        && !ptr.is_null()
+        && caller_from_win32u(caller)
+        && win32u_free_seen_or_mark(ptr)
+    {
+        return;
     }
-    // SAFETY: `real` is libc `free` resolved with RTLD_NEXT.
     unsafe { real(ptr) };
 }
 
@@ -347,11 +466,19 @@ pub unsafe extern "C" fn forward_signal(sig: c_int, info: *mut siginfo_t, contex
         restore_default_and_raise(sig);
         return;
     };
-    let saved = slot.copy_saved_action();
+    let (saved, saved_snapshot) = slot.copy_saved_action();
     let (handler, flags) = unsafe { ((*saved.as_ptr()).sa_sigaction, (*saved.as_ptr()).sa_flags) };
     if handler == libc::SIG_DFL {
         restore_default_and_raise(sig);
     } else if handler != libc::SIG_IGN {
+        if flags & libc::SA_RESETHAND != 0 {
+            let _ = slot.current.compare_exchange(
+                saved_snapshot,
+                ptr::null_mut(),
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
         if flags & libc::SA_SIGINFO != 0 {
             let callback = unsafe {
                 core::mem::transmute::<
@@ -439,6 +566,17 @@ unsafe fn install_bridge(
     }
     unsafe { ptr::copy_nonoverlapping(requested.cast::<Snapshot>(), snapshot, 1) };
     let previous_snapshot = slot.current.swap(snapshot, Ordering::SeqCst);
+    let mut previous_logical = MaybeUninit::<Sigaction>::uninit();
+    let have_previous_logical = !previous_snapshot.is_null();
+    if have_previous_logical {
+        unsafe {
+            ptr::copy_nonoverlapping(
+                previous_snapshot.cast::<Sigaction>(),
+                previous_logical.as_mut_ptr(),
+                1,
+            )
+        };
+    }
     if unsafe { real(sig, bridge.as_ptr(), ptr::null_mut()) } == -1 {
         let failed = slot.current.swap(previous_snapshot, Ordering::SeqCst);
         unsafe { slot.release_snapshot(failed) };
@@ -447,7 +585,12 @@ unsafe fn install_bridge(
     unsafe { slot.release_snapshot(previous_snapshot) };
     slot.owned.store(true, Ordering::Release);
     if !oldact.is_null() {
-        unsafe { ptr::copy_nonoverlapping(previous.as_ptr(), oldact, 1) };
+        let source = if have_previous_logical {
+            previous_logical.as_ptr()
+        } else {
+            previous.as_ptr()
+        };
+        unsafe { ptr::copy_nonoverlapping(source, oldact, 1) };
     }
     #[cfg(feature = "kuser")]
     crate::kuser::force_direct_syscall();
@@ -518,6 +661,7 @@ pub unsafe extern "C" fn sigaction(
 pub extern "C" fn linuwux_setup_hooks() {
     let _ = resolve_real_sigaction();
     let _ = resolve_real_free();
+    let _ = resolve_real_malloc();
     if FORK_REGISTERED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()

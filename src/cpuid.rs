@@ -24,15 +24,16 @@ pub enum Vendor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-pub enum Profile {
-    Unknown = 0,
-    Intel = 1,
-    IntelAvx = 2,
-    Amd = 3,
-    AmdAvx = 4,
-    LegacyIntel = 5,
-    LegacyAmd = 6,
-    LegacyUnknown = 7,
+pub enum CpuPresentation {
+    Denuvo = 0,
+    Legacy = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuIdentity {
+    vendor: Vendor,
+    avx_enabled: bool,
+    presentation: CpuPresentation,
 }
 
 const MODERN_BRAND: [u32; 12] = [
@@ -78,50 +79,47 @@ const LEGACY_AMD_BRAND: [u32; 12] = [
     0x0020_2020,
 ];
 
-impl Profile {
-    pub fn modern(vendor: Vendor, avx_enabled: bool) -> Self {
-        match (vendor, avx_enabled) {
-            (Vendor::Unknown, _) => Self::Unknown,
-            (Vendor::Intel, false) => Self::Intel,
-            (Vendor::Intel, true) => Self::IntelAvx,
-            (Vendor::Amd, false) => Self::Amd,
-            (Vendor::Amd, true) => Self::AmdAvx,
+impl CpuIdentity {
+    pub const fn denuvo(vendor: Vendor, avx_enabled: bool) -> Self {
+        Self {
+            vendor,
+            avx_enabled,
+            presentation: CpuPresentation::Denuvo,
         }
     }
 
-    pub fn vendor(self) -> Vendor {
-        match self {
-            Self::Unknown | Self::LegacyUnknown => Vendor::Unknown,
-            Self::Intel | Self::IntelAvx | Self::LegacyIntel => Vendor::Intel,
-            Self::Amd | Self::AmdAvx | Self::LegacyAmd => Vendor::Amd,
-        }
+    pub const fn vendor(self) -> Vendor {
+        self.vendor
     }
 
-    pub fn legacy(self) -> Self {
-        match self.vendor() {
-            Vendor::Unknown => Self::LegacyUnknown,
-            Vendor::Intel => Self::LegacyIntel,
-            Vendor::Amd => Self::LegacyAmd,
+    pub const fn presentation(self) -> CpuPresentation {
+        self.presentation
+    }
+
+    pub const fn with_presentation(self, presentation: CpuPresentation) -> Self {
+        Self {
+            presentation,
+            ..self
         }
     }
 
     pub fn fixed_reply(self, leaf: u32) -> Option<Registers> {
         let reply = match leaf {
             1 => self.leaf1(),
-            0x4000_0000 => match self.vendor() {
+            0x4000_0000 => match self.vendor {
                 Vendor::Unknown => Registers::default(),
                 Vendor::Intel => Registers::new(0x4000_0001, 0x6570_7948, 0x6762_4472, 0),
                 Vendor::Amd => Registers::new(0x4000_0001, 0x706d_6953, 0x7653_656c, 0x2020_206d),
             },
-            0x4000_0001 => match self.vendor() {
+            0x4000_0001 => match self.vendor {
                 Vendor::Unknown => Registers::default(),
                 Vendor::Intel | Vendor::Amd => Registers::new(0x3023_7648, 0, 0, 0),
             },
             0x8000_0002..=0x8000_0004 => {
-                let brand = match self {
-                    Self::LegacyIntel => &LEGACY_INTEL_BRAND,
-                    Self::LegacyAmd | Self::LegacyUnknown => &LEGACY_AMD_BRAND,
-                    _ => &MODERN_BRAND,
+                let brand = match (self.presentation, self.vendor) {
+                    (CpuPresentation::Legacy, Vendor::Intel) => &LEGACY_INTEL_BRAND,
+                    (CpuPresentation::Legacy, Vendor::Amd | Vendor::Unknown) => &LEGACY_AMD_BRAND,
+                    (CpuPresentation::Denuvo, _) => &MODERN_BRAND,
                 };
                 let offset = ((leaf - 0x8000_0002) * 4) as usize;
                 Registers::new(
@@ -137,16 +135,55 @@ impl Profile {
     }
 
     fn leaf1(self) -> Registers {
-        match self {
-            Self::Unknown => Registers::default(),
-            Self::Intel => Registers::new(0x000a_0655, 0x0020_0800, 0x01fa_ebff, 0xbfeb_fbff),
-            Self::IntelAvx | Self::LegacyIntel => {
+        match (self.presentation, self.vendor, self.avx_enabled) {
+            (CpuPresentation::Denuvo, Vendor::Unknown, _) => Registers::default(),
+            (CpuPresentation::Denuvo, Vendor::Intel, false) => {
+                Registers::new(0x000a_0655, 0x0020_0800, 0x01fa_ebff, 0xbfeb_fbff)
+            }
+            (CpuPresentation::Denuvo, Vendor::Intel, true)
+            | (CpuPresentation::Legacy, Vendor::Intel, _) => {
                 Registers::new(0x000a_0655, 0x0020_0800, 0x7bfa_fbff, 0xbfeb_fbff)
             }
-            Self::Amd => Registers::new(0x00a2_0f12, 0x0010_0800, 0x00f8_220b, 0x178b_fbff),
-            Self::AmdAvx => Registers::new(0x00a2_0f12, 0x0010_0800, 0x7ad8_320b, 0x178b_fbff),
-            Self::LegacyAmd => Registers::new(0x00a2_0f10, 0x0018_0800, 0x7ad8_320b, 0x178b_fbff),
-            Self::LegacyUnknown => Registers::new(0x00a2_0f10, 0x0018_0800, 0x7ad8_320b, 0),
+            (CpuPresentation::Denuvo, Vendor::Amd, false) => {
+                Registers::new(0x00a2_0f12, 0x0010_0800, 0x00f8_220b, 0x178b_fbff)
+            }
+            (CpuPresentation::Denuvo, Vendor::Amd, true) => {
+                Registers::new(0x00a2_0f12, 0x0010_0800, 0x7ad8_320b, 0x178b_fbff)
+            }
+            (CpuPresentation::Legacy, Vendor::Amd, _) => {
+                Registers::new(0x00a2_0f10, 0x0018_0800, 0x7ad8_320b, 0x178b_fbff)
+            }
+            (CpuPresentation::Legacy, Vendor::Unknown, _) => {
+                Registers::new(0x00a2_0f10, 0x0018_0800, 0x7ad8_320b, 0)
+            }
+        }
+    }
+
+    const fn encode(self) -> u32 {
+        let vendor = match self.vendor {
+            Vendor::Unknown => 0,
+            Vendor::Intel => 1,
+            Vendor::Amd => 2,
+        };
+        let avx_enabled = if self.avx_enabled { 1 } else { 0 };
+        vendor | (avx_enabled << 2) | (self.presentation as u32) << 3
+    }
+
+    const fn decode(raw: u32) -> Self {
+        let vendor = match raw & 0b11 {
+            1 => Vendor::Intel,
+            2 => Vendor::Amd,
+            _ => Vendor::Unknown,
+        };
+        let presentation = if raw & (1 << 3) == 0 {
+            CpuPresentation::Denuvo
+        } else {
+            CpuPresentation::Legacy
+        };
+        Self {
+            vendor,
+            avx_enabled: raw & (1 << 2) != 0,
+            presentation,
         }
     }
 }
@@ -177,40 +214,52 @@ pub fn is_wine_system_rip(address: u64) -> bool {
 }
 
 #[derive(Debug)]
-pub struct ActiveProfile {
-    raw_profile: AtomicU32,
+pub struct ActiveCpuIdentity {
+    raw_identity: AtomicU32,
 }
 
-impl ActiveProfile {
+impl ActiveCpuIdentity {
     pub const fn new() -> Self {
         Self {
-            raw_profile: AtomicU32::new(Profile::Unknown as u32),
+            raw_identity: AtomicU32::new(CpuIdentity::denuvo(Vendor::Unknown, false).encode()),
         }
     }
 
-    pub fn load(&self) -> Profile {
-        match self.raw_profile.load(Ordering::Acquire) {
-            1 => Profile::Intel,
-            2 => Profile::IntelAvx,
-            3 => Profile::Amd,
-            4 => Profile::AmdAvx,
-            5 => Profile::LegacyIntel,
-            6 => Profile::LegacyAmd,
-            7 => Profile::LegacyUnknown,
-            _ => Profile::Unknown,
+    pub fn load(&self) -> CpuIdentity {
+        CpuIdentity::decode(self.raw_identity.load(Ordering::Acquire))
+    }
+
+    pub fn configure_host(&self, vendor: Vendor, avx_enabled: bool) {
+        loop {
+            let current = self.raw_identity.load(Ordering::Acquire);
+            let presentation = CpuIdentity::decode(current).presentation();
+            let next = CpuIdentity::denuvo(vendor, avx_enabled)
+                .with_presentation(presentation)
+                .encode();
+            if self
+                .raw_identity
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
         }
     }
 
-    pub fn configure(&self, vendor: Vendor, avx_enabled: bool) {
-        self.raw_profile.store(
-            Profile::modern(vendor, avx_enabled) as u32,
-            Ordering::Release,
-        );
-    }
-
-    pub fn activate_legacy(&self) {
-        self.raw_profile
-            .store(self.load().legacy() as u32, Ordering::Release);
+    pub fn select_legacy_presentation(&self) {
+        loop {
+            let current = self.raw_identity.load(Ordering::Acquire);
+            let next = CpuIdentity::decode(current)
+                .with_presentation(CpuPresentation::Legacy)
+                .encode();
+            if self
+                .raw_identity
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 
     pub fn fixed_reply(&self, leaf: u32) -> Option<Registers> {
@@ -218,7 +267,7 @@ impl ActiveProfile {
     }
 }
 
-impl Default for ActiveProfile {
+impl Default for ActiveCpuIdentity {
     fn default() -> Self {
         Self::new()
     }

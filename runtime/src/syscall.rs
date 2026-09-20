@@ -26,6 +26,10 @@ fn redirect_all() -> bool {
     crate::config::redirect_all()
 }
 
+fn is_bypass(xmm5: &[u8; 16]) -> bool {
+    u64::from_le_bytes(xmm5[..8].try_into().unwrap()) == SYSCALL_BYPASS_MAGIC
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscallhook(sig: c_int, info: *mut siginfo_t, context: *mut c_void) {
     let _errno = crate::errno::Errno::save();
@@ -60,21 +64,21 @@ unsafe fn redirect(
     if !matches!(code, SYS_SECCOMP | SYS_USER_DISPATCH) {
         return false;
     }
+    let xmm = unsafe { ptr::addr_of_mut!((*fpregs)._xmm).cast::<[u8; 16]>() };
+    let xmm5 = unsafe { xmm.add(5).read() };
+    if is_bypass(&xmm5) {
+        unsafe { xmm.add(5).write([0; 16]) };
+        return false;
+    }
+    let gregs = unsafe { ptr::addr_of_mut!((*context).uc_mcontext.gregs).cast::<libc::greg_t>() };
+    let rip = unsafe { gregs.add(libc::REG_RIP as usize).read() as u64 };
+    if !redirect_all() && is_wine_system_rip(rip) {
+        return false;
+    }
     let Some(selected_route) = route(context) else {
         return false;
     };
     unsafe {
-        let xmm = ptr::addr_of_mut!((*fpregs)._xmm).cast::<[u8; 16]>();
-        let low_xmm5 = xmm.add(5).cast::<[u8; 8]>().read();
-        if u64::from_le_bytes(low_xmm5) == SYSCALL_BYPASS_MAGIC {
-            xmm.add(5).write([0; 16]);
-            return false;
-        }
-        let gregs = ptr::addr_of_mut!((*context).uc_mcontext.gregs).cast::<libc::greg_t>();
-        let rip = gregs.add(libc::REG_RIP as usize).read() as u64;
-        if !redirect_all() && is_wine_system_rip(rip) {
-            return false;
-        }
         let selector = gregs.add(libc::REG_RAX as usize).read() as u32;
         let mut xmm4 = xmm.add(4).read();
         xmm4[..4].copy_from_slice(&selector.to_le_bytes());

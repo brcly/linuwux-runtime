@@ -12,12 +12,13 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const EXPORTS: &[&str] = &[
     "cpuid_configure_profile",
-    "cpuid_activate_dispatch_profile",
+    "cpuid_activate_legacy_profile",
     "cpuid_get_fixed_reply",
     "cpuid_sigsegv_handler",
     "detect_cpu_vendor",
     "sigaction",
     "free",
+    "malloc",
     "unsetenv",
     "linuwux_setup_hooks",
     "forward_signal",
@@ -25,7 +26,7 @@ const EXPORTS: &[&str] = &[
     "reflex_route_syscall",
     "syscallhook",
     "kuser_apply_to_buffer",
-    "patch_kuser_shared_data_profile",
+    "patch_kuser_shared_data_recipe",
     "patch_kuser_shared_data",
     "gettimeofday",
     "set_offset",

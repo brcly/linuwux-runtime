@@ -1,35 +1,42 @@
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use libc::ucontext_t;
-use linuwux::reflex::{Host, KuserProfile, State};
+use linuwux::reflex::{Host, KuserRecipe, State};
 
 static REFLEX_STATE: State = State::new();
 struct RuntimeHost;
 
 unsafe extern "C" {
-    fn cpuid_activate_dispatch_profile();
+    fn cpuid_activate_legacy_profile();
+    fn cpuid_kuser_recipe() -> c_int;
     fn set_offset(filetime: u64);
-    fn patch_kuser_shared_data_profile(profile: c_int) -> c_int;
+    fn patch_kuser_shared_data_recipe(recipe: c_int) -> c_int;
     fn debug_log(message: *const c_char);
     fn debug_log_hex(prefix: *const c_char, value: u64);
 }
 
 impl Host for RuntimeHost {
-    fn activate_dispatch_cpuid(&self) {
-        unsafe { cpuid_activate_dispatch_profile() };
-    }
     fn set_offset(&self, filetime: u64) {
         unsafe { set_offset(filetime) };
     }
-    fn patch_kuser(&self, profile: KuserProfile) -> bool {
-        unsafe { patch_kuser_shared_data_profile(profile as c_int) == 0 }
+    fn select_legacy_presentation(&self) {
+        unsafe { cpuid_activate_legacy_profile() };
+    }
+    fn legacy_presentation_active(&self) -> bool {
+        unsafe { cpuid_kuser_recipe() != KuserRecipe::Resume as c_int }
+    }
+    fn selector_kuser_recipe(&self) -> KuserRecipe {
+        match unsafe { cpuid_kuser_recipe() } {
+            2 => KuserRecipe::Dispatch,
+            _ => KuserRecipe::Selector,
+        }
+    }
+    fn patch_kuser(&self, recipe: KuserRecipe) -> bool {
+        unsafe { patch_kuser_shared_data_recipe(recipe as c_int) == 0 }
     }
     fn set_hwprofile_guid(&self) {
         #[cfg(feature = "environment")]
         crate::registry::set_hwprofile_guid();
-    }
-    fn single_dispatch_forced(&self) -> bool {
-        crate::config::single_dispatch_forced()
     }
     fn yield_thread(&self) {
         unsafe { libc::syscall(libc::SYS_sched_yield) };

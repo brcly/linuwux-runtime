@@ -189,13 +189,18 @@ existing `LD_PRELOAD` value. Use an absolute path without spaces or colons.
 
 ## Configuration
 
-LinUwUx needs no extra variables by default.
+LinUwUx needs no extra variables by default. A CPUID identity request from a
+mapped `reflex64.dll` client automatically selects the legacy CPU and KUSER
+presentation before Reflex begins its control handshake. A complete explicit
+dual-dispatch registration selects the legacy presentation for later identity
+requests.
 
 | Variable | Behaviour |
 | --- | --- |
 | `PROTON_AVX=1` | Enables AVX flags for the resume-target profile |
 | `LINUWUX_SYSCALL_HACK=1` | Clears Wine's `KUSER_SHARED_DATA.SystemCall` flag (direct syscall path). Opt-in per title; not implied by Reflex |
 | `LINUWUX_REDIRECT_ALL=1` | Experimental: routes CPUID instructions from Wine system code through LinUwUx instead of allowing native pass-through |
+| `LINUWUX_LEGACY_PROFILE=1` | Selects legacy CPU presentation and selector-dispatch handling while retaining the ResumeTarget registration protocol; it uses the SVM KUSER recipe on AMD and the VMX KUSER recipe on Intel |
 | `LINUWUX_DEBUG=1` | Enables runtime diagnostics |
 | `LINUWUX_LOG=/absolute/path.log` | Writes diagnostics to a private `0600` file |
 

@@ -1,7 +1,7 @@
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
-use linuwux::kuser::{PAGE_SIZE, PatchError, PatchState, Profile};
+use linuwux::kuser::{PAGE_SIZE, PatchError, PatchState, Recipe};
 
 const ADDRESS: usize = 0x7ffe_0000;
 const SYSTEM_CALL_OFFSET: usize = 0x308;
@@ -44,23 +44,23 @@ fn restore_read_only(page: *mut libc::c_void) -> bool {
 pub unsafe extern "C" fn kuser_apply_to_buffer(
     page: *mut u8,
     length: usize,
-    profile: c_int,
+    recipe: c_int,
     avx_enabled: c_int,
 ) -> c_int {
     if page.is_null() || length < PAGE_SIZE {
         return -1;
     }
-    let Some(profile) = Profile::from_raw(profile) else {
+    let Some(recipe) = Recipe::from_raw(recipe) else {
         return -1;
     };
-    profile.visit_writes(avx_enabled != 0, |offset, byte| {
+    recipe.visit_writes(avx_enabled != 0, |offset, byte| {
         unsafe { page.add(offset).write_volatile(byte) };
     });
     0
 }
 
-unsafe fn apply_profile_to_shared_page(
-    profile: Profile,
+unsafe fn apply_recipe_to_shared_page(
+    recipe: Recipe,
     _guard: &crate::page_guard::PageGuard,
 ) -> bool {
     if !PAGE_GEOMETRY_SUPPORTED.load(Ordering::Acquire) {
@@ -88,7 +88,7 @@ unsafe fn apply_profile_to_shared_page(
         kuser_apply_to_buffer(
             page,
             PAGE_SIZE,
-            profile as c_int,
+            recipe as c_int,
             AVX_ENABLED.load(Ordering::Acquire) as c_int,
         )
     };
@@ -103,7 +103,7 @@ unsafe fn apply_profile_to_shared_page(
         SYSCALL_HACK_APPLIED.store(true, Ordering::Release);
     }
     if apply_result == -1 {
-        log(c"failed to apply KUSER_SHARED_DATA profile");
+        log(c"failed to apply KUSER_SHARED_DATA recipe");
     }
     apply_result == 0
 }
@@ -160,8 +160,8 @@ pub(crate) fn force_direct_syscall() {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn patch_kuser_shared_data_profile(profile: c_int) -> c_int {
-    let Some(profile) = Profile::from_raw(profile) else {
+pub unsafe extern "C" fn patch_kuser_shared_data_recipe(recipe: c_int) -> c_int {
+    let Some(recipe) = Recipe::from_raw(recipe) else {
         return -1;
     };
     let _errno = crate::errno::Errno::save();
@@ -169,8 +169,8 @@ pub unsafe extern "C" fn patch_kuser_shared_data_profile(profile: c_int) -> c_in
         return -1;
     };
     match PATCH_STATE.patch(
-        profile,
-        || unsafe { apply_profile_to_shared_page(profile, &_guard) },
+        recipe,
+        || unsafe { apply_recipe_to_shared_page(recipe, &_guard) },
         || {
             unsafe { libc::syscall(libc::SYS_sched_yield) };
         },
@@ -178,7 +178,7 @@ pub unsafe extern "C" fn patch_kuser_shared_data_profile(profile: c_int) -> c_in
         Ok(()) => 0,
         Err(PatchError::ApplyFailed) => -1,
         Err(PatchError::Conflict) => {
-            log(c"KUSER profile conflicts with the selected protocol");
+            log(c"KUSER recipe conflicts with the selected protocol");
             -1
         }
     }
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn patch_kuser_shared_data_profile(profile: c_int) -> c_in
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patch_kuser_shared_data() -> c_int {
-    unsafe { patch_kuser_shared_data_profile(Profile::ResumeTarget as c_int) }
+    unsafe { patch_kuser_shared_data_recipe(Recipe::Resume as c_int) }
 }
 
 #[unsafe(no_mangle)]
