@@ -6,4 +6,4 @@ pub use control::{
     REGISTER_ATTRIBUTES_SYSCALL_ID, REGISTER_RESUME_HANDLER, REGISTER_SYSTEM_SYSCALL_ID,
     REGISTER_TARGET_PID, SET_TIME, SYSCALL_BYPASS_MAGIC,
 };
-pub use state::{Action, Host, KuserRecipe, Routing, State, SyscallRoute};
+pub use state::{Action, Host, IdentityScope, KuserRecipe, Routing, State, SyscallRoute};

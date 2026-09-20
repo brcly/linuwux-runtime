@@ -17,6 +17,43 @@ pub enum Routing {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityScope {
+    Unobserved,
+    Process,
+    DebugRegisterThread,
+}
+
+#[repr(u32)]
+enum IdentityState {
+    Unobserved,
+    Process,
+    DebugRegisterThread,
+}
+
+impl IdentityState {
+    fn load(value: &AtomicU32) -> Self {
+        match value.load(Ordering::Acquire) {
+            0 => Self::Unobserved,
+            1 => Self::Process,
+            2 => Self::DebugRegisterThread,
+            _ => unreachable!("invalid Reflex identity scope"),
+        }
+    }
+
+    fn store(self, value: &AtomicU32) {
+        value.store(self as u32, Ordering::Release);
+    }
+
+    fn public(self) -> IdentityScope {
+        match self {
+            Self::Unobserved => IdentityScope::Unobserved,
+            Self::Process => IdentityScope::Process,
+            Self::DebugRegisterThread => IdentityScope::DebugRegisterThread,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 enum SyscallConvention {
     ResumeReplay,
@@ -130,6 +167,8 @@ impl DispatchRegistrations {
 #[derive(Debug)]
 pub struct State {
     routing: AtomicU32,
+    identity: AtomicU32,
+    target_pid: AtomicU64,
     syscall_convention: AtomicU32,
     resume_target: AtomicU64,
     dispatch: DispatchRegistrations,
@@ -139,6 +178,8 @@ impl State {
     pub const fn new() -> Self {
         Self {
             routing: AtomicU32::new(RoutingState::Unregistered as u32),
+            identity: AtomicU32::new(IdentityState::Unobserved as u32),
+            target_pid: AtomicU64::new(0),
             syscall_convention: AtomicU32::new(SyscallConvention::ResumeReplay as u32),
             resume_target: AtomicU64::new(0),
             dispatch: DispatchRegistrations::new(),
@@ -147,6 +188,15 @@ impl State {
 
     pub fn routing(&self) -> Routing {
         RoutingState::load(&self.routing).stable()
+    }
+
+    pub fn identity_scope(&self) -> IdentityScope {
+        IdentityState::load(&self.identity).public()
+    }
+
+    pub fn target_pid(&self) -> Option<u64> {
+        let target = self.target_pid.load(Ordering::Acquire);
+        (target != 0).then_some(target)
     }
 
     pub fn resume_identity_unarmed(&self) -> bool {
@@ -273,6 +323,7 @@ impl State {
         match leaf {
             ARM_TARGET_CR3 => {
                 Self::log_control(host, leaf, argument);
+                IdentityState::Process.store(&self.identity);
                 if self.routing() == Routing::ResumeTarget {
                     return Action::Native;
                 }
@@ -284,6 +335,18 @@ impl State {
             }
             REGISTER_RESUME_HANDLER => {
                 Self::log_control(host, leaf, argument);
+                if self
+                    .identity
+                    .compare_exchange(
+                        IdentityState::Unobserved as u32,
+                        IdentityState::DebugRegisterThread as u32,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    host.log(c"reflex debug-register thread identity inferred");
+                }
                 host.set_hwprofile_guid();
                 if self.routing() == Routing::Unregistered {
                     host.log(c"reflex routing=resume-target inferred");
@@ -300,6 +363,8 @@ impl State {
                 if self.routing() == Routing::Unregistered {
                     return Action::Native;
                 }
+                self.target_pid.store(argument, Ordering::Release);
+                host.log_hex(c"reflex target pid=", argument);
                 let recipe = self.kuser_recipe(host);
                 host.log(match recipe {
                     KuserRecipe::Dispatch => c"reflex KUSER recipe=dispatch",
