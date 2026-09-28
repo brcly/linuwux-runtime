@@ -320,9 +320,13 @@ pub unsafe extern "C" fn mmap(
             core::mem::transmute::<*mut c_void, Mmap>(real)(addr, length, prot, flags, fd, offset)
         }
     };
-    #[cfg(feature = "debug")]
     if result != libc::MAP_FAILED && fd >= 0 && flags & libc::MAP_ANONYMOUS == 0 {
-        unsafe { trace_system_dll_map(fd, result, length, prot, flags, offset) };
+        #[cfg(feature = "cpuid")]
+        crate::maps::note_file_mapping();
+        #[cfg(feature = "debug")]
+        unsafe {
+            trace_system_dll_map(fd, result, length, prot, flags, offset)
+        };
     }
     if result != libc::MAP_FAILED
         && fd >= 0

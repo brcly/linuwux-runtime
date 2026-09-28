@@ -11,6 +11,8 @@ use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 use libc::ucontext_t;
 
+use crate::procmem::read_memory;
+
 const INT2E_INSTRUCTION: [u8; 2] = [0xcd, 0x2e];
 const SYSCALL_INSTRUCTION: [u8; 2] = [0x0f, 0x05];
 /// Distinct inline `int 2e` call sites this process can ever have a private
@@ -88,29 +90,13 @@ fn trace_window_list_entry(gregs: *const libc::greg_t) {
         );
         debug_log_hex(c"window list original R8=".as_ptr(), register(libc::REG_R8));
         debug_log_hex(c"window list original R9=".as_ptr(), register(libc::REG_R9));
-        if let Some(value) = super::mem::read_u64(rsp.saturating_add(0x38)) {
+        if let Some(value) = crate::procmem::read_u64(rsp.saturating_add(0x38)) {
             debug_log_hex(c"window list original stack+0x38=".as_ptr(), value);
         }
-        if let Some(value) = super::mem::read_u64(rsp.saturating_add(0x40)) {
+        if let Some(value) = crate::procmem::read_u64(rsp.saturating_add(0x40)) {
             debug_log_hex(c"window list original stack+0x40=".as_ptr(), value);
         }
     }
-}
-
-fn read_memory(address: u64, output: &mut [u8]) -> bool {
-    if address == 0 || output.is_empty() {
-        return false;
-    }
-    let local = libc::iovec {
-        iov_base: output.as_mut_ptr().cast(),
-        iov_len: output.len(),
-    };
-    let remote = libc::iovec {
-        iov_base: address as *mut c_void,
-        iov_len: output.len(),
-    };
-    let result = unsafe { libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) };
-    result == output.len() as isize
 }
 
 fn next_instruction(rip: u64) -> Option<u64> {
@@ -396,99 +382,17 @@ fn patch_to_syscall(address: u64) -> bool {
 }
 
 fn executable_mapping_protection(page: u64, page_size: u64) -> Option<c_int> {
-    // `openat`/`close` go through the real libc functions directly: neither
-    // is one of this crate's own exported/interposed symbols, so there's no
-    // self-recursion risk. `read` stays a raw syscall, though: this lookup
-    // runs inside SIGSEGV handling, and `libc::read` would self-recurse into
-    // this crate's own exported `read` interposer, whose first call does a
-    // lazy `dlsym` — unsafe to trigger from a signal handler.
-    let fd = unsafe {
-        libc::openat(
-            libc::AT_FDCWD,
-            c"/proc/self/maps".as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return None;
-    }
-    let mut chunk = [0u8; 1024];
-    let mut line = [0u8; 512];
-    let mut length = 0usize;
-    let mut overflow = false;
-    let mut protection = None;
-    'read: loop {
-        let count = unsafe {
-            libc::syscall(
-                libc::SYS_read,
-                fd as libc::c_long,
-                chunk.as_mut_ptr(),
-                chunk.len(),
-            ) as isize
-        };
-        if count <= 0 {
-            break;
-        }
-        for &byte in &chunk[..count as usize] {
-            if byte == b'\n' {
-                if !overflow
-                    && let Some(found) = executable_mapping_line(&line[..length], page, page_size)
-                {
-                    protection = Some(found);
-                    break 'read;
-                }
-                length = 0;
-                overflow = false;
-            } else if length < line.len() {
-                line[length] = byte;
-                length += 1;
-            } else {
-                overflow = true;
-            }
-        }
-    }
-    if protection.is_none()
-        && !overflow
-        && let Some(found) = executable_mapping_line(&line[..length], page, page_size)
-    {
-        protection = Some(found);
-    }
-    unsafe { libc::close(fd) };
-    protection
-}
-
-fn executable_mapping_line(line: &[u8], page: u64, page_size: u64) -> Option<c_int> {
-    let mut fields = line
-        .split(|byte| byte.is_ascii_whitespace())
-        .filter(|field| !field.is_empty());
-    let mut bounds = fields.next()?.split(|&byte| byte == b'-');
-    let start = parse_hex(bounds.next()?)?;
-    let end = parse_hex(bounds.next()?)?;
-    let permissions = fields.next()?;
-    if start > page
-        || end < page.checked_add(page_size)?
-        || permissions.len() != 4
-        || permissions[0] != b'r'
-        || permissions[2] != b'x'
-    {
-        return None;
-    }
-    Some(libc::PROT_READ | libc::PROT_EXEC)
-}
-
-fn parse_hex(bytes: &[u8]) -> Option<u64> {
-    if bytes.is_empty() {
-        return None;
-    }
-    bytes.iter().try_fold(0u64, |result, &byte| {
-        let digit = match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => return None,
-        };
-        result.checked_mul(16)?.checked_add(u64::from(digit))
+    let end = page.checked_add(page_size)?;
+    crate::maps::find_line(|line| {
+        crate::maps::parse(line).is_some_and(|mapping| {
+            mapping.start <= page
+                && mapping.end >= end
+                && mapping.permissions.len() == 4
+                && mapping.permissions[0] == b'r'
+                && mapping.permissions[2] == b'x'
+        })
     })
+    .then_some(libc::PROT_READ | libc::PROT_EXEC)
 }
 
 #[cfg(test)]

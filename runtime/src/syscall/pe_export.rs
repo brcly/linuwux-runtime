@@ -4,7 +4,7 @@
 //! [`super::win32u_zero_list`], which needs this because a Proton update can
 //! reorder syscall IDs or move where a system DLL loads.
 
-use super::mem::{read_memory, read_u16, read_u32, read_u64};
+use crate::procmem::{read_memory, read_u16, read_u32, read_u64};
 
 const PE_HEADER_LIMIT: u32 = 0x1000;
 const MODULE_LIMIT: usize = 256;

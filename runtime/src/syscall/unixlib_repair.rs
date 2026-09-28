@@ -25,7 +25,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::mem::{parse_hex, read_memory, read_u32, trampoline_destination, write_u64};
+use super::mem::trampoline_destination;
+use crate::procmem::{read_memory, read_u32, write_u64};
 
 const WINE_UNIX_CALL_DISPATCHER_EXPORT: &[u8] = b"__wine_unix_call_dispatcher";
 const WINE_UNIXLIB_HANDLE_EXPORT: &[u8] = b"__wine_unixlib_handle";
@@ -82,61 +83,23 @@ pub(super) fn maybe_repair_wine_unixlib_exports() {
 /// file-backed and is never visited; only in-memory PE clones like Reflex's
 /// are candidates.
 fn for_each_anonymous_executable_pe_image(mut visit: impl FnMut(u64)) {
-    let fd = unsafe {
-        libc::open(
-            c"/proc/self/maps".as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return;
-    }
-    let mut chunk = [0u8; 4096];
-    let mut line = [0u8; 512];
-    let mut length = 0usize;
-    loop {
-        let count = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
-        if count <= 0 {
-            break;
+    crate::maps::find_line(|line| {
+        let Some(mapping) = crate::maps::parse(line) else {
+            return false;
+        };
+        let permissions = mapping.permissions;
+        let mut dos = [0u8; 2];
+        if permissions.len() >= 3
+            && permissions[1] == b'w'
+            && permissions[2] == b'x'
+            && mapping.path.is_empty()
+            && read_memory(mapping.start, &mut dos)
+            && dos == *b"MZ"
+        {
+            visit(mapping.start);
         }
-        for &byte in &chunk[..count as usize] {
-            if byte != b'\n' {
-                if length < line.len() {
-                    line[length] = byte;
-                    length += 1;
-                }
-                continue;
-            }
-            visit_candidate_mapping(&line[..length], &mut visit);
-            length = 0;
-        }
-    }
-    unsafe { libc::close(fd) };
-}
-
-fn visit_candidate_mapping(text: &[u8], visit: &mut impl FnMut(u64)) {
-    let mut fields = text
-        .split(|byte| byte.is_ascii_whitespace())
-        .filter(|field| !field.is_empty());
-    let Some(range) = fields.next() else { return };
-    let mut bounds = range.split(|&byte| byte == b'-');
-    let Some(start) = bounds.next().and_then(parse_hex) else {
-        return;
-    };
-    let Some(perms) = fields.next() else { return };
-    if perms.len() < 3 || perms[1] != b'w' || perms[2] != b'x' {
-        return;
-    }
-    let _offset = fields.next();
-    let _device = fields.next();
-    let _inode = fields.next();
-    if fields.next().is_some_and(|pathname| !pathname.is_empty()) {
-        return;
-    }
-    let mut dos = [0u8; 2];
-    if read_memory(start, &mut dos) && dos == *b"MZ" {
-        visit(start);
-    }
+        false
+    });
 }
 
 struct ExportDirectory {
@@ -213,7 +176,7 @@ fn repair_named_export(base: u64, export: &ExportDirectory, name: &[u8]) -> bool
     let Some(destination) = trampoline_destination(record) else {
         return false;
     };
-    let Some(value) = super::mem::read_u64(destination) else {
+    let Some(value) = crate::procmem::read_u64(destination) else {
         return false;
     };
     write_u64(record, value)

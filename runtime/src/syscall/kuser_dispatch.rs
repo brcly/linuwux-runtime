@@ -15,7 +15,8 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::mem::{read_u32, read_u64, trampoline_destination};
+use super::mem::trampoline_destination;
+use crate::procmem::{read_memory, read_u32, read_u64, read_u64s};
 
 const WINE_DISPATCHER_SLOT: u64 = 0x7ffe_1000;
 const THUNK_RETURN_OFFSET: u64 = 0x1f;
@@ -25,6 +26,13 @@ const SYSCALL_INSTRUCTION: [u8; 2] = [0x0f, 0x05];
 const PEB_IMAGE_BASE_OFFSET: u64 = 0x10;
 const TEB_PEB_OFFSET: u64 = 0x60;
 const IAT_SCAN_MAX_RETRY_INTERVAL: u64 = 1024;
+/// Thunks read per `process_vm_readv` call while scanning an IAT/lookup
+/// table, instead of one syscall per 8-byte entry — an import table with a
+/// few hundred entries previously cost hundreds of syscalls per scan attempt.
+const IAT_THUNK_CHUNK: usize = 64;
+/// Open-addressed set of stub addresses; twice [`IAT_CAPACITY`] keeps probes
+/// short, and a power of two keeps the index a mask.
+const IAT_STUB_SLOTS: usize = IAT_CAPACITY * 2;
 
 static ORIGINAL_DISPATCHER: AtomicU64 = AtomicU64::new(0);
 static BRIDGE_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -37,7 +45,7 @@ static IAT_SCAN_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static IAT_SCAN_SUCCESS_LOGGED: AtomicBool = AtomicBool::new(false);
 static IAT_SCAN_MISS_LOGGED: AtomicBool = AtomicBool::new(false);
 static IAT_SCAN_LOCK: AtomicBool = AtomicBool::new(false);
-static IAT_STUBS: [AtomicU64; IAT_CAPACITY] = [const { AtomicU64::new(0) }; IAT_CAPACITY];
+static IAT_STUBS: [AtomicU64; IAT_STUB_SLOTS] = [const { AtomicU64::new(0) }; IAT_STUB_SLOTS];
 
 unsafe extern "C" {
     fn debug_log(message: *const core::ffi::c_char);
@@ -85,7 +93,7 @@ fn register_reflex_image(handler: u64) {
             break;
         };
         let mut dos = [0u8; 0x40];
-        if !super::mem::read_memory(base, &mut dos) || dos[..2] != *b"MZ" {
+        if !read_memory(base, &mut dos) || dos[..2] != *b"MZ" {
             continue;
         }
         let pe_offset = u32::from_le_bytes(dos[0x3c..0x40].try_into().unwrap()) as u64;
@@ -93,7 +101,7 @@ fn register_reflex_image(handler: u64) {
             continue;
         }
         let mut headers = [0u8; 0x60];
-        if !super::mem::read_memory(base + pe_offset, &mut headers) || headers[..4] != *b"PE\0\0" {
+        if !read_memory(base + pe_offset, &mut headers) || headers[..4] != *b"PE\0\0" {
             continue;
         }
         let image_size = u32::from_le_bytes(headers[80..84].try_into().unwrap()) as u64;
@@ -114,23 +122,26 @@ fn is_reflex_address(address: u64) -> bool {
     start != 0 && (start..end).contains(&address)
 }
 
+fn stub_probe(address: u64) -> impl Iterator<Item = usize> {
+    let hash = (address >> 4).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 32;
+    (0..IAT_STUB_SLOTS).map(move |offset| (hash as usize + offset) & (IAT_STUB_SLOTS - 1))
+}
+
+/// Inserts are serialized by `IAT_SCAN_LOCK`; slots only ever go from zero to
+/// an address, so lock-free readers see a consistent set.
 fn remember_stub(address: u64) -> bool {
-    if address == 0 {
+    if address == 0 || IAT_STUB_COUNT.load(Ordering::Acquire) >= IAT_CAPACITY as u64 {
         return false;
     }
-    let count = IAT_STUB_COUNT
-        .load(Ordering::Acquire)
-        .min(IAT_CAPACITY as u64) as usize;
-    if IAT_STUBS[..count]
-        .iter()
-        .any(|entry| entry.load(Ordering::Relaxed) == address)
-    {
-        return false;
-    }
-    let index = IAT_STUB_COUNT.fetch_add(1, Ordering::AcqRel) as usize;
-    if index < IAT_CAPACITY {
-        IAT_STUBS[index].store(address, Ordering::Release);
-        return true;
+    for index in stub_probe(address) {
+        match IAT_STUBS[index].compare_exchange(0, address, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                IAT_STUB_COUNT.fetch_add(1, Ordering::AcqRel);
+                return true;
+            }
+            Err(existing) if existing == address => return false,
+            Err(_) => {}
+        }
     }
     false
 }
@@ -252,30 +263,43 @@ fn scan_main_image_iat_locked() -> usize {
             continue;
         }
         let max_thunks = (image_size.saturating_sub(lookup_rva) / 8).min(65_536);
-        for thunk in 0..max_thunks {
-            let lookup = image_base
-                .saturating_add(lookup_rva as u64)
-                .saturating_add(u64::from(thunk) * 8);
-            let Some(import_value) = read_u64(lookup) else {
-                break;
-            };
-            if import_value == 0 {
-                break;
+        // Read the lookup table and IAT a chunk at a time; stopping at the
+        // first unreadable or zero entry matches reading them one by one.
+        let mut thunk = 0u32;
+        'thunks: while thunk < max_thunks {
+            let count = ((max_thunks - thunk) as usize).min(IAT_THUNK_CHUNK);
+            let offset = u64::from(thunk) * 8;
+            let mut imports = [0u64; IAT_THUNK_CHUNK];
+            let mut values = [0u64; IAT_THUNK_CHUNK];
+            let imports_read = read_u64s(
+                image_base
+                    .saturating_add(lookup_rva as u64)
+                    .saturating_add(offset),
+                &mut imports,
+                count,
+            );
+            let values_read = read_u64s(
+                image_base
+                    .saturating_add(iat_rva as u64)
+                    .saturating_add(offset),
+                &mut values,
+                count,
+            );
+            for index in 0..count {
+                if index >= imports_read
+                    || imports[index] == 0
+                    || index >= values_read
+                    || values[index] == 0
+                {
+                    break 'thunks;
+                }
+                if let Some(destination) = trampoline_destination(values[index])
+                    && remember_stub(destination)
+                {
+                    found += 1;
+                }
             }
-            let slot = image_base
-                .saturating_add(iat_rva as u64)
-                .saturating_add(u64::from(thunk) * 8);
-            let Some(value) = read_u64(slot) else {
-                break;
-            };
-            if value == 0 {
-                break;
-            }
-            if let Some(destination) = trampoline_destination(value)
-                && remember_stub(destination)
-            {
-                found += 1;
-            }
+            thunk += count as u32;
         }
     }
     if found != 0 && !IAT_SCAN_SUCCESS_LOGGED.swap(true, Ordering::AcqRel) {
@@ -309,16 +333,32 @@ fn should_retry_iat_scan(attempt: u64) -> bool {
 }
 
 fn matches_iat_stub(return_address: u64) -> bool {
-    let count = IAT_STUB_COUNT
-        .load(Ordering::Acquire)
-        .min(IAT_CAPACITY as u64) as usize;
-    IAT_STUBS[..count]
-        .iter()
-        .any(|entry| return_matches_stub(return_address, entry.load(Ordering::Acquire)))
+    if IAT_STUB_COUNT.load(Ordering::Acquire) == 0 {
+        return false;
+    }
+    let Some(stub) = stub_for_return(return_address) else {
+        return false;
+    };
+    for index in stub_probe(stub) {
+        match IAT_STUBS[index].load(Ordering::Acquire) {
+            0 => return false,
+            entry if entry == stub => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
+/// The stub entry whose call returns to `return_address`.
+fn stub_for_return(return_address: u64) -> Option<u64> {
+    return_address
+        .checked_sub(THUNK_RETURN_OFFSET)
+        .filter(|&stub| stub != 0)
+}
+
+#[cfg(test)]
 fn return_matches_stub(return_address: u64, stub: u64) -> bool {
-    return_address.checked_sub(THUNK_RETURN_OFFSET) == Some(stub)
+    stub_for_return(return_address) == Some(stub)
 }
 
 fn find_raw_syscall_instruction(code: &[u8], code_address: u64, service: u64) -> Option<u64> {
@@ -347,7 +387,7 @@ fn find_syscall(return_address: u64, service: u64) -> Option<u64> {
             continue;
         };
         let mut bytes = [0u8; 0x80];
-        if !super::mem::read_memory(start, &mut bytes[..window]) {
+        if !read_memory(start, &mut bytes[..window]) {
             continue;
         }
         if let Some(address) = find_raw_syscall_instruction(&bytes[..window], start, service) {

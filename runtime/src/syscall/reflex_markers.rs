@@ -69,6 +69,30 @@ fn marker_slot(stack: u64) -> usize {
     ((stack >> 4) as usize) % MARKER_CAPACITY
 }
 
+// Scans the whole table rather than a bounded window: thread stacks are
+// often evenly spaced (fixed per-thread stack size), which can make
+// `marker_slot` collide or cluster across threads far more than a random
+// distribution would suggest. A bounded probe window measured safe for one
+// workload silently starves `remember_marker` under a different one —
+// dropping a bridged registration/handshake syscall reads as the game never
+// starting, not a slow path. Correctness costs more here than the win from
+// bounding this is worth without workload-specific tuning data.
+fn probe_slots(stack: u64) -> impl Iterator<Item = usize> {
+    let start = marker_slot(stack);
+    (0..MARKER_CAPACITY).map(move |offset| (start + offset) % MARKER_CAPACITY)
+}
+
+fn find_marker(tid: u64, stack: u64, rip: u64) -> Option<usize> {
+    if !has_active_markers() {
+        return None;
+    }
+    probe_slots(stack).find(|&index| {
+        MARKER_STACKS[index].load(Ordering::Acquire) == stack
+            && MARKER_TIDS[index].load(Ordering::Relaxed) == tid
+            && MARKER_RIPS[index].load(Ordering::Relaxed) == rip
+    })
+}
+
 /// Arm a marker for a raw syscall about to be replayed at `rip` on thread
 /// `tid`'s stack. Called by `kuser_dispatch::dispatcher_target` once it has
 /// decided a call is Reflex-evidenced.
@@ -76,9 +100,7 @@ pub(super) fn remember_marker(tid: u64, stack: u64, rip: u64) -> bool {
     if tid == 0 || stack == 0 || rip == 0 {
         return false;
     }
-    let start = marker_slot(stack);
-    for offset in 0..MARKER_CAPACITY {
-        let index = (start + offset) % MARKER_CAPACITY;
+    for index in probe_slots(stack) {
         if MARKER_STACKS[index]
             .compare_exchange(0, u64::MAX, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
@@ -154,17 +176,10 @@ pub(super) fn consume(
     r11: u64,
     eflags: u64,
 ) -> Option<Phase> {
-    if tid == 0 || stack == 0 || rip == 0 || !has_active_markers() {
+    if tid == 0 || stack == 0 || rip == 0 {
         return None;
     }
-    let start = marker_slot(stack);
-    let index = (0..MARKER_CAPACITY)
-        .map(|offset| (start + offset) % MARKER_CAPACITY)
-        .find(|&i| {
-            MARKER_STACKS[i].load(Ordering::Acquire) == stack
-                && MARKER_TIDS[i].load(Ordering::Relaxed) == tid
-                && MARKER_RIPS[i].load(Ordering::Relaxed) == rip
-        })?;
+    let index = find_marker(tid, stack, rip)?;
     if MARKER_PHASES[index]
         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
         .is_ok()
@@ -218,18 +233,7 @@ pub(super) fn consume(
 /// the route callback declines it) — the marker must not linger for a later
 /// syscall to accidentally match.
 pub(super) fn cancel(tid: u64, stack: u64, rip: u64) {
-    if !has_active_markers() {
-        return;
-    }
-    let start = marker_slot(stack);
-    if let Some(index) = (0..MARKER_CAPACITY)
-        .map(|offset| (start + offset) % MARKER_CAPACITY)
-        .find(|&i| {
-            MARKER_STACKS[i].load(Ordering::Acquire) == stack
-                && MARKER_TIDS[i].load(Ordering::Relaxed) == tid
-                && MARKER_RIPS[i].load(Ordering::Relaxed) == rip
-        })
-    {
+    if let Some(index) = find_marker(tid, stack, rip) {
         release_marker(index, stack);
     }
 }

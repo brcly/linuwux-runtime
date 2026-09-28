@@ -127,9 +127,28 @@ fn init_socketpair() {
     SOCKETPAIR_READY.store(true, Ordering::Release);
 }
 
+/// How often, at most, a process with no offset yet peeks the socketpair for
+/// one another process may have published. Without this, every
+/// `gettimeofday` in a process that never uses `SET_TIME` pays a `recv`.
+const PEEK_INTERVAL_MS: u64 = 10;
+static LAST_PEEK_MS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+fn peek_due() -> bool {
+    let now = crate::clock::coarse_milliseconds();
+    let last = LAST_PEEK_MS.load(Ordering::Relaxed);
+    if last != u64::MAX && now.wrapping_sub(last) < PEEK_INTERVAL_MS {
+        return false;
+    }
+    LAST_PEEK_MS.store(now, Ordering::Relaxed);
+    true
+}
+
 fn current_offset() -> u64 {
     let local = OFFSET.load(Ordering::Acquire);
     if local != 0 {
+        return local;
+    }
+    if SOCKETPAIR_READY.load(Ordering::Acquire) && !peek_due() {
         return local;
     }
     if !SOCKETPAIR_READY.load(Ordering::Acquire) {

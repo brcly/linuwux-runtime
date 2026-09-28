@@ -13,7 +13,7 @@
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::mem::{read_u32, read_u64, write_u32};
+use crate::procmem::{read_u32, read_u64, write_u32};
 
 const STATUS_BUFFER_TOO_SMALL: u32 = 0xc000_0023;
 const EXPORT_NAME: &[u8] = b"NtUserBuildHwndList";

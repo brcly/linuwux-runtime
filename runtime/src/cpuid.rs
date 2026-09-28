@@ -10,8 +10,10 @@
 use core::arch::x86_64::__cpuid_count;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
+use crate::maps;
+use crate::procmem::read_memory;
 use libc::{greg_t, siginfo_t, ucontext_t};
 use linuwux::cpuid::{
     ActiveCpuIdentity, CpuPresentation, Registers, Vendor, artifact_amd_reply,
@@ -32,7 +34,7 @@ static ARTIFACT_PROFILE_SELECTED: AtomicBool = AtomicBool::new(false);
 ))]
 static FORWARDED_GAME_FAULTS_LOGGED: AtomicU64 = AtomicU64::new(0);
 
-const CALLER_CACHE_CAP: usize = 16;
+const CALLER_CACHE_CAP: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -52,9 +54,13 @@ impl CallerKind {
     }
 }
 
+/// Mapping ranges already classified, so a repeat caller skips the
+/// `/proc/self/maps` scan. Entries are replaced round-robin once full; each
+/// has a seqlock so a reader never pairs one entry's start with another's end.
 struct CallerCache {
     lock: AtomicBool,
-    len: AtomicU32,
+    next: AtomicU32,
+    sequences: [AtomicU32; CALLER_CACHE_CAP],
     starts: [AtomicU64; CALLER_CACHE_CAP],
     ends: [AtomicU64; CALLER_CACHE_CAP],
     kinds: [AtomicU32; CALLER_CACHE_CAP],
@@ -64,7 +70,8 @@ impl CallerCache {
     const fn new() -> Self {
         Self {
             lock: AtomicBool::new(false),
-            len: AtomicU32::new(0),
+            next: AtomicU32::new(0),
+            sequences: [const { AtomicU32::new(0) }; CALLER_CACHE_CAP],
             starts: [const { AtomicU64::new(0) }; CALLER_CACHE_CAP],
             ends: [const { AtomicU64::new(0) }; CALLER_CACHE_CAP],
             kinds: [const { AtomicU32::new(CallerKind::Ordinary as u32) }; CALLER_CACHE_CAP],
@@ -72,34 +79,43 @@ impl CallerCache {
     }
 
     fn lookup(&self, address: u64) -> Option<CallerKind> {
-        let len = self.len.load(Ordering::Acquire) as usize;
-        for index in 0..len.min(CALLER_CACHE_CAP) {
-            let start = self.starts[index].load(Ordering::Acquire);
-            let end = self.ends[index].load(Ordering::Acquire);
-            if (start..end).contains(&address) {
-                return Some(CallerKind::from_raw(
-                    self.kinds[index].load(Ordering::Acquire),
-                ));
+        for index in 0..CALLER_CACHE_CAP {
+            let before = self.sequences[index].load(Ordering::Acquire);
+            if before & 1 != 0 {
+                continue;
+            }
+            let start = self.starts[index].load(Ordering::Relaxed);
+            let end = self.ends[index].load(Ordering::Relaxed);
+            let kind = self.kinds[index].load(Ordering::Relaxed);
+            fence(Ordering::Acquire);
+            if self.sequences[index].load(Ordering::Relaxed) == before
+                && (start..end).contains(&address)
+            {
+                return Some(CallerKind::from_raw(kind));
             }
         }
         None
     }
 
+    /// Skips caching rather than spinning if another insert is in progress:
+    /// this runs inside the SIGSEGV handler, possibly on top of that insert.
     fn insert(&self, start: u64, end: u64, kind: CallerKind) {
-        while self
+        if self
             .lock
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            core::hint::spin_loop();
+            return;
         }
-        let len = self.len.load(Ordering::Relaxed) as usize;
-        if len < CALLER_CACHE_CAP {
-            self.starts[len].store(start, Ordering::Relaxed);
-            self.ends[len].store(end, Ordering::Relaxed);
-            self.kinds[len].store(kind as u32, Ordering::Relaxed);
-            self.len.store((len + 1) as u32, Ordering::Release);
-        }
+        let index = self.next.load(Ordering::Relaxed) as usize % CALLER_CACHE_CAP;
+        self.next.store((index + 1) as u32, Ordering::Relaxed);
+        let sequence = self.sequences[index].load(Ordering::Relaxed);
+        self.sequences[index].store(sequence.wrapping_add(1), Ordering::Relaxed);
+        fence(Ordering::Release);
+        self.starts[index].store(start, Ordering::Relaxed);
+        self.ends[index].store(end, Ordering::Relaxed);
+        self.kinds[index].store(kind as u32, Ordering::Relaxed);
+        self.sequences[index].store(sequence.wrapping_add(2), Ordering::Release);
         self.lock.store(false, Ordering::Release);
     }
 }
@@ -122,37 +138,6 @@ unsafe extern "C" {
 
 fn is_identity_leaf(leaf: u32) -> bool {
     matches!(leaf, 1 | 0x4000_0000..=0x4000_0001 | 0x8000_0002..=0x8000_0004)
-}
-
-fn parse_hex(value: &[u8]) -> Option<u64> {
-    if value.is_empty() {
-        return None;
-    }
-    value.iter().try_fold(0u64, |result, &byte| {
-        let digit = match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => return None,
-        };
-        result.checked_mul(16)?.checked_add(u64::from(digit))
-    })
-}
-
-fn read_memory(address: u64, output: &mut [u8]) -> bool {
-    if address == 0 || output.is_empty() {
-        return false;
-    }
-    let local = libc::iovec {
-        iov_base: output.as_mut_ptr().cast(),
-        iov_len: output.len(),
-    };
-    let remote = libc::iovec {
-        iov_base: address as *mut c_void,
-        iov_len: output.len(),
-    };
-    let result = unsafe { libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) };
-    result == output.len() as isize
 }
 
 fn little_endian_u16(bytes: &[u8]) -> Option<u16> {
@@ -226,41 +211,18 @@ fn pe_image_named(address: u64, expected: &[u8]) -> bool {
 }
 
 fn caller_mapping(line: &[u8], address: u64) -> Option<(u64, u64, CallerKind)> {
-    let mut fields = line
-        .split(|byte| byte.is_ascii_whitespace())
-        .filter(|field| !field.is_empty());
-    let range = fields.next()?;
-    let mut bounds = range.split(|&byte| byte == b'-');
-    let start = parse_hex(bounds.next()?)?;
-    let end = parse_hex(bounds.next()?)?;
-    if bounds.next().is_some() || !(start..end).contains(&address) {
-        return None;
-    }
-    let _permissions = fields.next()?;
-    let _offset = fields.next()?;
-    let _device = fields.next()?;
-    let _inode = fields.next()?;
-    Some((start, end, mapping_path_kind(line)))
+    let mapping = maps::parse(line)?;
+    (mapping.start..mapping.end)
+        .contains(&address)
+        .then(|| (mapping.start, mapping.end, path_kind(mapping.path)))
 }
 
+#[cfg(test)]
 fn mapping_path_kind(line: &[u8]) -> CallerKind {
-    // Keep the full path: Steam library directories often contain spaces.
-    let mut position = 0;
-    for _ in 0..5 {
-        while line.get(position).is_some_and(u8::is_ascii_whitespace) {
-            position += 1;
-        }
-        while line
-            .get(position)
-            .is_some_and(|byte| !byte.is_ascii_whitespace())
-        {
-            position += 1;
-        }
-    }
-    while line.get(position).is_some_and(u8::is_ascii_whitespace) {
-        position += 1;
-    }
-    let pathname = line.get(position..).unwrap_or_default();
+    maps::parse(line).map_or(CallerKind::Ordinary, |mapping| path_kind(mapping.path))
+}
+
+fn path_kind(pathname: &[u8]) -> CallerKind {
     let pathname = pathname.strip_suffix(b" (deleted)").unwrap_or(pathname);
     let filename = pathname
         .rsplit(|&byte| byte == b'/')
@@ -276,43 +238,42 @@ fn mapping_path_kind(line: &[u8]) -> CallerKind {
 }
 
 fn artifact_module_mapped() -> bool {
-    let fd = unsafe {
-        libc::open(
-            c"/proc/self/maps".as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-        )
+    maps::find_line(|line| {
+        maps::parse(line).is_some_and(|mapping| path_kind(mapping.path) == CallerKind::Artifact)
+    })
+}
+
+/// A negative `artifact_module_mapped` result stays valid until a new file
+/// mapping appears. This library's `mmap` interposer counts those; mappings
+/// made without it (such as by the dynamic loader) are caught by rescanning
+/// at least every [`ARTIFACT_RESCAN_INTERVAL_MS`].
+const ARTIFACT_RESCAN_INTERVAL_MS: u64 = 1000;
+static ARTIFACT_SCAN_GENERATION: AtomicU64 = AtomicU64::new(u64::MAX);
+static ARTIFACT_SCAN_MILLISECONDS: AtomicU64 = AtomicU64::new(0);
+
+fn mapping_generation() -> Option<u64> {
+    #[cfg(all(feature = "syscall", feature = "kuser", feature = "environment"))]
+    return Some(maps::file_mapping_generation());
+    #[cfg(not(all(feature = "syscall", feature = "kuser", feature = "environment")))]
+    None
+}
+
+fn artifact_module_newly_mapped() -> bool {
+    let Some(generation) = mapping_generation() else {
+        return artifact_module_mapped();
     };
-    if fd < 0 {
+    let now = crate::clock::coarse_milliseconds();
+    if generation == ARTIFACT_SCAN_GENERATION.load(Ordering::Relaxed)
+        && now.wrapping_sub(ARTIFACT_SCAN_MILLISECONDS.load(Ordering::Relaxed))
+            < ARTIFACT_RESCAN_INTERVAL_MS
+    {
         return false;
     }
-
-    let mut chunk = [0u8; 4096];
-    let mut line = [0u8; 1024];
-    let mut length = 0;
-    let mut overflow = false;
-    let mut found = false;
-    'chunks: loop {
-        let count = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
-        if count <= 0 {
-            break;
-        }
-        for &byte in &chunk[..count as usize] {
-            if byte == b'\n' {
-                if !overflow && mapping_path_kind(&line[..length]) == CallerKind::Artifact {
-                    found = true;
-                    break 'chunks;
-                }
-                length = 0;
-                overflow = false;
-            } else if length < line.len() {
-                line[length] = byte;
-                length += 1;
-            } else {
-                overflow = true;
-            }
-        }
+    let found = artifact_module_mapped();
+    if !found {
+        ARTIFACT_SCAN_MILLISECONDS.store(now, Ordering::Relaxed);
+        ARTIFACT_SCAN_GENERATION.store(generation, Ordering::Relaxed);
     }
-    unsafe { libc::close(fd) };
     found
 }
 
@@ -320,45 +281,11 @@ fn classify_caller(address: u64) -> Option<CallerKind> {
     if let Some(kind) = CALLER_CACHE.lookup(address) {
         return Some(kind);
     }
-
-    let fd = unsafe {
-        libc::open(
-            c"/proc/self/maps".as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return None;
-    }
-
-    let mut chunk = [0u8; 4096];
-    let mut line = [0u8; 1024];
-    let mut length = 0;
-    let mut overflow = false;
     let mut result = None;
-    'chunks: loop {
-        let count = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
-        if count <= 0 {
-            break;
-        }
-        for &byte in &chunk[..count as usize] {
-            if byte == b'\n' {
-                if !overflow && let Some(mapping) = caller_mapping(&line[..length], address) {
-                    result = Some(mapping);
-                    break 'chunks;
-                }
-                length = 0;
-                overflow = false;
-            } else if length < line.len() {
-                line[length] = byte;
-                length += 1;
-            } else {
-                overflow = true;
-            }
-        }
-    }
-    unsafe { libc::close(fd) };
-
+    maps::find_line(|line| {
+        result = caller_mapping(line, address);
+        result.is_some()
+    });
     let (start, end, mapped_kind) = result?;
     let kind = match mapped_kind {
         CallerKind::Ordinary if pe_image_named(address, b"reflex64.dll") => CallerKind::Reflex64,
@@ -482,7 +409,7 @@ fn fixed_reply(leaf: u32, rip: Option<u64>) -> Option<Registers> {
     if artifact_leaf.is_some() {
         let artifact_present = caller == CallerKind::Artifact
             || ARTIFACT_PROFILE_SELECTED.load(Ordering::Acquire)
-            || artifact_module_mapped();
+            || artifact_module_newly_mapped();
         if artifact_present
             && ARTIFACT_PROFILE_SELECTED
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

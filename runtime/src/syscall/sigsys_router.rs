@@ -75,10 +75,10 @@ fn trace_window_list(kind: &'static core::ffi::CStr, gregs: *const libc::greg_t)
         debug_log_hex(c"window list RDX=".as_ptr(), register(libc::REG_RDX));
         debug_log_hex(c"window list R8=".as_ptr(), register(libc::REG_R8));
         debug_log_hex(c"window list R9=".as_ptr(), register(libc::REG_R9));
-        if let Some(value) = super::mem::read_u64(rsp.saturating_add(0x38)) {
+        if let Some(value) = crate::procmem::read_u64(rsp.saturating_add(0x38)) {
             debug_log_hex(c"window list stack+0x38=".as_ptr(), value);
         }
-        if let Some(value) = super::mem::read_u64(rsp.saturating_add(0x40)) {
+        if let Some(value) = crate::procmem::read_u64(rsp.saturating_add(0x40)) {
             debug_log_hex(c"window list stack+0x40=".as_ptr(), value);
         }
     }

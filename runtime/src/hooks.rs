@@ -186,6 +186,8 @@ extern "C" fn after_fork() {
     SIGSYS_SLOT.readers.store(0, Ordering::SeqCst);
     set_tls_ptr(&RESOLVING_FREE_KEY, ptr::null_mut());
     set_tls_ptr(&RESOLVING_MALLOC_KEY, ptr::null_mut());
+    #[cfg(any(feature = "cpuid", feature = "syscall"))]
+    crate::procmem::forget_pid_after_fork();
     if WIN32U_FREE_GUARD_ENABLED.load(Ordering::Relaxed) {
         pending_frees::after_fork();
         WIN32U_SCANNED.store(false, Ordering::Release);
