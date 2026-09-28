@@ -1,3 +1,10 @@
+//! The C ABI other modules call to reach the safe core's Reflex state
+//! machine (`protocol/reflex/state.rs::State`), and `RuntimeHost`, this
+//! process's single implementation of its `Host` trait — the seam where the
+//! safe core's pure decisions turn into real `mprotect`/CPUID-presentation/
+//! logging side effects. `cpuid.rs` calls [`reflex_handle_cpuid`] from the
+//! CPUID trap handler; `syscall/sigsys_router.rs` calls
+//! [`reflex_route_syscall`] from the SIGSYS handler.
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use libc::ucontext_t;
@@ -50,13 +57,18 @@ impl Host for RuntimeHost {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn reflex_handle_cpuid(leaf: u32, argument: u64) -> c_int {
-    REFLEX_STATE.handle_cpuid(leaf, argument, &RuntimeHost) as c_int
+pub extern "C" fn reflex_handle_cpuid(leaf: u32, rcx: u64, rdx: u64) -> c_int {
+    REFLEX_STATE.handle_cpuid(leaf, rcx, rdx, &RuntimeHost) as c_int
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn reflex_resume_identity_unarmed() -> c_int {
     c_int::from(REFLEX_STATE.resume_identity_unarmed())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn reflex_target_process_registered() -> c_int {
+    c_int::from(REFLEX_STATE.has_registered_target_process())
 }
 
 #[unsafe(no_mangle)]

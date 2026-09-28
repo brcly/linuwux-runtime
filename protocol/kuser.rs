@@ -1,3 +1,14 @@
+//! `KUSER_SHARED_DATA` patch recipes and the state machine that arbitrates
+//! between them. A [`Recipe`] is a byte-offset write list for one of the
+//! title families in `docs/protocol/game-quirks.md` (resume/selector/
+//! dispatch); [`PatchState`] tracks which recipe (if any) has been applied
+//! to the live shared page, so a later request for a different, compatible
+//! recipe waits or is rejected instead of corrupting a page mid-write. This
+//! file only describes *what* to write and *whether* a given recipe may
+//! apply now; `runtime/src/kuser.rs` owns the actual page, its
+//! `mprotect`/`PageGuard` locking, and the `LINUWUX_SYSCALL_HACK` control
+//! that writes into the recipe's applied page afterward (see
+//! `docs/protocol/topspin-investigation.md` for why that flag still exists).
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub const PAGE_SIZE: usize = 4096;

@@ -1,3 +1,14 @@
+//! CPUID reply tables and the process-wide CPU identity they're chosen from.
+//!
+//! A CPUID leaf's canned reply depends on three independent things: the host
+//! CPU vendor (detected once, real hardware), whether Proton has AVX enabled
+//! (`PROTON_AVX`), and the [`CpuPresentation`] — modern ("Denuvo") by
+//! default, or [`CpuPresentation::Legacy`] for a title whose Reflex protocol
+//! (see `docs/protocol/game-quirks.md`) or KUSER dispatch recipe needs an
+//! older-looking CPU. [`ActiveCpuIdentity`] holds that identity as a single
+//! atomic so `runtime/src/cpuid.rs`'s SIGSEGV handler can read/update it
+//! without a lock. This file only builds replies and encodes/decodes that
+//! state; it has no idea how a CPUID trap actually reaches it.
 use core::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -10,8 +21,45 @@ pub struct Registers {
 }
 
 impl Registers {
-    const fn new(eax: u32, ebx: u32, ecx: u32, edx: u32) -> Self {
+    pub const fn new(eax: u32, ebx: u32, ecx: u32, edx: u32) -> Self {
         Self { eax, ebx, ecx, edx }
+    }
+}
+
+/// CPUID replies used by the AMD SimpleSvm artifact profile. The hypervisor
+/// source gates these values on a caller signature; the runtime applies them
+/// only to `artifact.dll` callers on an AMD host.
+pub fn artifact_amd_reply(leaf: u32) -> Option<Registers> {
+    match leaf {
+        // SimpleSvm clears FMA3, XSAVE, OSXSAVE, AVX, F16C, and RDRAND from
+        // 0x7ef8320b before returning the feature word.
+        1 => Some(Registers::new(
+            0x00a2_0f12,
+            0x0010_0800,
+            0x00f8_220b,
+            0x178b_fbff,
+        )),
+        // Preserve the source's MSVC multi-character constants as the exact
+        // register values assigned by the hypervisor.
+        0x8000_0002 => Some(Registers::new(
+            0x3230_4744,
+            0x4254_5253,
+            0x464d_3450,
+            0x2020_2041,
+        )),
+        0x8000_0003 => Some(Registers::new(
+            0x2020_2020,
+            0x2020_2020,
+            0x2020_2020,
+            0x2020_2020,
+        )),
+        0x8000_0004 => Some(Registers::new(
+            0x2020_2020,
+            0x2020_2020,
+            0x2020_2020,
+            0x0020_2020,
+        )),
+        _ => None,
     }
 }
 
@@ -202,10 +250,6 @@ pub fn proton_avx_enabled(value: Option<&[u8]>) -> bool {
     value == Some(b"1".as_slice())
 }
 
-pub fn redirect_all_enabled(value: Option<&[u8]>) -> bool {
-    value == Some(b"1".as_slice())
-}
-
 const WINE_SYSTEM_RIP_MIN: u64 = 0x0000_6fff_ff00_0000;
 const WINE_SYSTEM_RIP_MAX: u64 = 0x0000_7000_0000_0000;
 
@@ -270,5 +314,51 @@ impl ActiveCpuIdentity {
 impl Default for ActiveCpuIdentity {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::{Registers, artifact_amd_reply};
+
+    #[test]
+    fn artifact_amd_profile_matches_simple_svm_cpu_registers() {
+        assert_eq!(
+            artifact_amd_reply(1),
+            Some(Registers::new(
+                0x00a2_0f12,
+                0x0010_0800,
+                0x00f8_220b,
+                0x178b_fbff,
+            ))
+        );
+        assert_eq!(
+            artifact_amd_reply(0x8000_0002),
+            Some(Registers::new(
+                0x3230_4744,
+                0x4254_5253,
+                0x464d_3450,
+                0x2020_2041,
+            ))
+        );
+        assert_eq!(
+            artifact_amd_reply(0x8000_0003),
+            Some(Registers::new(
+                0x2020_2020,
+                0x2020_2020,
+                0x2020_2020,
+                0x2020_2020,
+            ))
+        );
+        assert_eq!(
+            artifact_amd_reply(0x8000_0004),
+            Some(Registers::new(
+                0x2020_2020,
+                0x2020_2020,
+                0x2020_2020,
+                0x0020_2020,
+            ))
+        );
+        assert_eq!(artifact_amd_reply(7), None);
     }
 }

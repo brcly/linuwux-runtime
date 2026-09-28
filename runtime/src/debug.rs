@@ -1,3 +1,11 @@
+//! The `debug_log`/`debug_log_hex`/`debug_log_dec` C ABI every other module
+//! calls through `unsafe extern "C"` declarations (rather than a normal Rust
+//! `fn`, since `debug` is an optional feature other modules must be able to
+//! link against without depending on this crate's internals). Reads
+//! `LINUWUX_DEBUG`/`LINUWUX_LOG` once at startup, opens the log file with
+//! the `O_NOFOLLOW`/`0600` hardening a world-writable log path would
+//! otherwise need, and builds each line with `protocol::debug::Line`, the
+//! `no_std`-safe formatter this file's callers can't allocate to use.
 use core::ffi::{CStr, c_char, c_int};
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};

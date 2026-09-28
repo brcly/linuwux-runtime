@@ -1,3 +1,12 @@
+//! `cargo xtask build`: builds `linuwux-runtime` as a static archive, links
+//! it into `LinUwUx.so` with an explicit version-script export map and
+//! linker hardening flags, then verifies the result — exported symbols
+//! match [`EXPORTS`] exactly, the ELF has the expected hardening
+//! (`RELRO`/`BIND_NOW`/`NODELETE`/no executable stack/no text relocations),
+//! and its `.init_array` constructors run in the fixed order [`ANCHORS`]
+//! lists. That verification is the actual safety net for the whole
+//! restructuring in this repo: a bad rename or a dropped `#[no_mangle]`
+//! fails the build immediately instead of silently shipping.
 mod process;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,6 +28,9 @@ const EXPORTS: &[&str] = &[
     "sigaction",
     "free",
     "malloc",
+    "read",
+    "pread",
+    "mmap",
     "unsetenv",
     "linuwux_setup_hooks",
     "forward_signal",
@@ -46,6 +58,7 @@ const ANCHORS: &[&str] = &[
     "linuwux_setup_hooks",
     "linuwux_setup_kuser",
 ];
+const INTERPOSITION_HOOKS: &[&str] = &["read", "pread", "mmap"];
 
 struct Context {
     root: PathBuf,
@@ -148,6 +161,9 @@ impl Context {
         ]);
         for anchor in ANCHORS {
             cmd.arg(format!("-Wl,-u,{anchor}"));
+        }
+        for hook in INTERPOSITION_HOOKS {
+            cmd.arg(format!("-Wl,-u,{hook}"));
         }
         cmd.arg(format!("-Wl,--version-script={}", map.display()))
             .arg(archive);

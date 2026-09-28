@@ -1,3 +1,8 @@
+//! The magic CPUID leaf numbers and register values Reflex's control
+//! protocol uses as commands rather than real CPUID leaves — see
+//! `docs/protocol/game-quirks.md`'s "Reflex protocol" table for which
+//! titles send which of these, in which order. [`state`](super::state)
+//! interprets them; this file is just the constant vocabulary.
 pub const ARM_TARGET_CR3: u32 = 0x6969_6969;
 pub const REGISTER_RESUME_HANDLER: u32 = 0x0033_6933;
 pub const SET_TIME: u32 = 0x0033_6967;

@@ -1,3 +1,9 @@
+//! Detects a Gamescope session (own process, desktop env vars, or process
+//! ancestry — see `protocol/gamescope.rs` for the pure detection logic) and,
+//! if found, interposes `setenv`/`unsetenv` so that when Gamescope
+//! re-executes itself or rewrites its child's environment, LinUwUx's own
+//! `LD_PRELOAD` entry is preserved rather than silently dropped from the
+//! process Gamescope actually launches.
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::mem::MaybeUninit;

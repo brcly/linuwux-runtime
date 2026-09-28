@@ -1,3 +1,9 @@
+//! Pure byte-slice logic for detecting a Gamescope session (by executable
+//! path, desktop-session env vars, or process ancestry) and for the
+//! `LD_PRELOAD`/`PPid:` string parsing that detection needs.
+//! `runtime/src/gamescope.rs` owns actually reading `/proc`, walking process
+//! ancestry, and interposing `setenv`/`unsetenv` so LinUwUx's own
+//! `LD_PRELOAD` entry survives Gamescope re-exec.
 pub const ANCESTRY_LIMIT: usize = 64;
 
 pub fn is_gamescope_path(path: &[u8]) -> bool {

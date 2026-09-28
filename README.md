@@ -191,7 +191,9 @@ existing `LD_PRELOAD` value. Use an absolute path without spaces or colons.
 
 LinUwUx needs no extra variables by default. A CPUID identity request from a
 mapped `reflex64.dll` client automatically selects the legacy CPU and KUSER
-presentation before Reflex begins its control handshake. A complete explicit
+presentation before Reflex begins its control handshake. On AMD, once
+`artifact.dll` is mapped in the game process, CPUID identity requests use the
+CPU values from the AMD SimpleSvm source profile. A complete explicit
 dual-dispatch registration selects the legacy presentation for later identity
 requests.
 
@@ -199,7 +201,6 @@ requests.
 | --- | --- |
 | `PROTON_AVX=1` | Enables AVX flags for the resume-target profile |
 | `LINUWUX_SYSCALL_HACK=1` | Clears Wine's `KUSER_SHARED_DATA.SystemCall` flag (direct syscall path). Opt-in per title; not implied by Reflex |
-| `LINUWUX_REDIRECT_ALL=1` | Experimental: routes CPUID instructions from Wine system code through LinUwUx instead of allowing native pass-through |
 | `LINUWUX_LEGACY_PROFILE=1` | Selects legacy CPU presentation and selector-dispatch handling while retaining the ResumeTarget registration protocol; it uses the SVM KUSER recipe on AMD and the VMX KUSER recipe on Intel |
 | `LINUWUX_DEBUG=1` | Enables runtime diagnostics |
 | `LINUWUX_LOG=/absolute/path.log` | Writes diagnostics to a private `0600` file |
@@ -223,20 +224,10 @@ handshake ordering/alignment reflects each build's own linker layout, not
 protocol intent. Dual dispatch (HM/LADPIH) is the one unambiguous case: it
 requires an explicit later `DISPATCH_SYSTEM_ID`/`DISPATCH_ATTRIBUTES_*`
 leaf, which is the only reliable signal to upgrade off resume-target.
-`DenuvOwO=n,b` is one of the native overrides applied to
-every detected game process (see above), not gated by any file on disk.
+`DenuvOwO=n,b` and `artifact=n,b` are native overrides applied to every
+detected game process (see above), not gated by files on disk.
 `LINUWUX_SYSCALL_HACK=1` is independent and is required for titles that need
 the direct syscall path.
-
-If a game still fails during CPUID setup, try routing CPUID instructions from
-Wine system code through LinUwUx as well:
-
-```text
-LINUWUX_REDIRECT_ALL=1 /home/USERNAME/.local/bin/linuwux %command%
-```
-
-This is an experimental compatibility option and should remain unset for
-games that do not need it.
 
 ## Troubleshooting
 
@@ -324,4 +315,3 @@ LinUwUx is distributed under the terms in [LICENSE](LICENSE).
 ## Credits
 
 - LinUwUx - original Proton patch
-- DenuvOwO - Reflex and HV bypass

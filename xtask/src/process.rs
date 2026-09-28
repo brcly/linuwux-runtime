@@ -1,3 +1,8 @@
+//! Runs a build/verification subprocess with a hard wall-clock timeout and
+//! its own process group, so a hung `cargo`/`nm`/`readelf` invocation
+//! (rather than just its immediate child) gets killed instead of hanging
+//! `cargo xtask build` forever. Plain `std::process::Command` has no timeout
+//! of its own, which is why this exists instead of using it directly.
 use crate::Result;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;

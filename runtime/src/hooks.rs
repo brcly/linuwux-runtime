@@ -1,3 +1,20 @@
+//! Two unrelated interposition jobs that both need to run before anything
+//! else touches signals or allocation:
+//!
+//! - `sigaction`/`forward_signal`: lets Wine and the game install their own
+//!   `SIGSEGV`/`SIGSYS` handlers as normal, but keeps LinUwUx's own bridge
+//!   handlers (`cpuid_sigsegv_handler`, `syscallhook`) in the chain ahead of
+//!   them, forwarding to whatever was previously installed when LinUwUx
+//!   doesn't consume the signal itself. `linuwux_setup_hooks` is the
+//!   `.init_array` constructor that resolves the real `sigaction`/`free`/
+//!   `malloc` symbols and registers the post-fork recovery handler.
+//! - `malloc`/`free`: works around a Wine `win32u` bug where the same
+//!   pointer can reach `free()` twice on the same thread with no
+//!   intervening allocation; the second call is always a bug (never a
+//!   legitimate reallocation-and-refree), so it's unconditionally
+//!   suppressed rather than gated behind an opt-in. A small bootstrap pool
+//!   serves allocations that arrive before `dlsym` can resolve the real
+//!   `malloc` (chicken-and-egg: resolving a symbol can itself allocate).
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::mem::{MaybeUninit, size_of};

@@ -1,3 +1,18 @@
+//! The Reflex registration/routing state machine: [`State`] tracks how a
+//! title's Reflex client has registered itself (unregistered, resume-target,
+//! or dual-dispatch — see `docs/protocol/game-quirks.md`'s "handler
+//! arrangement" column) from the control-leaf CPUID sequence in
+//! [`State::handle_cpuid`], and answers "does a trapped syscall belong to
+//! Reflex, and where does it go" from [`State::route_syscall`].
+//!
+//! This is pure decision logic: it has no idea how a CPUID trap or syscall
+//! trap actually reaches it, or how to patch memory. Everything with a side
+//! effect (KUSER patching, logging, yielding, reading/writing the CPU
+//! presentation) goes through the [`Host`] trait, which
+//! `runtime/src/reflex.rs`'s `RuntimeHost` implements by calling back into
+//! the unsafe runtime crate. That indirection is what keeps this file
+//! `#![forbid(unsafe_code)]` and unit-testable (see the `tests` module
+//! below) despite driving genuinely unsafe machinery.
 use core::ffi::CStr;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -8,6 +23,14 @@ use super::control::{
 };
 
 const TRANSITION_WAIT_LIMIT: u32 = 4096;
+
+fn cpuid_argument(leaf: u32, rcx: u64, rdx: u64) -> u64 {
+    if leaf == REGISTER_TARGET_PID {
+        rdx
+    } else {
+        rcx
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Routing {
@@ -199,6 +222,10 @@ impl State {
         (target != 0).then_some(target)
     }
 
+    pub fn has_registered_target_process(&self) -> bool {
+        self.target_pid.load(Ordering::Acquire) != 0 && self.routing() != Routing::Unregistered
+    }
+
     pub fn resume_identity_unarmed(&self) -> bool {
         self.routing() != Routing::DualDispatch && self.resume_target.load(Ordering::Acquire) == 0
     }
@@ -319,7 +346,11 @@ impl State {
         true
     }
 
-    pub fn handle_cpuid(&self, leaf: u32, argument: u64, host: &impl Host) -> Action {
+    /// Handle a Reflex control CPUID with its incoming RCX and RDX values.
+    /// The client protocol uses RCX for selector payloads, but `0x1337`
+    /// registers the process ID from RDX.
+    pub fn handle_cpuid(&self, leaf: u32, rcx: u64, rdx: u64, host: &impl Host) -> Action {
+        let argument = cpuid_argument(leaf, rcx, rdx);
         match leaf {
             ARM_TARGET_CR3 => {
                 Self::log_control(host, leaf, argument);
@@ -453,5 +484,34 @@ impl State {
 impl Default for State {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::Ordering;
+
+    use super::{REGISTER_RESUME_HANDLER, REGISTER_TARGET_PID, SET_TIME, cpuid_argument};
+
+    #[test]
+    fn target_pid_uses_rdx_while_other_control_payloads_use_rcx() {
+        assert_eq!(cpuid_argument(REGISTER_TARGET_PID, 0xdead, 0xbeef), 0xbeef);
+        assert_eq!(
+            cpuid_argument(REGISTER_RESUME_HANDLER, 0xdead, 0xbeef),
+            0xdead
+        );
+        assert_eq!(cpuid_argument(SET_TIME, 0xdead, 0xbeef), 0xdead);
+    }
+
+    #[test]
+    fn syscall_identity_matches_registered_windows_process_id() {
+        let state = super::State::new();
+        assert!(!state.has_registered_target_process());
+        state.target_pid.store(0x150, Ordering::Release);
+        assert!(!state.has_registered_target_process());
+        state
+            .routing
+            .store(super::RoutingState::ResumeTarget as u32, Ordering::Release);
+        assert!(state.has_registered_target_process());
     }
 }

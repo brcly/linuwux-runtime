@@ -1,3 +1,12 @@
+//! Runs first, before any other module's `.init_array` constructor that
+//! depends on it: decides whether this process is the game's own `.exe`
+//! (not a Steam/Wine/launcher helper) and, if so, forces the native DLL
+//! overrides LinUwUx needs. `game_process()` is the flag every other module
+//! that behaves differently for the game process vs. its helpers reads.
+//! String parsing for the `WINEDLLOVERRIDES` value lives in the safe core
+//! (`protocol/environment.rs`); this file owns argv inspection, the actual
+//! `getenv`/`setenv` calls, and triggering `registry.rs`'s `HwProfileGuid`
+//! write.
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};

@@ -1,9 +1,22 @@
+//! Owns the live `KUSER_SHARED_DATA` page at `ADDRESS`: applies the byte
+//! recipes the safe core describes (`protocol/kuser.rs::Recipe`) under a
+//! `crate::page_guard::PageGuard`, and — separately — the legacy
+//! `LINUWUX_SYSCALL_HACK` mechanism (see below).
 use core::ffi::{CStr, c_char, c_int};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use linuwux::kuser::{PAGE_SIZE, PatchError, PatchState, Recipe};
 
 const ADDRESS: usize = 0x7ffe_0000;
+/// `KUSER_SHARED_DATA.SystemCall`: nonzero routes Wine's ntdll syscall
+/// stubs through the KUSER dispatcher slot (the target design — see
+/// `docs/protocol/syscall-routing.md`); the legacy `LINUWUX_SYSCALL_HACK`
+/// path clears it so stubs take the direct `syscall` branch instead. This is
+/// meant to be removed, not extended: it stays only because one supported
+/// title (TopSpin) still crashes without it and the root cause isn't found
+/// yet, tracked in `docs/protocol/topspin-investigation.md`. Do not add new
+/// callers of `syscall_hack_enabled()`; the dispatcher bridge
+/// (`syscall/kuser_dispatch.rs`) is the mechanism new code should rely on.
 const SYSTEM_CALL_OFFSET: usize = 0x308;
 const SYSCALL_HACK_ENV: &CStr = c"LINUWUX_SYSCALL_HACK";
 static PAGE_GEOMETRY_SUPPORTED: AtomicBool = AtomicBool::new(false);
@@ -168,13 +181,20 @@ pub unsafe extern "C" fn patch_kuser_shared_data_recipe(recipe: c_int) -> c_int 
     let Some(_guard) = crate::page_guard::PageGuard::acquire() else {
         return -1;
     };
-    match PATCH_STATE.patch(
+    let result = PATCH_STATE.patch(
         recipe,
         || unsafe { apply_recipe_to_shared_page(recipe, &_guard) },
         || {
             unsafe { libc::syscall(libc::SYS_sched_yield) };
         },
-    ) {
+    );
+    drop(_guard);
+    #[cfg(all(feature = "syscall", feature = "reflex"))]
+    if result.is_ok() && !crate::syscall::install_wine_syscall_dispatcher_bridge() {
+        log(c"failed to install Wine syscall dispatcher bridge");
+        return -1;
+    }
+    match result {
         Ok(()) => 0,
         Err(PatchError::ApplyFailed) => -1,
         Err(PatchError::Conflict) => {
@@ -204,6 +224,18 @@ pub unsafe extern "C" fn linuwux_setup_kuser() {
     };
     SYSCALL_HACK_ENABLED.store(syscall_hack, Ordering::Release);
     prepare_shared_page();
+    // Install before Reflex loads in the game process so its initial IAT
+    // protection writes are visible to the bridge. The KUSER patch handshake
+    // retries installation later if Wine has not populated its dispatcher yet.
+    #[cfg(all(
+        feature = "syscall",
+        feature = "reflex",
+        feature = "environment",
+        feature = "hooks"
+    ))]
+    if crate::environment::game_process() {
+        let _ = crate::syscall::install_wine_syscall_dispatcher_bridge();
+    }
 }
 
 #[used]

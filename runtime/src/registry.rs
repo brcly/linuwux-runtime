@@ -1,3 +1,9 @@
+//! Writes a `HwProfileGuid` registry key into `$WINEPREFIX/system.reg` on
+//! first run, by appending a section directly to the file (locked, and
+//! checked to actually be a Wine registry file first) rather than going
+//! through Wine to do it. Some Reflex clients query this key as part of
+//! their hardware-identity checks; without it present, the query behaves
+//! differently than on a real Windows installation that has one.
 #[cfg(feature = "debug")]
 use core::ffi::c_char;
 use core::ffi::{CStr, c_void};

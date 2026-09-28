@@ -1,3 +1,10 @@
+//! A reentrancy/fork guard for code that patches the live
+//! `KUSER_SHARED_DATA` page or the KUSER dispatcher slot: while a
+//! [`PageGuard`] is held, `SIGSEGV`/`SIGSYS` are blocked (a CPUID or syscall
+//! trap arriving mid-patch would see a half-written page or dispatcher slot)
+//! and the process id that owns the guard is recorded, so a `fork()`ed child
+//! that inherits a stale owner recovers the KUSER patch state instead of
+//! deadlocking on a lock nothing will ever release.
 use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{AtomicI32, Ordering};

@@ -1,3 +1,9 @@
+//! A fixed-capacity, allocation-free line builder for debug log messages.
+//! `no_std` code can't format into a `String`, and this runs from signal
+//! handlers where allocating is unsafe anyway, so [`Line`] appends bytes and
+//! decimal/hex numbers directly into a stack buffer. `runtime/src/debug.rs`
+//! is the only caller: it owns the actual file descriptor and `write()`
+//! syscall, and builds one `Line` per `debug_log*` call.
 pub const CAPACITY: usize = 512;
 
 pub fn enabled(value: Option<&[u8]>) -> bool {

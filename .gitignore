@@ -5,3 +5,4 @@ __pycache__/
 *.so
 GAMES/*
 old_source
+SYSCALL_HACK_FIX_DEBUG

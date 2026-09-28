@@ -1,3 +1,11 @@
+//! Verifies that the live `KUSER_SHARED_DATA` page at [`super::ADDRESS`] is
+//! actually Wine's own shared mapping (`/memfd:wine-mapping`, writable,
+//! present) before `kuser.rs` attempts to patch it — patching an unmapped or
+//! wrong page would silently do nothing, or write into whatever else
+//! happens to be there. Declared as a submodule of `kuser.rs` via
+//! `#[path = "shared_time.rs"] mod shared_time;` (rather than nested in a
+//! `kuser/` directory) so it can reach that module's private constants
+//! through `super::`.
 use super::{ADDRESS, PAGE_GEOMETRY_SUPPORTED, PAGE_SIZE};
 use core::sync::atomic::{AtomicBool, Ordering};
 

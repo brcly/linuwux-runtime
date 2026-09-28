@@ -23,7 +23,7 @@ panic = "abort"
 
 [lib]
 name = "linuwux"
-path = "src/lib.rs"
+path = "protocol/lib.rs"
 
 [workspace.lints.rust]
 missing_docs = "allow"

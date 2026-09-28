@@ -1,3 +1,12 @@
+//! Interposes `gettimeofday` to apply a clock offset Reflex's `SET_TIME`
+//! control leaf sets (via [`set_offset`]), so every thread and every
+//! process that shares this Wine prefix sees the same faked time.
+//! `set_offset` and `gettimeofday` can run in different processes (Reflex's
+//! resume handler runs in whichever thread trapped, but the offset must be
+//! visible process- and prefix-wide), so the current offset is published
+//! over a small socketpair rather than kept purely in a local atomic — see
+//! `init_socketpair()`. The offset arithmetic itself
+//! (FILETIME-to-Unix-seconds) is in the safe core, `protocol/faketime.rs`.
 use core::ffi::{c_char, c_int, c_void};
 use core::mem::{MaybeUninit, size_of};
 use core::ptr;

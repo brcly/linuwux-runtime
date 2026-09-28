@@ -1,3 +1,9 @@
+//! Windows FILETIME <-> Unix time conversion math for the `gettimeofday`
+//! offset Reflex's `SET_TIME` control leaf applies (see
+//! `runtime/src/faketime.rs`, which owns the actual clock interposition and
+//! offset storage). Wrapping arithmetic throughout is deliberate: an offset
+//! is a difference of two clocks that can each wrap independently, not a
+//! value that should ever panic in a signal-adjacent path.
 pub const TICKS_PER_SECOND: u64 = 10_000_000;
 pub const SECONDS_1601_TO_1970: u64 = 86_400 * (369 * 365 + 89);
 
