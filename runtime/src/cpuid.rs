@@ -26,6 +26,19 @@ const REFLEX_CPUID_CONSUMED: c_int = 1;
 static ACTIVE_IDENTITY: ActiveCpuIdentity = ActiveCpuIdentity::new();
 static REFLEX64_PRESENTATION_SELECTED: AtomicBool = AtomicBool::new(false);
 static ARTIFACT_PROFILE_SELECTED: AtomicBool = AtomicBool::new(false);
+/// Set once Reflex's registration leaf (`0x336933`, the same handshake the
+/// pre-Rust runtime called "arm") has fired at least once, for either the
+/// legacy or modern protocol — both set the resume handler from this leaf,
+/// so it fires regardless of which protocol variant a title uses. Once a
+/// session has reached this point, `classify_caller`'s brute-force
+/// `pe_image_named` fallback (for a caller whose mapping has no recognized
+/// DLL path — a reflectively-loaded Reflex64/Artifact, or equally, a
+/// Denuvo-style VM handler at some never-before-seen code address) is no
+/// longer worth paying for: Reflex is confirmably active in this process
+/// either way, and every further identity-leaf trap from an address that
+/// genuinely isn't Reflex64/Artifact would otherwise re-run that same
+/// expensive search forever, for the rest of the session.
+static PROTOCOL_ESTABLISHED: AtomicBool = AtomicBool::new(false);
 #[cfg(all(
     feature = "debug",
     feature = "environment",
@@ -287,9 +300,21 @@ fn classify_caller(address: u64) -> Option<CallerKind> {
         result.is_some()
     });
     let (start, end, mapped_kind) = result?;
+    // Once Reflex's registration handshake has fired, a caller this scan
+    // couldn't classify by path is confirmably not worth a brute-force
+    // search for: Reflex is already known to be active in this process
+    // either way, and paying ~80us to keep re-confirming that fact on every
+    // future identity-leaf trap from any address it hasn't already seen
+    // buys nothing. See `PROTOCOL_ESTABLISHED`'s doc comment.
+    let still_searching =
+        mapped_kind == CallerKind::Ordinary && !PROTOCOL_ESTABLISHED.load(Ordering::Acquire);
     let kind = match mapped_kind {
-        CallerKind::Ordinary if pe_image_named(address, b"reflex64.dll") => CallerKind::Reflex64,
-        CallerKind::Ordinary if pe_image_named(address, b"artifact.dll") => CallerKind::Artifact,
+        CallerKind::Ordinary if still_searching && pe_image_named(address, b"reflex64.dll") => {
+            CallerKind::Reflex64
+        }
+        CallerKind::Ordinary if still_searching && pe_image_named(address, b"artifact.dll") => {
+            CallerKind::Artifact
+        }
         kind => kind,
     };
     CALLER_CACHE.insert(start, end, kind);
@@ -683,6 +708,7 @@ pub unsafe extern "C" fn cpuid_sigsegv_handler(
     #[cfg(all(feature = "syscall", feature = "kuser", feature = "reflex"))]
     if leaf == 0x0033_6933 {
         crate::syscall::register_reflex_dispatch_handler(control);
+        PROTOCOL_ESTABLISHED.store(true, Ordering::Release);
     }
     let reply = if is_wine_system_rip(rip as u64) {
         native_reply(leaf, control as u32)
@@ -736,6 +762,93 @@ mod caller_image_tests {
             Some((0x7f10_0000, 0x7f10_1000, CallerKind::Artifact))
         );
         assert_eq!(mapping_path_kind(artifact), CallerKind::Artifact);
+    }
+}
+
+// `PROTOCOL_ESTABLISHED` is a one-way, process-global switch (matching the
+// real handshake it models), so this is the only test allowed to set it —
+// doing so anywhere else would leak into every other test in this binary.
+#[cfg(all(test, not(miri)))]
+mod protocol_established_tests {
+    use super::{CallerKind, PROTOCOL_ESTABLISHED, classify_caller};
+    use core::sync::atomic::Ordering;
+
+    /// A reflectively-loaded (anonymous, no file path) fake PE image whose
+    /// export directory names itself, at a 64KB-aligned address — matching
+    /// what `pe_image_named`'s search actually probes for, unlike a
+    /// synthetic `/proc/self/maps` line.
+    struct FakeReflectiveDll {
+        block: *mut u8,
+        block_len: usize,
+        header: u64,
+    }
+
+    impl FakeReflectiveDll {
+        fn new(name: &[u8]) -> Self {
+            const ALLOCATION_GRANULARITY: usize = 0x1_0000;
+            let block_len = ALLOCATION_GRANULARITY * 2;
+            let block = unsafe {
+                libc::mmap(
+                    core::ptr::null_mut(),
+                    block_len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(block, libc::MAP_FAILED);
+            let block = block.cast::<u8>();
+            let base = block as u64;
+            let header =
+                (base + ALLOCATION_GRANULARITY as u64 - 1) & !(ALLOCATION_GRANULARITY as u64 - 1);
+            let write = |offset: u64, bytes: &[u8]| unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    block.add((header - base + offset) as usize),
+                    bytes.len(),
+                );
+            };
+            write(0, b"MZ");
+            write(0x3c, &0x80u32.to_le_bytes());
+            write(0x80, b"PE\0\0");
+            write(0x80 + 24, &0x20bu16.to_le_bytes()); // PE32+ magic
+            write(0x80 + 136, &0x200u32.to_le_bytes()); // export directory RVA
+            write(0x200 + 12, &0x300u32.to_le_bytes()); // IMAGE_EXPORT_DIRECTORY.Name
+            write(0x300, name);
+            write(0x300 + name.len() as u64, &[0]);
+            Self {
+                block,
+                block_len,
+                header,
+            }
+        }
+    }
+
+    impl Drop for FakeReflectiveDll {
+        fn drop(&mut self) {
+            unsafe { libc::munmap(self.block.cast(), self.block_len) };
+        }
+    }
+
+    #[test]
+    fn stops_the_brute_force_dll_search_once_the_handshake_leaf_has_fired() {
+        let before = FakeReflectiveDll::new(b"artifact.dll");
+        assert_eq!(
+            classify_caller(before.header),
+            Some(CallerKind::Artifact),
+            "a reflectively-loaded artifact.dll must still be found before the handshake"
+        );
+
+        PROTOCOL_ESTABLISHED.store(true, Ordering::Release);
+
+        let after = FakeReflectiveDll::new(b"artifact.dll");
+        assert_eq!(
+            classify_caller(after.header),
+            Some(CallerKind::Ordinary),
+            "once established, a never-before-seen address is classified from \
+             its /proc/self/maps path alone, without the brute-force search"
+        );
     }
 }
 
@@ -834,5 +947,179 @@ mod int2e_signal_tests {
             direct
         );
         assert_eq!(unsafe { libc::munmap(page, 0x1000) }, 0);
+    }
+}
+
+// Not a correctness test: measures `classify_caller`'s actual wall-clock cost
+// under two workloads, to check a hypothesis about a reported fps regression
+// (Monster Hunter Wilds, 160->90fps) rather than reason about it further from
+// first principles. `#[ignore]` since it's a manual diagnostic, not part of
+// the normal suite; run with `cargo test -p linuwux-runtime --lib
+// classify_caller_bench -- --ignored --nocapture`.
+#[cfg(all(test, not(miri)))]
+mod classify_caller_bench {
+    use super::classify_caller;
+    use std::time::Instant;
+
+    fn anon_page() -> *mut libc::c_void {
+        let ptr = unsafe {
+            libc::mmap(
+                core::ptr::null_mut(),
+                0x1000,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED);
+        ptr
+    }
+
+    #[test]
+    #[ignore]
+    fn classify_caller_cost_hit_vs_miss() {
+        const ITERS: usize = 5_000;
+
+        // Inflate this process's own /proc/self/maps to a size closer to a
+        // real game process (hundreds of mapped DLLs/files/heaps), not a
+        // bare `cargo test` binary's much shorter one.
+        let padding: Vec<_> = (0..500).map(|_| anon_page()).collect();
+
+        // Cache-hit workload: the same call site every time, as a title with
+        // stable (non-virtualized) CPUID call sites would produce.
+        let stable = anon_page() as u64;
+        let _ = classify_caller(stable); // warm the cache
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            let _ = classify_caller(stable);
+        }
+        let hit = start.elapsed() / ITERS as u32;
+
+        // Cache-miss workload: a fresh mapping every call, standing in for
+        // Denuvo-style VM handlers that relocate their call site on every
+        // invocation specifically to defeat this kind of address caching.
+        let mut rotating = Vec::with_capacity(ITERS);
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            let page = anon_page();
+            let _ = classify_caller(page as u64);
+            rotating.push(page);
+        }
+        let miss = start.elapsed() / ITERS as u32;
+
+        eprintln!("classify_caller cache-hit:              {hit:?}/call");
+        eprintln!("classify_caller cache-miss (pre-handshake):  {miss:?}/call");
+
+        // Same rotating-address workload, after the handshake leaf has
+        // fired: the brute-force DLL search is skipped for every one of
+        // these misses.
+        super::PROTOCOL_ESTABLISHED.store(true, core::sync::atomic::Ordering::Release);
+        let mut rotating_established = Vec::with_capacity(ITERS);
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            let page = anon_page();
+            let _ = classify_caller(page as u64);
+            rotating_established.push(page);
+        }
+        let miss_established = start.elapsed() / ITERS as u32;
+        eprintln!("classify_caller cache-miss (post-handshake): {miss_established:?}/call");
+        eprintln!(
+            "post-handshake speedup: {:.1}x",
+            miss.as_nanos() as f64 / miss_established.as_nanos().max(1) as f64
+        );
+
+        for page in rotating {
+            unsafe { libc::munmap(page, 0x1000) };
+        }
+        for page in rotating_established {
+            unsafe { libc::munmap(page, 0x1000) };
+        }
+        for page in padding {
+            unsafe { libc::munmap(page, 0x1000) };
+        }
+        unsafe { libc::munmap(stable as *mut libc::c_void, 0x1000) };
+    }
+
+    // Checks the actual question this was written to answer: does a
+    // `classify_caller` miss get progressively more expensive purely because
+    // this process has accumulated more of its own mappings over a session
+    // (asset streaming, DLL loads, etc.) — every miss re-scans the *entire*
+    // current `/proc/self/maps`, unconditionally, forever; there's no cap and
+    // no negative-cache. Run with `cargo test -p linuwux-runtime --lib
+    // classify_caller_cost_scales_with_map_size -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn classify_caller_cost_scales_with_map_size() {
+        const ITERS: usize = 2_000;
+        let mut total_mapped = 0usize;
+        let mut all_padding = Vec::new();
+
+        for &target in &[200usize, 1_000, 3_000, 6_000, 10_000] {
+            let grow = target - total_mapped;
+            all_padding.extend((0..grow).map(|_| anon_page()));
+            total_mapped = target;
+
+            let mut rotating = Vec::with_capacity(ITERS);
+            let start = Instant::now();
+            for _ in 0..ITERS {
+                let page = anon_page();
+                let _ = classify_caller(page as u64);
+                rotating.push(page);
+            }
+            let miss = start.elapsed() / ITERS as u32;
+            eprintln!("~{total_mapped:>6} mappings -> classify_caller miss: {miss:?}/call");
+            for page in rotating {
+                unsafe { libc::munmap(page, 0x1000) };
+            }
+        }
+
+        for page in all_padding {
+            unsafe { libc::munmap(page, 0x1000) };
+        }
+    }
+
+    // Isolates the two pieces of a `classify_caller` miss to find which one
+    // actually dominates the ~81us measured above: the `/proc/self/maps`
+    // scan itself (`caller_mapping`, via `maps::find_line`), or the
+    // brute-force nearby-PE-header probe (`pe_image_named`) that runs
+    // afterward for any address whose mapping has no recognized DLL path —
+    // true for every anonymous, reflectively-loaded, or JIT/VM-generated
+    // code page, which is exactly what a Denuvo-style virtualized handler is.
+    #[test]
+    #[ignore]
+    fn classify_caller_miss_cost_breakdown() {
+        const ITERS: usize = 2_000;
+        let padding: Vec<_> = (0..500).map(|_| anon_page()).collect();
+
+        let mut scan_only = Vec::with_capacity(ITERS);
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            let page = anon_page();
+            let mut result = None;
+            crate::maps::find_line(|line| {
+                result = super::caller_mapping(line, page as u64);
+                result.is_some()
+            });
+            let _ = result;
+            scan_only.push(page);
+        }
+        let scan_cost = start.elapsed() / ITERS as u32;
+
+        let mut pe_probe = Vec::with_capacity(ITERS);
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            let page = anon_page();
+            let _ = super::pe_image_named(page as u64, b"reflex64.dll");
+            pe_probe.push(page);
+        }
+        let pe_cost = start.elapsed() / ITERS as u32;
+
+        eprintln!("maps-scan only (caller_mapping):        {scan_cost:?}/call");
+        eprintln!("pe_image_named (one DLL name):           {pe_cost:?}/call");
+
+        for page in scan_only.into_iter().chain(pe_probe).chain(padding) {
+            unsafe { libc::munmap(page, 0x1000) };
+        }
     }
 }
