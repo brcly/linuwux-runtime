@@ -9,7 +9,9 @@
 //! workaround. Failed discovery or an unreadable request falls through to
 //! Wine unchanged.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(feature = "debug")]
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::mem::{read_u32, read_u64, write_u32};
 

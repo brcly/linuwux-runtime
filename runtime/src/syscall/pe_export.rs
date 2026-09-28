@@ -1,9 +1,8 @@
 //! Resolve a loaded PE module's base address (by walking the PEB's loader
 //! list) and a named export's syscall service number (by walking its export
-//! table), without assuming any fixed address or syscall number. Shared by
-//! [`super::win32u_zero_list`] and [`super::qvm_probe`], both of which need
-//! this because a Proton update can reorder syscall IDs or move where a
-//! system DLL loads.
+//! table), without assuming any fixed address or syscall number. Used by
+//! [`super::win32u_zero_list`], which needs this because a Proton update can
+//! reorder syscall IDs or move where a system DLL loads.
 
 use super::mem::{read_memory, read_u16, read_u32, read_u64};
 
@@ -207,6 +206,9 @@ mod tests {
             export_service(image.as_ptr() as u64, b"NtUserBuildHwndList"),
             Some(0x135a)
         );
-        assert_eq!(export_service(image.as_ptr() as u64, b"NtQueryVirtualMemory"), None);
+        assert_eq!(
+            export_service(image.as_ptr() as u64, b"NtQueryVirtualMemory"),
+            None
+        );
     }
 }
