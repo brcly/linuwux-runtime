@@ -28,7 +28,7 @@ impl Registers {
 
 /// CPUID replies used by the AMD SimpleSvm artifact profile. The hypervisor
 /// source gates these values on a caller signature; the runtime applies them
-/// only to `artifact.dll` callers on an AMD host.
+/// when `artifact.dll` is mapped on an AMD host.
 pub fn artifact_amd_reply(leaf: u32) -> Option<Registers> {
     match leaf {
         // SimpleSvm clears FMA3, XSAVE, OSXSAVE, AVX, F16C, and RDRAND from
@@ -59,6 +59,36 @@ pub fn artifact_amd_reply(leaf: u32) -> Option<Registers> {
             0x2020_2020,
             0x0020_2020,
         )),
+        _ => None,
+    }
+}
+
+/// CPUID replies used by the Intel HyperDbg artifact profile. The runtime
+/// preserves the native APIC-ID byte of leaf 1 EBX after selecting this reply.
+pub fn artifact_intel_reply(leaf: u32) -> Option<Registers> {
+    match leaf {
+        // HyperDbg clears FMA3, AES, XSAVE, OSXSAVE, AVX, F16C, and RDRAND.
+        1 => Some(Registers::new(
+            0x000a_0655,
+            0x0020_0800,
+            0x01fa_ebff,
+            0xbfeb_fbff,
+        )),
+        // Intel(R) Pentium(R) CPU 4425Y @ 1.70GHz, as assigned by the
+        // source's MSVC multi-character constants.
+        0x8000_0002 => Some(Registers::new(
+            0x6574_6e49,
+            0x2952_286c,
+            0x6e65_5020,
+            0x6d75_6974,
+        )),
+        0x8000_0003 => Some(Registers::new(
+            0x2029_5228,
+            0x2055_5043,
+            0x3532_3434,
+            0x2040_2059,
+        )),
+        0x8000_0004 => Some(Registers::new(0x3037_2e31, 0x007a_4847, 0, 0)),
         _ => None,
     }
 }
@@ -319,7 +349,7 @@ impl Default for ActiveCpuIdentity {
 
 #[cfg(test)]
 mod artifact_tests {
-    use super::{Registers, artifact_amd_reply};
+    use super::{Registers, artifact_amd_reply, artifact_intel_reply};
 
     #[test]
     fn artifact_amd_profile_matches_simple_svm_cpu_registers() {
@@ -360,5 +390,41 @@ mod artifact_tests {
             ))
         );
         assert_eq!(artifact_amd_reply(7), None);
+    }
+
+    #[test]
+    fn artifact_intel_profile_matches_hyperdbg_cpu_registers() {
+        assert_eq!(
+            artifact_intel_reply(1),
+            Some(Registers::new(
+                0x000a_0655,
+                0x0020_0800,
+                0x01fa_ebff,
+                0xbfeb_fbff,
+            ))
+        );
+        assert_eq!(
+            artifact_intel_reply(0x8000_0002),
+            Some(Registers::new(
+                0x6574_6e49,
+                0x2952_286c,
+                0x6e65_5020,
+                0x6d75_6974,
+            ))
+        );
+        assert_eq!(
+            artifact_intel_reply(0x8000_0003),
+            Some(Registers::new(
+                0x2029_5228,
+                0x2055_5043,
+                0x3532_3434,
+                0x2040_2059,
+            ))
+        );
+        assert_eq!(
+            artifact_intel_reply(0x8000_0004),
+            Some(Registers::new(0x3037_2e31, 0x007a_4847, 0, 0))
+        );
+        assert_eq!(artifact_intel_reply(7), None);
     }
 }

@@ -191,9 +191,11 @@ existing `LD_PRELOAD` value. Use an absolute path without spaces or colons.
 
 LinUwUx needs no extra variables by default. A CPUID identity request from a
 mapped `reflex64.dll` client automatically selects the legacy CPU and KUSER
-presentation before Reflex begins its control handshake. On AMD, once
-`artifact.dll` is mapped in the game process, CPUID identity requests use the
-CPU values from the AMD SimpleSvm source profile. A complete explicit
+presentation before Reflex begins its control handshake. Once `artifact.dll`
+is mapped in the game process, CPUID identity requests use the
+CPU values from the AMD SimpleSvm or Intel HyperDbg source profile, according
+to the host CPU vendor. Artifact's Intel CPUID profile clears AVX feature bits
+even with `PROTON_AVX=1`. A complete explicit
 dual-dispatch registration selects the legacy presentation for later identity
 requests.
 

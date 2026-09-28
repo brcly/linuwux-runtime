@@ -1,7 +1,7 @@
 //! The SIGSEGV handler for CPUID traps (Linux `ARCH_SET_CPUID` faulting) and
 //! everything it needs: per-caller image detection (`reflex64.dll` selects
-//! the legacy presentation; AMD `artifact.dll` callers receive their own CPU
-//! identity replies),
+//! the legacy presentation; `artifact.dll` selects host-specific CPU identity
+//! replies),
 //! native-CPUID pass-through and caching for leaves LinUwUx doesn't own, and
 //! the `.init_array` constructor that detects the host vendor at startup.
 //! Reply *content* for a given [`linuwux::cpuid::CpuIdentity`] lives in the
@@ -14,8 +14,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use libc::{greg_t, siginfo_t, ucontext_t};
 use linuwux::cpuid::{
-    ActiveCpuIdentity, CpuPresentation, Registers, Vendor, artifact_amd_reply, is_wine_system_rip,
-    proton_avx_enabled,
+    ActiveCpuIdentity, CpuPresentation, Registers, Vendor, artifact_amd_reply,
+    artifact_intel_reply, is_wine_system_rip, proton_avx_enabled,
 };
 use linuwux::kuser::Recipe;
 
@@ -23,7 +23,7 @@ const ARCH_SET_CPUID: c_int = 0x1012;
 const REFLEX_CPUID_CONSUMED: c_int = 1;
 static ACTIVE_IDENTITY: ActiveCpuIdentity = ActiveCpuIdentity::new();
 static REFLEX64_PRESENTATION_SELECTED: AtomicBool = AtomicBool::new(false);
-static ARTIFACT_AMD_PROFILE_SELECTED: AtomicBool = AtomicBool::new(false);
+static ARTIFACT_PROFILE_SELECTED: AtomicBool = AtomicBool::new(false);
 #[cfg(all(
     feature = "debug",
     feature = "environment",
@@ -460,34 +460,55 @@ impl NativeCache {
 
 static NATIVE_CACHE: NativeCache = NativeCache::new();
 
+fn artifact_reply(vendor: Vendor, leaf: u32) -> Option<Registers> {
+    match vendor {
+        Vendor::Intel => artifact_intel_reply(leaf),
+        Vendor::Amd => artifact_amd_reply(leaf),
+        Vendor::Unknown => None,
+    }
+}
+
+fn with_native_apic_id(mut reply: Registers, native_ebx: u32) -> Registers {
+    reply.ebx |= native_ebx & 0xff00_0000;
+    reply
+}
+
 fn fixed_reply(leaf: u32, rip: Option<u64>) -> Option<Registers> {
     let caller = rip
         .map(|rip| select_caller_presentation(leaf, rip))
         .unwrap_or(CallerKind::Ordinary);
-    let artifact_leaf = artifact_amd_reply(leaf);
-    if artifact_leaf.is_some() && ACTIVE_IDENTITY.load().vendor() == Vendor::Amd {
+    let vendor = ACTIVE_IDENTITY.load().vendor();
+    let artifact_leaf = artifact_reply(vendor, leaf);
+    if artifact_leaf.is_some() {
         let artifact_present = caller == CallerKind::Artifact
-            || ARTIFACT_AMD_PROFILE_SELECTED.load(Ordering::Acquire)
+            || ARTIFACT_PROFILE_SELECTED.load(Ordering::Acquire)
             || artifact_module_mapped();
         if artifact_present
-            && ARTIFACT_AMD_PROFILE_SELECTED
+            && ARTIFACT_PROFILE_SELECTED
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
             unsafe {
-                debug_log(c"cpuid profile selected: AMD artifact.dll".as_ptr());
+                debug_log(
+                    match vendor {
+                        Vendor::Intel => c"cpuid profile selected: Intel artifact.dll",
+                        Vendor::Amd => c"cpuid profile selected: AMD artifact.dll",
+                        Vendor::Unknown => c"cpuid profile selected: artifact.dll",
+                    }
+                    .as_ptr(),
+                );
             }
         }
     }
-    let artifact_profile = ARTIFACT_AMD_PROFILE_SELECTED.load(Ordering::Acquire)
-        && ACTIVE_IDENTITY.load().vendor() == Vendor::Amd;
+    let artifact_profile = ARTIFACT_PROFILE_SELECTED.load(Ordering::Acquire)
+        && matches!(vendor, Vendor::Intel | Vendor::Amd);
     let mut reply = if artifact_profile {
         artifact_leaf.or_else(|| ACTIVE_IDENTITY.fixed_reply(leaf))?
     } else {
         ACTIVE_IDENTITY.fixed_reply(leaf)?
     };
     if artifact_profile && leaf == 1 {
-        reply.ebx |= native_reply(1, 0).ebx & 0xff00_0000;
+        reply = with_native_apic_id(reply, native_reply(1, 0).ebx);
     }
     if !artifact_profile && leaf == 1 && unsafe { reflex_resume_identity_unarmed() } != 0 {
         reply.ecx |= 1 << 31;
@@ -788,6 +809,50 @@ mod caller_image_tests {
             Some((0x7f10_0000, 0x7f10_1000, CallerKind::Artifact))
         );
         assert_eq!(mapping_path_kind(artifact), CallerKind::Artifact);
+    }
+}
+
+#[cfg(test)]
+mod artifact_profile_tests {
+    use super::{artifact_reply, with_native_apic_id};
+    use linuwux::cpuid::{CpuIdentity, Registers, Vendor};
+
+    #[test]
+    fn selects_artifact_reply_by_host_vendor() {
+        assert_eq!(
+            artifact_reply(Vendor::Intel, 1),
+            Some(Registers::new(
+                0x000a_0655,
+                0x0020_0800,
+                0x01fa_ebff,
+                0xbfeb_fbff,
+            ))
+        );
+        assert_eq!(
+            artifact_reply(Vendor::Amd, 1),
+            Some(Registers::new(
+                0x00a2_0f12,
+                0x0010_0800,
+                0x00f8_220b,
+                0x178b_fbff,
+            ))
+        );
+        assert_eq!(artifact_reply(Vendor::Unknown, 1), None);
+        assert_eq!(artifact_reply(Vendor::Intel, 7), None);
+        assert_ne!(
+            artifact_reply(Vendor::Intel, 1),
+            CpuIdentity::denuvo(Vendor::Intel, true).fixed_reply(1),
+            "Artifact must clear AVX features even when PROTON_AVX=1"
+        );
+    }
+
+    #[test]
+    fn artifact_leaf_one_preserves_native_apic_id() {
+        let reply = artifact_reply(Vendor::Intel, 1).unwrap();
+        assert_eq!(
+            with_native_apic_id(reply, 0xabcd_ef01),
+            Registers::new(0x000a_0655, 0xab20_0800, 0x01fa_ebff, 0xbfeb_fbff)
+        );
     }
 }
 
