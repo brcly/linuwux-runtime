@@ -37,9 +37,9 @@ statics — the number fixes their relative order, verified by `xtask`):
   `LD_PRELOAD` entry alive across Gamescope's re-exec.
 - **`faketime.rs`** — the `gettimeofday` clock offset Reflex's `SET_TIME`
   control leaf sets.
-- **`hooks.rs`** — signal interposition (keeps LinUwUx's `SIGSEGV`/`SIGSYS`
-  handlers ahead of Wine's own) and a `malloc`/`free` workaround for a Wine
-  `win32u` double-free.
+- **`hooks.rs`** — signal interposition that keeps LinUwUx's `SIGSEGV`/`SIGSYS`
+  handlers ahead of Wine's own, plus the opt-in indexed `win32u` duplicate-`free`
+  guard in `hooks/pending_frees.rs`.
 - **`kuser.rs`** — owns the live `KUSER_SHARED_DATA` page: applies patch
   recipes from `protocol/kuser.rs`, and (legacy, being phased out — see
   `docs/protocol/topspin-investigation.md`) the `LINUWUX_SYSCALL_HACK` flag.

@@ -7,8 +7,9 @@ title needs a special case, it should extend this table (and the matching
 row in `protocol/quirks.rs`), not add an inline literal to dispatch code.
 
 Titles covered: ACBFR, BGE, FC6, NFSPB, TopSpin, SMT5V, Hatsune Miku,
-LADPYIH. BL4 and BL4-1.10 are known-unsupported; see the project issue
-tracker for their status rather than assuming this table applies to them.
+LADPYIH. BL4 is working in current gameplay testing, but its protocol
+differences have not been recorded in this table. BL4-1.10 has not been
+separately confirmed.
 
 ## CPU identity
 

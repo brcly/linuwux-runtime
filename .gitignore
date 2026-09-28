@@ -6,3 +6,4 @@ __pycache__/
 GAMES/*
 old_source
 SYSCALL_HACK_FIX_DEBUG
+artifact-only

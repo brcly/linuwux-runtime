@@ -202,16 +202,16 @@ requests.
 | `PROTON_AVX=1` | Enables AVX flags for the resume-target profile |
 | `LINUWUX_SYSCALL_HACK=1` | Clears Wine's `KUSER_SHARED_DATA.SystemCall` flag (direct syscall path). Opt-in per title; not implied by Reflex |
 | `LINUWUX_LEGACY_PROFILE=1` | Selects legacy CPU presentation and selector-dispatch handling while retaining the ResumeTarget registration protocol; it uses the SVM KUSER recipe on AMD and the VMX KUSER recipe on Intel |
+| `LINUWUX_WIN32U_FREE_GUARD=1` | Enables `win32u` duplicate-`free` protection for games that need it; disabled by default |
 | `LINUWUX_DEBUG=1` | Enables runtime diagnostics |
 | `LINUWUX_LOG=/absolute/path.log` | Writes diagnostics to a private `0600` file |
 
 `LinUwUx` is an internal process marker and should not be set manually.
 
-The launched game executable (a non-`system32` `.exe`) gets CPUID trapping,
-native DLL overrides, and `win32u` duplicate-`free` suppression (a same-thread
-consecutive `free()` of the identical, non-reallocated pointer from unix
-`win32u` is always a bug, so the redundant call is always skipped rather than
-gated behind an opt-in). Wine helpers only append `HwProfileGuid` to an
+The launched game executable (a non-`system32` `.exe`) gets CPUID trapping
+and native DLL overrides. When enabled, the `win32u` duplicate-`free` guard
+tracks the most recent 1,024 pointers without scanning the whole history on
+every allocation. Wine helpers only append `HwProfileGuid` to an
 existing `$WINEPREFIX/system.reg`. LinUwUx also sets
 `PROTON_DISABLE_LSTEAMCLIENT=1` on first run in a process tree, unless it is
 already set to a nonzero value.

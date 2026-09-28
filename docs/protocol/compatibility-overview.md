@@ -14,14 +14,13 @@ handler that supplies the arguments the protection expects, rather than
 letting a Wine/Linux mismatch present the wrong values and crash or corrupt
 game state.
 
-## Current known-working / known-broken state
+## Current compatibility status
 
 As of this writing: ACBFR, BGE, FC6, NFSPB, TopSpin, SMT5V, Hatsune Miku,
-and LADPYIH are supported (see [`game-quirks.md`](game-quirks.md) for their
-protocol differences). BL4 and BL4-1.10 are not: Reflex works for BL4 on
-Windows, so the failure is a Wine+LinUwUx-specific mismatch, not a problem
-with the game itself or with Reflex's approach in general — root cause not
-yet found.
+LADPYIH, and BL4 are working with LinUwUx and Reflex. BL4's status is based
+on current gameplay testing; BL4-1.10 has not been separately confirmed.
+See [`game-quirks.md`](game-quirks.md) for the protocol differences recorded
+for the other titles.
 
 ## Status of `LINUWUX_SYSCALL_HACK`
 
