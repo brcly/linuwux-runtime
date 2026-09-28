@@ -10,9 +10,8 @@
 //!   `malloc` symbols and registers the post-fork recovery handler.
 //! - `malloc`/`free`: works around a Wine `win32u` bug where the same
 //!   pointer can reach `free()` twice on the same thread with no
-//!   intervening allocation; the second call is always a bug (never a
-//!   legitimate reallocation-and-refree), so it's unconditionally
-//!   suppressed rather than gated behind an opt-in. A small bootstrap pool
+//!   intervening allocation. The guard is enabled only with
+//!   `LINUWUX_WIN32U_FREE_GUARD=1`. A small bootstrap pool
 //!   serves allocations that arrive before `dlsym` can resolve the real
 //!   `malloc` (chicken-and-egg: resolving a symbol can itself allocate).
 // Miri excludes the native interposer entrypoints, leaving their helpers unused.

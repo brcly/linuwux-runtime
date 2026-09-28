@@ -24,7 +24,7 @@ const RAW_TARGET_TAG: u64 = 1 << 63;
 const SYSCALL_INSTRUCTION: [u8; 2] = [0x0f, 0x05];
 const PEB_IMAGE_BASE_OFFSET: u64 = 0x10;
 const TEB_PEB_OFFSET: u64 = 0x60;
-const IAT_SCAN_RETRY_INTERVAL: u64 = 2;
+const IAT_SCAN_MAX_RETRY_INTERVAL: u64 = 1024;
 
 static ORIGINAL_DISPATCHER: AtomicU64 = AtomicU64::new(0);
 static BRIDGE_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -296,9 +296,16 @@ pub(super) fn maybe_scan_main_image_iat() {
         return;
     }
     let attempt = IAT_SCAN_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
-    if attempt == 0 || attempt.is_multiple_of(IAT_SCAN_RETRY_INTERVAL) {
+    if should_retry_iat_scan(attempt) {
         let _ = scan_main_image_iat();
     }
+}
+
+fn should_retry_iat_scan(attempt: u64) -> bool {
+    // Retry promptly during registration, then bound the cost for games
+    // whose IAT never contains a Reflex trampoline. Late hooks are still
+    // discovered on a later call, at most 1024 dispatcher hits away.
+    attempt == 0 || attempt.is_power_of_two() || attempt.is_multiple_of(IAT_SCAN_MAX_RETRY_INTERVAL)
 }
 
 fn matches_iat_stub(return_address: u64) -> bool {
@@ -401,9 +408,12 @@ unsafe extern "C" fn dispatcher_target(
     let original = ORIGINAL_DISPATCHER.load(Ordering::Acquire);
     maybe_scan_main_image_iat();
     super::unixlib_repair::maybe_repair_wine_unixlib_exports();
-    let tid = unsafe { libc::gettid() as u64 };
     let trap_rsp = entry_rsp.saturating_add(8);
-    super::reflex_markers::retire_markers(tid, trap_rsp);
+    let mut tid = 0;
+    if super::reflex_markers::has_active_markers() {
+        tid = unsafe { libc::gettid() as u64 };
+        super::reflex_markers::retire_markers(tid, trap_rsp);
+    }
 
     let stub_match = matches_iat_stub(return_address);
     if original == 0 || !stub_match {
@@ -425,6 +435,9 @@ unsafe extern "C" fn dispatcher_target(
     }
     let raw = raw.expect("raw_syscall_found was checked above");
     let trap_rip = raw.saturating_add(2);
+    if tid == 0 {
+        tid = unsafe { libc::gettid() as u64 };
+    }
     if !super::reflex_markers::remember_marker(tid, trap_rsp, trap_rip) {
         return original;
     }
@@ -601,7 +614,18 @@ pub(super) fn install() -> bool {
 mod tests {
     use super::{
         DispatchEvidence, find_raw_syscall_instruction, return_matches_stub, should_replay_raw,
+        should_retry_iat_scan,
     };
+
+    #[test]
+    fn iat_scan_retries_taper_off_but_continue_for_late_hooks() {
+        for attempt in [0, 1, 2, 4, 8, 16, 1024, 2048] {
+            assert!(should_retry_iat_scan(attempt));
+        }
+        for attempt in [3, 6, 17, 1023, 1025, 2047] {
+            assert!(!should_retry_iat_scan(attempt));
+        }
+    }
 
     #[test]
     fn copied_stub_lookup_requires_the_requested_service_number() {

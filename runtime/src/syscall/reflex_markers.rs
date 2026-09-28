@@ -15,10 +15,11 @@
 //! target-PID registration (mirroring Reflex's CR3/DR3 identity gate) are
 //! routed without needing a bridge marker at all.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 const MARKER_CAPACITY: usize = 256;
 
+static ACTIVE_MARKERS: AtomicU32 = AtomicU32::new(0);
 static MARKER_STACKS: [AtomicU64; MARKER_CAPACITY] = [const { AtomicU64::new(0) }; MARKER_CAPACITY];
 static MARKER_TIDS: [AtomicU64; MARKER_CAPACITY] = [const { AtomicU64::new(0) }; MARKER_CAPACITY];
 static MARKER_RIPS: [AtomicU64; MARKER_CAPACITY] = [const { AtomicU64::new(0) }; MARKER_CAPACITY];
@@ -31,6 +32,10 @@ static MARKER_R11: [AtomicU64; MARKER_CAPACITY] = [const { AtomicU64::new(0) }; 
 static MARKER_EFLAGS: [AtomicU64; MARKER_CAPACITY] = [const { AtomicU64::new(0) }; MARKER_CAPACITY];
 
 static TARGET_PROCESS_ROUTE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn has_active_markers() -> bool {
+    ACTIVE_MARKERS.load(Ordering::Acquire) != 0
+}
 
 unsafe extern "C" {
     fn debug_log(message: *const core::ffi::c_char);
@@ -78,6 +83,9 @@ pub(super) fn remember_marker(tid: u64, stack: u64, rip: u64) -> bool {
             .compare_exchange(0, u64::MAX, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
+            // Count the reserved slot before publishing its stack value, so
+            // the fast path cannot skip a visible marker.
+            ACTIVE_MARKERS.fetch_add(1, Ordering::AcqRel);
             MARKER_TIDS[index].store(tid, Ordering::Relaxed);
             MARKER_RIPS[index].store(rip, Ordering::Relaxed);
             MARKER_PHASES[index].store(0, Ordering::Relaxed);
@@ -105,13 +113,14 @@ fn release_marker(index: usize, stack: u64) {
     MARKER_R11[index].store(0, Ordering::Relaxed);
     MARKER_EFLAGS[index].store(0, Ordering::Relaxed);
     MARKER_STACKS[index].store(0, Ordering::Release);
+    ACTIVE_MARKERS.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// Drop any marker on `tid`'s stack at a depth at or below `stack` (i.e. a
 /// caller that has since returned past it). Called once per SIGSYS so a
 /// marker never leaks into a later syscall at a reused stack depth.
 pub(super) fn retire_markers(tid: u64, stack: u64) {
-    if tid == 0 {
+    if tid == 0 || !has_active_markers() {
         return;
     }
     for index in 0..MARKER_CAPACITY {
@@ -145,7 +154,7 @@ pub(super) fn consume(
     r11: u64,
     eflags: u64,
 ) -> Option<Phase> {
-    if tid == 0 || stack == 0 || rip == 0 {
+    if tid == 0 || stack == 0 || rip == 0 || !has_active_markers() {
         return None;
     }
     let start = marker_slot(stack);
@@ -209,6 +218,9 @@ pub(super) fn consume(
 /// the route callback declines it) — the marker must not linger for a later
 /// syscall to accidentally match.
 pub(super) fn cancel(tid: u64, stack: u64, rip: u64) {
+    if !has_active_markers() {
+        return;
+    }
     let start = marker_slot(stack);
     if let Some(index) = (0..MARKER_CAPACITY)
         .map(|offset| (start + offset) % MARKER_CAPACITY)

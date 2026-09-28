@@ -118,6 +118,7 @@ static HISTORY: History = History::new();
 static NULL_FAULT_DUMPS: AtomicU64 = AtomicU64::new(0);
 
 unsafe extern "C" {
+    fn debug_enabled() -> libc::c_int;
     fn debug_log(message: *const core::ffi::c_char);
     fn debug_log_hex(prefix: *const core::ffi::c_char, value: u64);
 }
@@ -148,7 +149,10 @@ pub(super) const fn event(
 }
 
 pub(super) fn record_game_event(event: Event) {
-    if crate::environment::game_process() {
+    // This history is only ever emitted through debug_log after a fault.
+    // Avoid the ring's atomic writes on every ordinary SIGSYS when logging
+    // is disabled for a normal game run.
+    if unsafe { debug_enabled() } != 0 && crate::environment::game_process() {
         HISTORY.record(event);
     }
 }
