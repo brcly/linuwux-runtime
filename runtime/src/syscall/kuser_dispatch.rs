@@ -162,7 +162,7 @@ fn scan_main_image_iat_locked() -> usize {
     let got_gs = unsafe {
         libc::syscall(
             libc::SYS_arch_prctl,
-            0x1004, // ARCH_GET_GS
+            0x1004i64, // ARCH_GET_GS
             &mut gs_base as *mut u64,
         )
     } == 0;
@@ -401,7 +401,7 @@ unsafe extern "C" fn dispatcher_target(
     let original = ORIGINAL_DISPATCHER.load(Ordering::Acquire);
     maybe_scan_main_image_iat();
     super::unixlib_repair::maybe_repair_wine_unixlib_exports();
-    let tid = unsafe { libc::syscall(libc::SYS_gettid) as u64 };
+    let tid = unsafe { libc::gettid() as u64 };
     let trap_rsp = entry_rsp.saturating_add(8);
     super::reflex_markers::retire_markers(tid, trap_rsp);
 
@@ -554,8 +554,7 @@ pub(super) fn install() -> bool {
     // Wine owns this shared KUSER page. Temporarily make it writable to swap
     // the dispatcher slot, then restore the page's read-only protection.
     if unsafe {
-        libc::syscall(
-            libc::SYS_mprotect,
+        libc::mprotect(
             page as *mut c_void,
             linuwux::kuser::PAGE_SIZE,
             libc::PROT_READ | libc::PROT_WRITE,
@@ -576,8 +575,7 @@ pub(super) fn install() -> bool {
         unsafe { slot.write_volatile(bridge) };
     }
     let restored = unsafe {
-        libc::syscall(
-            libc::SYS_mprotect,
+        libc::mprotect(
             page as *mut c_void,
             linuwux::kuser::PAGE_SIZE,
             libc::PROT_READ,
@@ -668,8 +666,14 @@ mod tests {
         const { assert!(1usize << super::BRIDGE_STACK_SHIFT >= 0x4000) };
     }
 
+    #[cfg(not(miri))]
     extern "C" fn returning_dispatcher() {}
 
+    // Actually executes `dispatcher_bridge` as real machine code via inline
+    // asm, and `arch_prctl` has no libc wrapper so it must go through a raw
+    // syscall Miri doesn't support either; Miri interprets MIR, not raw
+    // instructions jumped to at runtime.
+    #[cfg(not(miri))]
     #[test]
     fn bridge_selector_runs_off_the_callers_stack() {
         // The bridge reads the Windows thread id from gs:[0x48], so give this
@@ -678,7 +682,7 @@ mod tests {
             let mut teb = [0u64; 0x20];
             teb[0x48 / 8] = 0x154;
             assert_eq!(
-                unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1001, teb.as_mut_ptr()) },
+                unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1001i64, teb.as_mut_ptr()) },
                 0
             );
             super::ORIGINAL_DISPATCHER.store(
@@ -723,7 +727,7 @@ mod tests {
                     .read_volatile()
             };
             assert_eq!(
-                unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1001, 0usize) },
+                unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1001i64, 0usize) },
                 0
             );
             (untouched, lock_released)

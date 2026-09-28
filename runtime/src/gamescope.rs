@@ -136,7 +136,7 @@ fn parent_process_id(pid: libc::pid_t) -> libc::pid_t {
 }
 
 fn has_gamescope_ancestor() -> bool {
-    let mut pid = unsafe { libc::syscall(libc::SYS_getpid) as libc::pid_t };
+    let mut pid = unsafe { libc::getpid() };
     for _ in 0..ANCESTRY_LIMIT {
         if pid <= 0 {
             break;
@@ -173,7 +173,7 @@ fn is_gamescope_session() -> bool {
 }
 
 fn gamescope_detected() -> bool {
-    let process = unsafe { libc::syscall(libc::SYS_getpid) as libc::pid_t };
+    let process = unsafe { libc::getpid() };
     process_is_gamescope(process) || is_gamescope_session() || has_gamescope_ancestor()
 }
 

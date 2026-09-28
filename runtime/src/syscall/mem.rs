@@ -21,15 +21,7 @@ pub(super) fn read_memory(address: u64, output: &mut [u8]) -> bool {
         iov_len: output.len(),
     };
     unsafe {
-        libc::syscall(
-            libc::SYS_process_vm_readv,
-            libc::syscall(libc::SYS_getpid),
-            &local as *const libc::iovec,
-            1usize,
-            &remote as *const libc::iovec,
-            1usize,
-            0usize,
-        ) == output.len() as libc::c_long
+        libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) == output.len() as isize
     }
 }
 
@@ -44,15 +36,7 @@ pub(super) fn write_u64(address: u64, value: u64) -> bool {
         iov_len: bytes.len(),
     };
     unsafe {
-        libc::syscall(
-            libc::SYS_process_vm_writev,
-            libc::syscall(libc::SYS_getpid),
-            &local as *const libc::iovec,
-            1usize,
-            &remote as *const libc::iovec,
-            1usize,
-            0usize,
-        ) == bytes.len() as libc::c_long
+        libc::process_vm_writev(libc::getpid(), &local, 1, &remote, 1, 0) == bytes.len() as isize
     }
 }
 
@@ -67,15 +51,7 @@ pub(super) fn write_u32(address: u64, value: u32) -> bool {
         iov_len: bytes.len(),
     };
     unsafe {
-        libc::syscall(
-            libc::SYS_process_vm_writev,
-            libc::syscall(libc::SYS_getpid),
-            &local as *const libc::iovec,
-            1usize,
-            &remote as *const libc::iovec,
-            1usize,
-            0usize,
-        ) == bytes.len() as libc::c_long
+        libc::process_vm_writev(libc::getpid(), &local, 1, &remote, 1, 0) == bytes.len() as isize
     }
 }
 
@@ -121,10 +97,13 @@ pub(super) fn trampoline_destination(slot: u64) -> Option<u64> {
     Some(u64::from_le_bytes(bytes[8..].try_into().unwrap()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::trampoline_destination;
 
+    // `trampoline_destination` calls `read_memory`, which calls
+    // `process_vm_readv` — not in Miri's foreign-function shim list at all.
+    #[cfg(not(miri))]
     #[test]
     fn reflex_iat_trampoline_decoder_accepts_only_the_observed_indirect_jump() {
         let mut code = [0u8; 16];

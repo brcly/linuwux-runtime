@@ -229,7 +229,7 @@ fn repair_module_wine_unixlib_exports(base: u64) -> usize {
         .count()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::{find_export_ordinal, read_export_directory, read_memory, repair_named_export};
 
@@ -302,6 +302,10 @@ mod tests {
         }
     }
 
+    // `read_export_directory`/`repair_named_export`/`read_memory` all read
+    // through `super::mem`, which calls `process_vm_readv` — not in Miri's
+    // foreign-function shim list at all.
+    #[cfg(not(miri))]
     #[test]
     fn repair_replaces_a_hooked_data_exports_trampoline_with_its_real_value() {
         let name = b"__wine_unix_call_dispatcher";
@@ -324,6 +328,9 @@ mod tests {
         assert!(!repair_named_export(image.base, &export, name));
     }
 
+    // Same as above: goes through `super::mem`'s `process_vm_readv`-based
+    // reads, which Miri doesn't emulate at all.
+    #[cfg(not(miri))]
     #[test]
     fn repair_leaves_an_unhooked_data_export_alone() {
         let name = b"__wine_unixlib_handle";

@@ -125,10 +125,14 @@ pub(super) fn maybe_complete_bypass(gregs: *mut libc::greg_t) -> bool {
     complete_zero_capacity(gregs, service)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::{STATUS_BUFFER_TOO_SMALL, complete_zero_capacity};
 
+    // `complete_zero_capacity` reads through `read_u32`/writes through
+    // `write_u32` (`super::mem`), which call `process_vm_readv`/`writev` —
+    // not in Miri's foreign-function shim list at all.
+    #[cfg(not(miri))]
     #[test]
     fn completes_only_the_null_zero_capacity_probe() {
         let mut size = 0u32;

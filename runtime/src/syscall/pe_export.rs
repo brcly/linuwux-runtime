@@ -74,7 +74,7 @@ pub(super) fn module_base(name: &[u8]) -> Option<u64> {
     let mut gs_base = 0u64;
     // SAFETY: ARCH_GET_GS writes one u64 to our own stack; a failed syscall
     // is handled by returning None.
-    if unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1004, &mut gs_base as *mut u64) } != 0 {
+    if unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1004i64, &mut gs_base as *mut u64) } != 0 {
         return None;
     }
     let peb = offset(gs_base, 0x60).and_then(read_u64)?;
@@ -160,10 +160,14 @@ pub(super) fn export_service(base: u64, export_name: &[u8]) -> Option<u32> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::{base_from_peb, export_service};
 
+    // `base_from_peb` reads through `read_u16`/`read_u64` (`super::mem`),
+    // which call `process_vm_readv` — not in Miri's foreign-function shim
+    // list at all.
+    #[cfg(not(miri))]
     #[test]
     fn finds_a_module_in_the_windows_loader_list() {
         let mut peb = [0u8; 0x30];
@@ -184,6 +188,10 @@ mod tests {
         assert_eq!(base_from_peb(peb.as_ptr() as u64, b"ntdll.dll"), None);
     }
 
+    // `export_service` reads through `read_u16`/`read_u32`/`read_memory`
+    // (`super::mem`), which call `process_vm_readv` — not in Miri's
+    // foreign-function shim list at all.
+    #[cfg(not(miri))]
     #[test]
     fn discovers_a_service_from_a_pe_export_instead_of_a_fixed_number() {
         let mut image = vec![0u8; 0x1000];

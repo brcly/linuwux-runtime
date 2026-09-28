@@ -174,7 +174,7 @@ impl PatchState {
     pub fn recover_after_fork(&self) {
         let _ = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
                 PATCH_RESUME_APPLYING => Some(PATCH_RESUME_FAILED),
                 PATCH_DISPATCH_APPLYING => Some(PATCH_DISPATCH_FAILED),
                 PATCH_SELECTOR_APPLYING => Some(PATCH_SELECTOR_FAILED),

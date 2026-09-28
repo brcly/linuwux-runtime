@@ -109,18 +109,8 @@ fn read_memory(address: u64, output: &mut [u8]) -> bool {
         iov_base: address as *mut c_void,
         iov_len: output.len(),
     };
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_process_vm_readv,
-            libc::syscall(libc::SYS_getpid),
-            &local as *const libc::iovec,
-            1 as libc::c_ulong,
-            &remote as *const libc::iovec,
-            1 as libc::c_ulong,
-            0 as libc::c_ulong,
-        )
-    };
-    result == output.len() as libc::c_long
+    let result = unsafe { libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) };
+    result == output.len() as isize
 }
 
 fn next_instruction(rip: u64) -> Option<u64> {
@@ -184,13 +174,7 @@ fn build_or_reuse_private_trampoline(index: usize, site: u64, next: u64) -> Opti
     {
         Ok(_) => Some(built),
         Err(existing) => {
-            unsafe {
-                libc::syscall(
-                    libc::SYS_munmap,
-                    built as *mut c_void,
-                    linuwux::kuser::PAGE_SIZE,
-                )
-            };
+            unsafe { libc::munmap(built as *mut c_void, linuwux::kuser::PAGE_SIZE) };
             Some(existing)
         }
     }
@@ -201,17 +185,23 @@ fn build_private_trampoline(site: u64, next: u64) -> Option<u64> {
     let page = site & !(page_size as u64 - 1);
     executable_mapping_protection(page, page_size as u64)?;
     let _errno = crate::errno::Errno::save();
+    // `libc::syscall` is a C variadic function; glibc reads every extra
+    // argument back as a `long`, so anything narrower (like these i32 flag
+    // constants) must be cast explicitly or the untouched high bits are
+    // garbage. Confirmed to matter in practice: an uncast `MAP_SHARED` file
+    // mapping elsewhere returned a valid-looking pointer that SIGBUSed on
+    // first access.
     let memory = unsafe {
         libc::syscall(
             libc::SYS_mmap,
             ptr::null_mut::<c_void>(),
-            page_size,
-            libc::PROT_READ | libc::PROT_WRITE,
+            page_size as libc::c_long,
+            (libc::PROT_READ | libc::PROT_WRITE) as libc::c_long,
             // Wine must see this as guest code: a syscall from the host's
             // native-code range may bypass its SIGSYS dispatcher entirely.
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_32BIT,
-            -1,
-            0,
+            (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_32BIT) as libc::c_long,
+            -1 as libc::c_long,
+            0 as libc::c_long,
         )
     };
     if memory == -1 {
@@ -225,15 +215,14 @@ fn build_private_trampoline(site: u64, next: u64) -> Option<u64> {
     code[18..].copy_from_slice(&next.to_le_bytes());
     unsafe { ptr::copy_nonoverlapping(code.as_ptr(), memory as *mut u8, code.len()) };
     if unsafe {
-        libc::syscall(
-            libc::SYS_mprotect,
+        libc::mprotect(
             memory as *mut c_void,
             page_size,
             libc::PROT_READ | libc::PROT_EXEC,
         )
     } != 0
     {
-        unsafe { libc::syscall(libc::SYS_munmap, memory as *mut c_void, page_size) };
+        unsafe { libc::munmap(memory as *mut c_void, page_size) };
         return None;
     }
     Some(memory as u64)
@@ -363,8 +352,7 @@ fn patch_to_syscall(address: u64) -> bool {
     };
     let _errno = crate::errno::Errno::save();
     if unsafe {
-        libc::syscall(
-            libc::SYS_mprotect,
+        libc::mprotect(
             page as *mut c_void,
             page_size as libc::size_t,
             libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
@@ -393,8 +381,7 @@ fn patch_to_syscall(address: u64) -> bool {
     };
 
     let restored = unsafe {
-        libc::syscall(
-            libc::SYS_mprotect,
+        libc::mprotect(
             page as *mut c_void,
             page_size as libc::size_t,
             original_protection,
@@ -409,16 +396,18 @@ fn patch_to_syscall(address: u64) -> bool {
 }
 
 fn executable_mapping_protection(page: u64, page_size: u64) -> Option<c_int> {
-    // Use raw syscalls here because this lookup runs inside SIGSEGV handling;
-    // going through the exported `read` interposer could trigger lazy dlsym.
+    // `openat`/`close` go through the real libc functions directly: neither
+    // is one of this crate's own exported/interposed symbols, so there's no
+    // self-recursion risk. `read` stays a raw syscall, though: this lookup
+    // runs inside SIGSEGV handling, and `libc::read` would self-recurse into
+    // this crate's own exported `read` interposer, whose first call does a
+    // lazy `dlsym` — unsafe to trigger from a signal handler.
     let fd = unsafe {
-        libc::syscall(
-            libc::SYS_openat,
+        libc::openat(
             libc::AT_FDCWD,
             c"/proc/self/maps".as_ptr(),
             libc::O_RDONLY | libc::O_CLOEXEC,
-            0,
-        ) as c_int
+        )
     };
     if fd < 0 {
         return None;
@@ -429,8 +418,14 @@ fn executable_mapping_protection(page: u64, page_size: u64) -> Option<c_int> {
     let mut overflow = false;
     let mut protection = None;
     'read: loop {
-        let count =
-            unsafe { libc::syscall(libc::SYS_read, fd, chunk.as_mut_ptr(), chunk.len()) as isize };
+        let count = unsafe {
+            libc::syscall(
+                libc::SYS_read,
+                fd as libc::c_long,
+                chunk.as_mut_ptr(),
+                chunk.len(),
+            ) as isize
+        };
         if count <= 0 {
             break;
         }
@@ -458,7 +453,7 @@ fn executable_mapping_protection(page: u64, page_size: u64) -> Option<c_int> {
     {
         protection = Some(found);
     }
-    unsafe { libc::syscall(libc::SYS_close, fd) };
+    unsafe { libc::close(fd) };
     protection
 }
 
@@ -498,19 +493,28 @@ fn parse_hex(bytes: &[u8]) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(miri))]
     use super::{
-        DIRECT_SYSCALL_THUNK, INT2E_INSTRUCTION, SYSCALL_INSTRUCTION, direct_path_eflags,
-        executable_mapping_protection, next_instruction, patch_to_syscall, skip_int2e_fault,
+        DIRECT_SYSCALL_THUNK, INT2E_INSTRUCTION, SYSCALL_INSTRUCTION,
+        executable_mapping_protection, patch_to_syscall, skip_int2e_fault,
     };
+    use super::{direct_path_eflags, next_instruction};
+    #[cfg(not(miri))]
     use core::mem::MaybeUninit;
+    #[cfg(not(miri))]
     use libc::ucontext_t;
+    #[cfg(not(miri))]
     use std::sync::Mutex;
 
+    #[cfg(not(miri))]
     const PAGE_SIZE: usize = 0x1000;
+    #[cfg(not(miri))]
     static PATCH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(not(miri))]
     struct CodePage(*mut u8);
 
+    #[cfg(not(miri))]
     impl CodePage {
         fn new(offset: usize, executable: bool) -> Self {
             let page = unsafe {
@@ -549,12 +553,14 @@ mod tests {
         }
     }
 
+    #[cfg(not(miri))]
     impl Drop for CodePage {
         fn drop(&mut self) {
             unsafe { libc::munmap(self.0.cast(), PAGE_SIZE) };
         }
     }
 
+    #[cfg(not(miri))]
     fn context_at(rip: u64, trap: u64) -> Box<ucontext_t> {
         let mut context = Box::new(unsafe { MaybeUninit::<ucontext_t>::zeroed().assume_init() });
         unsafe {
@@ -567,6 +573,10 @@ mod tests {
         context
     }
 
+    // Reads back the page's real protection bits from `/proc/self/maps`
+    // after `mprotect(PROT_EXEC)`; Miri doesn't model executable mappings or
+    // real OS-level permission introspection at all.
+    #[cfg(not(miri))]
     #[test]
     fn patches_int2e_at_even_and_odd_addresses_and_restores_rx() {
         let _serial = PATCH_TEST_LOCK.lock().unwrap();
@@ -585,6 +595,10 @@ mod tests {
         }
     }
 
+    // `build_private_trampoline` calls `executable_mapping_protection`,
+    // which reads real `/proc/self/maps` permission bits; Miri doesn't model
+    // executable mappings or real OS-level permission introspection at all.
+    #[cfg(not(miri))]
     #[test]
     fn inline_int2e_uses_private_thunk_without_changing_game_code() {
         let _serial = PATCH_TEST_LOCK.lock().unwrap();
@@ -613,6 +627,10 @@ mod tests {
         );
     }
 
+    // Actually executes the built trampoline as real machine code via inline
+    // asm; Miri interprets MIR, not raw instructions jumped to at runtime,
+    // and doesn't model executable mappings either.
+    #[cfg(not(miri))]
     #[test]
     fn private_thunk_executes_syscall_and_restores_guest_rcx() {
         let _serial = PATCH_TEST_LOCK.lock().unwrap();
@@ -641,17 +659,25 @@ mod tests {
         assert_eq!(page.bytes(0x10), INT2E_INSTRUCTION);
     }
 
+    // `read_memory` calls `process_vm_readv`, which Miri's foreign-function
+    // shim list doesn't include at all (confirmed: "can't call foreign
+    // function `process_vm_readv`"), so anything that reaches
+    // `skip_int2e_fault` can't run under Miri regardless of exec
+    // permissions.
+    #[cfg(not(miri))]
     #[test]
     fn fault_handler_runs_the_thunks_direct_path_without_modifying_code() {
         let _serial = PATCH_TEST_LOCK.lock().unwrap();
-        let page = CodePage::new(0x13, true);
+        // Not executable: this RIP lands on the rewind path
+        // (`preceding_direct_syscall`), which only reads these bytes back
+        // and never executes them, so the page never actually needs to be
+        // executable.
+        let page = CodePage::new(0x13, false);
         // Rebuild the Windows thunk tail: `syscall; ret` directly before the
         // `int 2e`, reachable only through the `jne +3` skip.
         unsafe {
             let code = page.0.add(0x10);
-            libc::mprotect(page.0.cast(), PAGE_SIZE, libc::PROT_READ | libc::PROT_WRITE);
             core::ptr::copy_nonoverlapping(DIRECT_SYSCALL_THUNK.as_ptr(), code, 3);
-            libc::mprotect(page.0.cast(), PAGE_SIZE, libc::PROT_READ | libc::PROT_EXEC);
         }
         let rip = page.address(0x13);
         let mut context = context_at(rip, 13);
@@ -675,6 +701,9 @@ mod tests {
         assert_eq!(direct_path_eflags(0x246), 0x246);
     }
 
+    // Reaches `skip_int2e_fault`'s `read_memory` call, which calls
+    // `process_vm_readv` — not in Miri's foreign-function shim list at all.
+    #[cfg(not(miri))]
     #[test]
     fn fault_handler_advances_when_instruction_is_not_patchable() {
         let page = CodePage::new(0x10, false);
@@ -689,9 +718,13 @@ mod tests {
         assert_eq!(page.bytes(0x10), INT2E_INSTRUCTION);
     }
 
+    // The second case (`wrong_instruction`) reaches `skip_int2e_fault`'s
+    // `read_memory` call, which calls `process_vm_readv` — not in Miri's
+    // foreign-function shim list at all.
+    #[cfg(not(miri))]
     #[test]
     fn fault_handler_ignores_other_faults_and_instructions() {
-        let page = CodePage::new(0x10, true);
+        let page = CodePage::new(0x10, false);
         let rip = page.address(0x10);
         let mut wrong_trap = context_at(rip, 6);
         assert!(!unsafe { skip_int2e_fault(&mut *wrong_trap) });

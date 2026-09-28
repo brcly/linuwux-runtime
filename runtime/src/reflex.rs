@@ -46,7 +46,7 @@ impl Host for RuntimeHost {
         crate::registry::set_hwprofile_guid();
     }
     fn yield_thread(&self) {
-        unsafe { libc::syscall(libc::SYS_sched_yield) };
+        unsafe { libc::sched_yield() };
     }
     fn log(&self, message: &'static CStr) {
         unsafe { debug_log(message.as_ptr()) };

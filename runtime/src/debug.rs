@@ -22,12 +22,7 @@ pub extern "C" fn debug_enabled() -> c_int {
 }
 
 fn new_line() -> Line {
-    let (tid, pid) = unsafe {
-        (
-            libc::syscall(libc::SYS_gettid),
-            libc::syscall(libc::SYS_getpid),
-        )
-    };
+    let (tid, pid) = unsafe { (libc::gettid(), libc::getpid()) };
     Line::new(pid as u64, (tid > 0).then_some(tid as u64))
 }
 

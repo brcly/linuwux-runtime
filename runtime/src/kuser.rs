@@ -46,7 +46,7 @@ fn log(message: &'static CStr) {
 
 fn restore_read_only(page: *mut libc::c_void) -> bool {
     for _ in 0..2 {
-        if unsafe { libc::syscall(libc::SYS_mprotect, page, PAGE_SIZE, libc::PROT_READ) } == 0 {
+        if unsafe { libc::mprotect(page, PAGE_SIZE, libc::PROT_READ) } == 0 {
             return true;
         }
     }
@@ -85,15 +85,7 @@ unsafe fn apply_recipe_to_shared_page(
         return false;
     }
     let page = ptr::with_exposed_provenance_mut::<u8>(ADDRESS);
-    if unsafe {
-        libc::syscall(
-            libc::SYS_mprotect,
-            page,
-            PAGE_SIZE,
-            libc::PROT_READ | libc::PROT_WRITE,
-        )
-    } == -1
-    {
+    if unsafe { libc::mprotect(page.cast(), PAGE_SIZE, libc::PROT_READ | libc::PROT_WRITE) } == -1 {
         log(c"failed to make KUSER_SHARED_DATA writable");
         return false;
     }
@@ -152,15 +144,7 @@ pub(crate) fn force_direct_syscall() {
         return;
     }
     let page = ptr::with_exposed_provenance_mut::<u8>(ADDRESS);
-    if unsafe {
-        libc::syscall(
-            libc::SYS_mprotect,
-            page,
-            PAGE_SIZE,
-            libc::PROT_READ | libc::PROT_WRITE,
-        )
-    } == -1
-    {
+    if unsafe { libc::mprotect(page.cast(), PAGE_SIZE, libc::PROT_READ | libc::PROT_WRITE) } == -1 {
         return;
     }
     unsafe { page.add(SYSTEM_CALL_OFFSET).write_volatile(0) };
@@ -185,7 +169,7 @@ pub unsafe extern "C" fn patch_kuser_shared_data_recipe(recipe: c_int) -> c_int 
         recipe,
         || unsafe { apply_recipe_to_shared_page(recipe, &_guard) },
         || {
-            unsafe { libc::syscall(libc::SYS_sched_yield) };
+            unsafe { libc::sched_yield() };
         },
     );
     drop(_guard);

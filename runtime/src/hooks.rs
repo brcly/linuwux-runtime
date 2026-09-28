@@ -15,6 +15,9 @@
 //!   suppressed rather than gated behind an opt-in. A small bootstrap pool
 //!   serves allocations that arrive before `dlsym` can resolve the real
 //!   `malloc` (chicken-and-egg: resolving a symbol can itself allocate).
+// Miri excludes the native interposer entrypoints, leaving their helpers unused.
+#![cfg_attr(miri, allow(dead_code))]
+
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::mem::{MaybeUninit, size_of};
@@ -439,11 +442,16 @@ struct KernelSigaction {
 fn terminate_from_signal(sig: c_int) -> ! {
     let status = 128i32.wrapping_add(sig);
     unsafe {
-        libc::syscall(libc::SYS_exit_group, status);
+        libc::syscall(libc::SYS_exit_group, status as libc::c_long);
         libc::_exit(status);
     }
 }
 
+// `libc::syscall` is a C variadic function; glibc reads every extra argument
+// back as a `long`, so anything narrower (like a plain `c_int` signal
+// number) must be cast explicitly or the untouched high bits are garbage.
+// Confirmed to matter in practice: an uncast `MAP_SHARED` file mapping
+// elsewhere returned a valid-looking pointer that SIGBUSed on first access.
 fn restore_default_and_raise(sig: c_int) {
     let disposition = KernelSigaction {
         handler: libc::SIG_DFL,
@@ -454,7 +462,7 @@ fn restore_default_and_raise(sig: c_int) {
     let result = unsafe {
         libc::syscall(
             libc::SYS_rt_sigaction,
-            sig,
+            sig as libc::c_long,
             &disposition as *const KernelSigaction,
             ptr::null_mut::<KernelSigaction>(),
             size_of::<libc::c_ulong>(),
@@ -463,16 +471,11 @@ fn restore_default_and_raise(sig: c_int) {
     if result == -1 {
         terminate_from_signal(sig);
     }
-    let (process_id, thread_id) = unsafe {
-        (
-            libc::syscall(libc::SYS_getpid),
-            libc::syscall(libc::SYS_gettid),
-        )
-    };
+    let (process_id, thread_id) = unsafe { (libc::getpid(), libc::gettid()) };
     if process_id <= 0 || thread_id <= 0 {
         terminate_from_signal(sig);
     }
-    if unsafe { libc::syscall(libc::SYS_tgkill, process_id, thread_id, sig) } == -1 {
+    if unsafe { libc::tgkill(process_id, thread_id, sig) } == -1 {
         terminate_from_signal(sig);
     }
 }
@@ -621,9 +624,13 @@ unsafe fn install_bridge(
                 debug_log(c"signal interposition initialized".as_ptr());
             }
         }
-        let failed =
-            unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1012 as c_int, 0 as libc::c_ulong) }
-                == -1;
+        let failed = unsafe {
+            libc::syscall(
+                libc::SYS_arch_prctl,
+                0x1012 as libc::c_long,
+                0 as libc::c_ulong,
+            )
+        } == -1;
         unsafe {
             debug_log(if failed {
                 c"ARCH_SET_CPUID faulting enable failed".as_ptr()

@@ -26,9 +26,15 @@
 //! variable is required. Each rewrite is logged once per file when
 //! `LINUWUX_DEBUG=1` is set, capped at [`LOG_LIMIT`] events.
 
+// File-backed mmap integration tests are native-only, leaving this path unused in Miri.
+#![cfg_attr(miri, allow(dead_code))]
+
 use core::ffi::{c_int, c_void};
+#[cfg(not(test))]
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+#[cfg(not(test))]
+use core::sync::atomic::AtomicPtr;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const THUNK_LEN: usize = 0x20;
 const SERVICE_OFFSET: usize = 4;
@@ -58,24 +64,30 @@ const MIN_FILE_READ: isize = 0x1000;
 /// Smallest file-backed mapping considered a whole-file PE data view. Wine maps
 /// a PE image's header and each of its sections separately, so an image
 /// mapping never covers a whole DLL; a real DLL is far larger than this.
+#[cfg(not(test))]
 const MIN_FILE_VIEW: usize = 0x4000;
-#[cfg(feature = "debug")]
+#[cfg(all(not(test), feature = "debug"))]
 const LOG_LIMIT: u64 = 8;
 
-#[cfg(feature = "debug")]
+#[cfg(all(not(test), feature = "debug"))]
 static EVENTS: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
 static REAL_READ: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(not(test))]
 static REAL_PREAD: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+#[cfg(not(test))]
 static REAL_MMAP: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
-#[cfg(feature = "debug")]
+#[cfg(all(not(test), feature = "debug"))]
 unsafe extern "C" {
     fn debug_log(message: *const core::ffi::c_char);
     fn debug_log_hex(prefix: *const core::ffi::c_char, value: u64);
     fn debug_enabled() -> c_int;
 }
 
+#[cfg(not(test))]
 type Read = unsafe extern "C" fn(c_int, *mut c_void, usize) -> isize;
+#[cfg(not(test))]
 type Pread = unsafe extern "C" fn(c_int, *mut c_void, usize, libc::off_t) -> isize;
 type Mmap =
     unsafe extern "C" fn(*mut c_void, usize, c_int, c_int, c_int, libc::off_t) -> *mut c_void;
@@ -141,6 +153,7 @@ fn looks_like_pe_file(buffer: &[u8]) -> bool {
         .is_some_and(|signature| signature == b"PE\0\0")
 }
 
+#[cfg(not(test))]
 fn resolve(slot: &AtomicPtr<c_void>, name: &core::ffi::CStr) -> *mut c_void {
     let mut symbol = slot.load(Ordering::Acquire);
     if symbol.is_null() {
@@ -158,6 +171,13 @@ fn resolve(slot: &AtomicPtr<c_void>, name: &core::ffi::CStr) -> *mut c_void {
 /// # Safety
 /// The caller must satisfy the same pointer and buffer requirements as libc's
 /// `read` function.
+///
+/// Excluded from test builds: nothing in this crate calls it by Rust path —
+/// it exists only as LD_PRELOAD ABI surface for external callers — and
+/// exporting it under the same symbol name as `libc::read` self-shadows any
+/// test that calls `libc::read` directly (harmless at runtime, since it
+/// forwards through, but an unresolvable symbol clash under Miri).
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn read(fd: c_int, buffer: *mut c_void, count: usize) -> isize {
     let real = {
@@ -165,7 +185,7 @@ pub unsafe extern "C" fn read(fd: c_int, buffer: *mut c_void, count: usize) -> i
         resolve(&REAL_READ, c"read")
     };
     let result = if real.is_null() {
-        unsafe { libc::syscall(libc::SYS_read, fd, buffer, count) as isize }
+        unsafe { libc::syscall(libc::SYS_read, fd as libc::c_long, buffer, count) as isize }
     } else {
         unsafe { core::mem::transmute::<*mut c_void, Read>(real)(fd, buffer, count) }
     };
@@ -183,6 +203,9 @@ pub unsafe extern "C" fn read(fd: c_int, buffer: *mut c_void, count: usize) -> i
 /// # Safety
 /// The caller must satisfy the same pointer and buffer requirements as libc's
 /// `pread` function.
+///
+/// Excluded from test builds: see the same note on [`read`] above.
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pread(
     fd: c_int,
@@ -195,7 +218,9 @@ pub unsafe extern "C" fn pread(
         resolve(&REAL_PREAD, c"pread")
     };
     let result = if real.is_null() {
-        unsafe { libc::syscall(libc::SYS_pread64, fd, buffer, count, offset) as isize }
+        unsafe {
+            libc::syscall(libc::SYS_pread64, fd as libc::c_long, buffer, count, offset) as isize
+        }
     } else {
         unsafe { core::mem::transmute::<*mut c_void, Pread>(real)(fd, buffer, count, offset) }
     };
@@ -216,6 +241,7 @@ pub unsafe extern "C" fn pread(
 /// # Safety
 /// For `result >= 0`, `buffer` must be valid for `result` writable bytes, as
 /// required by the completed read operation.
+#[cfg(not(test))]
 unsafe fn after_file_read(fd: c_int, buffer: *mut c_void, result: isize) {
     if result < MIN_FILE_READ {
         return;
@@ -256,6 +282,14 @@ unsafe fn after_file_read(fd: c_int, buffer: *mut c_void, result: isize) {
 ///
 /// # Safety
 /// The caller must satisfy the same requirements as libc's `mmap`.
+///
+/// Excluded from test builds: see the same note on [`read`] above. This is
+/// the one that actually surfaced the problem — Miri's own `mmap` shim
+/// handles the real function call but not a raw `syscall(SYS_mmap, ...)`, so
+/// routing a test helper through the raw syscall to dodge the symbol clash
+/// just traded one Miri failure for another; removing the clash at its root
+/// (this export not existing in a test binary at all) is the actual fix.
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmap(
     addr: *mut c_void,
@@ -387,6 +421,7 @@ fn pe_size_of_image(header: &[u8]) -> Option<u64> {
 ///
 /// # Safety
 /// `view` must be a live mapping of `length` bytes of `fd` at `offset`.
+#[cfg(not(test))]
 unsafe fn after_image_map(
     fd: c_int,
     view: *mut c_void,
@@ -462,6 +497,7 @@ unsafe fn after_image_map(
 /// # Safety
 /// `view` must be a live, readable mapping of `length` bytes of `fd` from
 /// offset zero, and `real_mmap` either null or libc's `mmap`.
+#[cfg(not(test))]
 unsafe fn after_file_map(
     fd: c_int,
     view: *mut c_void,
@@ -557,7 +593,7 @@ unsafe fn rewrite_pe_view(
 ///
 /// # Safety
 /// Only calls libc.
-#[cfg(feature = "debug")]
+#[cfg(all(not(test), feature = "debug"))]
 unsafe fn fd_path(fd: c_int, path: &mut [u8; 256]) -> usize {
     let mut link = *b"/proc/self/fd/\0\0\0\0\0\0\0\0\0\0\0\0";
     let mut digits = [0u8; 10];
@@ -594,7 +630,7 @@ unsafe fn fd_path(fd: c_int, path: &mut [u8; 256]) -> usize {
 ///
 /// # Safety
 /// Only calls libc and the runtime's exported debug logger.
-#[cfg(feature = "debug")]
+#[cfg(all(not(test), feature = "debug"))]
 unsafe fn trace_system_dll_map(
     fd: c_int,
     view: *mut c_void,
@@ -636,7 +672,7 @@ unsafe fn trace_system_dll_map(
 ///
 /// # Safety
 /// Only calls libc and the runtime's exported debug logger.
-#[cfg(feature = "debug")]
+#[cfg(all(not(test), feature = "debug"))]
 unsafe fn trace_system_dll_read(
     kind: &'static core::ffi::CStr,
     fd: c_int,
@@ -674,7 +710,7 @@ unsafe fn trace_system_dll_read(
 ///
 /// # Safety
 /// Only calls libc and the runtime's exported debug logger.
-#[cfg(feature = "debug")]
+#[cfg(all(not(test), feature = "debug"))]
 unsafe fn log_rewrite(kind: &'static core::ffi::CStr, fd: c_int, rewritten: usize) {
     let mut link = *b"/proc/self/fd/\0\0\0\0\0\0\0\0\0\0\0\0";
     let mut digits = [0u8; 10];
@@ -717,13 +753,17 @@ fn rewrite_complete_pe_read(buffer: &mut [u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(miri))]
+    use super::rewrite_pe_view;
     use super::{IMAGE_COPIES, IMAGE_TRACK_SLOTS, ImageCopies, pe_size_of_image};
     use super::{
         MIN_FILE_READ, THUNK_LEN, WINDOWS_TAIL, count_pending_thunk_tails, looks_like_pe_file,
-        rewrite_complete_pe_read, rewrite_pe_view, rewrite_syscall_thunk_tails,
+        rewrite_complete_pe_read, rewrite_syscall_thunk_tails,
     };
     use core::sync::atomic::AtomicU64;
+    #[cfg(not(miri))]
     use std::io::Write;
+    #[cfg(not(miri))]
     use std::os::fd::AsRawFd;
 
     /// A syscall thunk head + SystemCall branch (the OS-ABI-level part every
@@ -884,6 +924,7 @@ mod tests {
         image
     }
 
+    #[cfg(not(miri))]
     fn map_file(file: &std::fs::File, length: usize, prot: libc::c_int) -> *mut libc::c_void {
         let view = unsafe {
             libc::mmap(
@@ -907,6 +948,9 @@ mod tests {
         assert_eq!(count_pending_thunk_tails(&image), 1);
     }
 
+    // Miri's default isolation intentionally forbids filesystem I/O and
+    // cannot model the file-backed mmap used by this integration test.
+    #[cfg(not(miri))]
     #[test]
     fn data_view_gets_windows_tails_without_touching_the_file() {
         let image = fake_dll(0x8000, &[0x1000, 0x2400]);
@@ -945,6 +989,7 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    #[cfg(not(miri))]
     #[test]
     fn data_view_of_a_non_pe_or_clean_file_is_left_mapped_as_is() {
         let path = std::env::temp_dir().join(format!("linuwux-not-pe-{}.bin", std::process::id()));

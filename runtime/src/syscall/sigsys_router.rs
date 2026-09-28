@@ -144,7 +144,7 @@ unsafe fn redirect(
     // Every branch below needs the current thread id at least once, and some
     // need it two or three times; `gettid` is a real syscall (not the cached
     // libc wrapper), so query it once per event rather than per use.
-    let tid = unsafe { libc::syscall(libc::SYS_gettid) as u64 };
+    let tid = unsafe { libc::gettid() as u64 };
     // Every use below is gated by some combination of `kuser`/`reflex`/
     // `debug`; with all three off, `tid` itself would otherwise be unused.
     let _ = tid;

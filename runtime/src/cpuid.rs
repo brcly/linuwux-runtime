@@ -151,18 +151,8 @@ fn read_memory(address: u64, output: &mut [u8]) -> bool {
         iov_base: address as *mut c_void,
         iov_len: output.len(),
     };
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_process_vm_readv,
-            libc::syscall(libc::SYS_getpid),
-            &local as *const libc::iovec,
-            1 as libc::c_ulong,
-            &remote as *const libc::iovec,
-            1 as libc::c_ulong,
-            0 as libc::c_ulong,
-        )
-    };
-    result == output.len() as libc::c_long
+    let result = unsafe { libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) };
+    result == output.len() as isize
 }
 
 fn little_endian_u16(bytes: &[u8]) -> Option<u16> {
@@ -515,7 +505,13 @@ fn configure_identity(vendor: Vendor, avx_enabled: bool) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn cpuid_disable_faulting() {
-    let _ = unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_SET_CPUID, 1 as libc::c_ulong) };
+    let _ = unsafe {
+        libc::syscall(
+            libc::SYS_arch_prctl,
+            ARCH_SET_CPUID as libc::c_long,
+            1 as libc::c_ulong,
+        )
+    };
 }
 
 #[unsafe(no_mangle)]
@@ -634,16 +630,30 @@ fn native_reply(leaf: u32, subleaf: u32) -> Registers {
     if cacheable && let Some(cached) = NATIVE_CACHE.lookup(leaf, subleaf) {
         return cached;
     }
-    if unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_SET_CPUID, 1 as libc::c_ulong) } == -1 {
+    if unsafe {
+        libc::syscall(
+            libc::SYS_arch_prctl,
+            ARCH_SET_CPUID as libc::c_long,
+            1 as libc::c_ulong,
+        )
+    } == -1
+    {
         unsafe { debug_log(c"CPUID native pass-through enable failed; returning zeros".as_ptr()) };
         return Registers::default();
     }
 
     let result = native_cpuid(leaf, subleaf);
-    if unsafe { libc::syscall(libc::SYS_arch_prctl, ARCH_SET_CPUID, 0 as libc::c_ulong) } == -1 {
+    if unsafe {
+        libc::syscall(
+            libc::SYS_arch_prctl,
+            ARCH_SET_CPUID as libc::c_long,
+            0 as libc::c_ulong,
+        )
+    } == -1
+    {
         unsafe {
             debug_log(c"CPUID faulting re-arm failed; terminating".as_ptr());
-            libc::syscall(libc::SYS_exit_group, 127 as c_int);
+            libc::syscall(libc::SYS_exit_group, 127 as libc::c_long);
             libc::_exit(127);
         }
     }
@@ -695,7 +705,7 @@ pub unsafe extern "C" fn cpuid_sigsegv_handler(
                 unsafe { (*context_ptr).uc_mcontext.gregs[libc::REG_RIP as usize] as u64 };
             // SAFETY: gettid has no pointer arguments and is safe to issue in
             // this signal handler.
-            let tid = unsafe { libc::syscall(libc::SYS_gettid) as u64 };
+            let tid = unsafe { libc::gettid() as u64 };
             crate::syscall::trace_null_fault(address, fault_rip, tid);
         }
         unsafe { forward_signal(sig, info, context) };
@@ -781,12 +791,15 @@ mod caller_image_tests {
     }
 }
 
-#[cfg(all(test, feature = "kuser"))]
+#[cfg(all(test, feature = "kuser", not(miri)))]
 mod int2e_signal_tests {
     use super::cpuid_sigsegv_handler;
     use core::mem::MaybeUninit;
     use libc::{siginfo_t, ucontext_t};
 
+    // Reaches `int2e.rs`'s `skip_int2e_fault`, whose `read_memory` calls
+    // `process_vm_readv` — not in Miri's foreign-function shim list at all
+    // (confirmed: "can't call foreign function `process_vm_readv`").
     #[test]
     fn handles_int2e_even_when_signal_code_is_not_si_kernel() {
         let page = unsafe {
@@ -802,10 +815,13 @@ mod int2e_signal_tests {
         assert_ne!(page, libc::MAP_FAILED);
         let code = [0x0f, 0x05, 0xc3, 0xcd, 0x2e];
         unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast::<u8>(), code.len()) };
-        assert_eq!(
-            unsafe { libc::mprotect(page, 0x1000, libc::PROT_READ | libc::PROT_EXEC) },
-            0
-        );
+        // No `mprotect(PROT_EXEC)`: this RIP lands on the rewind path
+        // (`preceding_direct_syscall`), which only reads these bytes back via
+        // `process_vm_readv` — it never executes them and never reaches
+        // `patch_to_syscall`'s `/proc/self/maps` executable-mapping check, so
+        // the page never actually needs to be executable. Miri doesn't
+        // support mmap/mprotect protections beyond PROT_READ|PROT_WRITE, so
+        // this also keeps the test runnable there.
         let mut context = unsafe { MaybeUninit::<ucontext_t>::zeroed().assume_init() };
         let mut info = unsafe { MaybeUninit::<siginfo_t>::zeroed().assume_init() };
         let direct = page as u64;
