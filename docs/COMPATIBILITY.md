@@ -10,7 +10,7 @@
 | Assassin’s Creed Shadows                                     | Yes            | —               |
 | Atomfall                                                     | Unknown        | —               |
 | Avatar: Frontiers of Pandora                                 | Unknown        | —               |
-| Beyond Good & Evil - 20th Anniversary Ed                     | No             | —               |
+| Beyond Good & Evil - 20th Anniversary Ed                     | Unknown        | —               |
 | Black Myth: Wukong                                           | Unknown        | —               |
 | Borderlands 4                                                | Yes            | —               |
 | BRAVELY DEFAULT FLYING FAIRY HD Remaster                     | Yes            | —               |
@@ -32,7 +32,7 @@
 | EA SPORTS™ Madden NFL 25                                     | Unknown        | —               |
 | EA SPORTS™ Madden NFL 26                                     | Unknown        | —               |
 | EA SPORTS™ PGA TOUR™                                         | Unknown        | —               |
-| EA SPORTS™ WRC                                               | Unknown        | LINUWUX_WIN32_FREE_GUARD=1 |
+| EA SPORTS™ WRC                                               | Unknown        | LINUWUX_WIN32U_FREE_GUARD=1 |
 | eBaseball™: PRO SPIRIT 2026 [F2P]                            | Unknown        | —               |
 | Echoes of Aincrad                                            | Unknown        | —               |
 | Edge of Nowhere [Oculus Rift, VR Only]                       | Unknown        | —               |
@@ -42,9 +42,9 @@
 | F1® 24                                                       | Unknown        | —               |
 | F1® 25                                                       | Unknown        | —               |
 | F1® Manager 2024                                             | Unknown        | —               |
-| Far Cry 5                                                    | Unknown        | —               |
+| Far Cry 5                                                    | Yes?           | —               |
 | Far Cry 6                                                    | Yes            | —               |
-| Far Cry New Dawn                                             | Unknown        | —               |
+| Far Cry New Dawn                                             | Yes            | —               |
 | FAR: Changing Tides                                          | Unknown        | —               |
 | Feral Rites (VR)                                             | Unknown        | —               |
 | FIFA 18                                                      | Unknown        | —               |
@@ -61,7 +61,7 @@
 | Jurassic World Evolution 2                                   | Unknown        | —               |
 | Jurassic World Evolution 3                                   | Unknown        | —               |
 | LEGO® Batman™: Legacy of the Dark Knight                     | Unknown        | —               |
-| Life is Strange: Reunion                                     | Unknown        | —               |
+| Life is Strange: Reunion                                     | Yes            | LINUWUX_WIN32U_FREE_GUARD=1 |
 | Like a Dragon Gaiden: The Man Who Erased His Name            | Unknown        | —               |
 | Like a Dragon: Infinite Wealth                               | Unknown        | —               |
 | Like a Dragon: Ishin!                                        | Unknown        | —               |
@@ -73,11 +73,11 @@
 | Madden NFL 23                                                | Unknown        | —               |
 | Madden NFL 24                                                | Unknown        | —               |
 | Mafia: The Old Country                                       | Yes            | —               |
-| Marvel's Midnight Suns                                       | Unknown        | —               |
-| Mega Man Star Force Legacy Collection                        | Unknown        | —               |
+| Marvel's Midnight Suns                                       | Yes            | —               |
+| Mega Man Star Force Legacy Collection                        | Yes            | —               |
 | Metal Gear Solid V: The Phantom Pain                         | Unknown        | —               |
 | Metaphor: ReFantazio                                         | Unknown        | —               |
-| MONOPOLY Madness                                             | Unknown        | —               |
+| MONOPOLY Madness                                             | Yes            | —               |
 | Monopoly: Star Wars™ Heroes vs. Villains                     | Unknown        | —               |
 | MONOPOLY®                                                    | Unknown        | —               |
 | Monster Hunter Stories 3: Twisted Reflection                 | Unknown        | —               |
@@ -104,10 +104,10 @@
 | Puyo Puyo Tetris                                             | Unknown        | —               |
 | Rabbids: Party of Legends                                    | Unknown        | —               |
 | RAIDOU Remastered Mystery of the Soulless Army               | Yes            | —               |
-| Redfall                                                      | Unknown        | —               |
+| Redfall                                                      | Yes            | LINUWUX_WIN32U_FREE_GUARD=1 |
 | Resident Evil 9: Requiem                                     | Unknown        | —               |
 | Shin Megami Tensei III Nocturne HD Remaster                  | Unknown        | —               |
-| Shin Megami Tensei V: Vengeance                              | Yes            | LINUWUX_WIN32_FREE_GUARD=1 |
+| Shin Megami Tensei V: Vengeance                              | Yes            | LINUWUX_WIN32U_FREE_GUARD=1 |
 | SHINOBI: Art of Vengeance                                    | Unknown        | —               |
 | Sid Meier's Civilization® VII                                | Unknown        | —               |
 | Sniper Elite 5                                               | Unknown        | —               |
