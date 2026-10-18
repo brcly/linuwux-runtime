@@ -283,6 +283,75 @@ fn snapshot_lookup(address: u64) -> SnapshotResult {
     result
 }
 
+// ---------------------------------------------------------------------------
+// Swappiness hardening
+//
+// On systems with aggressive swap tuning (high vm.swappiness, compressed
+// in-memory swap tiers such as zram/zswap), pages that execute in short
+// bursts read as idle to the LRU and are evicted eagerly. That is exactly
+// this handler's shape — microseconds per CPUID trap, then silence. Once
+// evicted (worse: into a full compressed device), the next trap faults the
+// handler's code AND state back in before it can run, so per-trap latency
+// stops being bounded and degrades as a session ages — a stutter that
+// builds over tens of minutes of play. The fix is to pin the runtime's own
+// pages (code, rodata, data, bss — which includes the caller cache and the
+// maps snapshot) so the trap path can never be paged out. We deliberately
+// do NOT use mlockall(MCL_FUTURE): the host process is a game that may
+// allocate gigabytes; locking future allocations would pin it wholesale and
+// break the memory model for everything else. On failure we degrade
+// gracefully and keep running unhardened, exactly as before.
+extern "C" fn linuwux_lock_runtime_pages() {
+    let mut locked_bytes = 0u64;
+    let mut failures = 0u32;
+    maps::find_line(|line| {
+        let Some(mapping) = maps::parse(line) else {
+            return false;
+        };
+        if !mapping.path.ends_with(b"LinUwUx.so") {
+            return false;
+        }
+        let start = mapping.start & !0xfff;
+        let end = mapping.end.wrapping_add(0xfff) & !0xfff;
+        if unsafe { libc::mlock(start as *const c_void, (end - start) as usize) } == 0 {
+            locked_bytes += end - start;
+        } else {
+            failures += 1;
+        }
+        false
+    });
+    // Belt and braces: pin the trap-path state explicitly. These live in the
+    // library's bss and are covered by the mapping walk above, but an explicit
+    // lock documents the invariant at the point that matters.
+    let cache_addr = &CALLER_CACHE as *const _ as *const c_void;
+    let snap_addr = &MAPS_SNAPSHOT as *const _ as *const c_void;
+    let page = 0x1000u64;
+    for (addr, size) in [
+        (cache_addr as u64, size_of_val(&CALLER_CACHE) as u64),
+        (snap_addr as u64, size_of_val(&MAPS_SNAPSHOT) as u64),
+    ] {
+        let base = addr & !(page - 1);
+        let end = (addr + size + page - 1) & !(page - 1);
+        unsafe { libc::mlock(base as *const c_void, (end - base) as usize) };
+    }
+    #[cfg(all(
+        feature = "debug",
+        feature = "environment",
+        feature = "hooks",
+        feature = "kuser"
+    ))]
+    unsafe {
+        debug_log_hex(b"runtime pages locked, bytes: \0".as_ptr().cast(), locked_bytes);
+        if failures > 0 {
+            debug_log_hex(b"runtime page lock failures: \0".as_ptr().cast(), u64::from(failures));
+        }
+    }
+    let _ = failures;
+    let _ = locked_bytes;
+}
+
+#[used]
+#[unsafe(link_section = ".init_array.00205")]
+static LOCK_RUNTIME_PAGES: extern "C" fn() = linuwux_lock_runtime_pages;
 
 unsafe extern "C" {
     fn debug_log(message: *const c_char);
