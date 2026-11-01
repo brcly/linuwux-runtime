@@ -24,6 +24,14 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 )))]
 compile_error!("linuwux-runtime requires Linux x86_64 with glibc and 64-bit pointers");
 
+#[cfg(all(
+    feature = "cpuid",
+    feature = "hooks",
+    feature = "reflex",
+    feature = "syscall",
+    feature = "kuser"
+))]
+mod artifact_amd;
 #[cfg(any(feature = "cpuid", feature = "faketime"))]
 mod clock;
 #[cfg(any(feature = "cpuid", feature = "syscall"))]

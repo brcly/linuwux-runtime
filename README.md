@@ -204,6 +204,7 @@ requests.
 | `PROTON_AVX=1` | Enables AVX flags for the resume-target profile |
 | `LINUWUX_SYSCALL_HACK=1` | Clears Wine's `KUSER_SHARED_DATA.SystemCall` flag (direct syscall path). Opt-in per title; not implied by Reflex |
 | `LINUWUX_LEGACY_PROFILE=1` | Selects legacy CPU presentation and selector-dispatch handling while retaining the ResumeTarget registration protocol; it uses the SVM KUSER recipe on AMD and the VMX KUSER recipe on Intel |
+| `LINUWUX_ARTIFACT_AMD_V2=1` | Enables experimental support for the newer AMD Artifact protocol; requires native XCR0=7 (x87/SSE/AVX). Loader adaptations apply only to the recognized image layout; newer Intel protocol support is not included |
 | `LINUWUX_WIN32U_FREE_GUARD=1` | Enables `win32u` duplicate-`free` protection for games that need it; disabled by default |
 | `LINUWUX_DEBUG=1` | Enables runtime diagnostics |
 | `LINUWUX_LOG=/absolute/path.log` | Writes diagnostics to a private `0600` file |

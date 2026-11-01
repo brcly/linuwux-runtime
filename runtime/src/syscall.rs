@@ -21,7 +21,7 @@ mod kuser_dispatch;
 #[cfg(all(feature = "kuser", feature = "reflex"))]
 mod mem;
 #[cfg(all(feature = "kuser", feature = "reflex"))]
-mod pe_export;
+pub(crate) mod pe_export;
 #[cfg(all(feature = "kuser", feature = "environment"))]
 mod pe_stub_layout;
 #[cfg(all(feature = "kuser", feature = "reflex"))]

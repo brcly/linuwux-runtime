@@ -70,7 +70,7 @@ fn base_from_peb(peb: u64, name: &[u8]) -> Option<u64> {
 /// Base address of the module named `name` (ASCII, e.g. `b"ntdll.dll"`) as
 /// loaded into this process's own PEB loader list, or `None` if it is not
 /// loaded or the PEB cannot be walked.
-pub(super) fn module_base(name: &[u8]) -> Option<u64> {
+pub(crate) fn module_base(name: &[u8]) -> Option<u64> {
     let mut gs_base = 0u64;
     // SAFETY: ARCH_GET_GS writes one u64 to our own stack; a failed syscall
     // is handled by returning None.
@@ -81,11 +81,9 @@ pub(super) fn module_base(name: &[u8]) -> Option<u64> {
     base_from_peb(peb, name)
 }
 
-/// Syscall service number embedded in the named export of the PE image at
-/// `base` (`mov r10, rcx; mov eax, imm32`, which every real syscall stub
-/// opens with), found by walking the export table rather than assuming a
-/// fixed ordinal or RVA.
-pub(super) fn export_service(base: u64, export_name: &[u8]) -> Option<u32> {
+/// Address of a named, non-forwarded export in a loaded 64-bit PE image.
+/// Forwarders are strings rather than callable code and are rejected.
+pub(crate) fn export_address(base: u64, export_name: &[u8]) -> Option<u64> {
     let mut dos = [0u8; 0x40];
     if !read_memory(base, &mut dos) || dos[..2] != *b"MZ" {
         return None;
@@ -105,6 +103,7 @@ pub(super) fn export_service(base: u64, export_name: &[u8]) -> Option<u32> {
     }
     let image_size = offset(optional, 56).and_then(read_u32)?;
     let export_rva = offset(optional, 112).and_then(read_u32)?;
+    let export_size = offset(optional, 116).and_then(read_u32)?;
     let export = rva(base, image_size, export_rva)?;
     let function_count = offset(export, 0x14).and_then(read_u32)?;
     let name_count = offset(export, 0x18).and_then(read_u32)?;
@@ -148,21 +147,32 @@ pub(super) fn export_service(base: u64, export_name: &[u8]) -> Option<u32> {
                     functions.checked_add(ordinal.checked_mul(4)?)?,
                 )?;
                 let function_rva = read_u32(function_slot)?;
-                let function = rva(base, image_size, function_rva)?;
-                let mut head = [0u8; 8];
-                if !read_memory(function, &mut head) || head[..4] != [0x4c, 0x8b, 0xd1, 0xb8] {
+                if function_rva == 0
+                    || function_rva >= export_rva && function_rva - export_rva < export_size
+                {
                     return None;
                 }
-                return Some(u32::from_le_bytes(head[4..8].try_into().ok()?));
+                let function = rva(base, image_size, function_rva)?;
+                return Some(function);
             }
         }
     }
     None
 }
 
+/// Service number from `mov r10,rcx; mov eax,imm32` at the named export.
+pub(super) fn export_service(base: u64, export_name: &[u8]) -> Option<u32> {
+    let function = export_address(base, export_name)?;
+    let mut head = [0u8; 8];
+    if !read_memory(function, &mut head) || head[..4] != [0x4c, 0x8b, 0xd1, 0xb8] {
+        return None;
+    }
+    Some(u32::from_le_bytes(head[4..8].try_into().ok()?))
+}
+
 #[cfg(all(test, not(miri)))]
 mod tests {
-    use super::{base_from_peb, export_service};
+    use super::{base_from_peb, export_address, export_service};
 
     // `base_from_peb` reads through `read_u16`/`read_u64` (`super::mem`),
     // which call `process_vm_readv` — not in Miri's foreign-function shim
@@ -216,6 +226,21 @@ mod tests {
         );
         assert_eq!(
             export_service(image.as_ptr() as u64, b"NtQueryVirtualMemory"),
+            None
+        );
+        image[0x400] = 0xc3;
+        assert_eq!(
+            export_service(image.as_ptr() as u64, b"NtUserBuildHwndList"),
+            None
+        );
+        assert_eq!(
+            export_address(image.as_ptr() as u64, b"NtUserBuildHwndList"),
+            Some(image.as_ptr() as u64 + 0x400)
+        );
+        image[0x10c..0x110].copy_from_slice(&0x100u32.to_le_bytes());
+        image[0x300..0x304].copy_from_slice(&0x280u32.to_le_bytes());
+        assert_eq!(
+            export_address(image.as_ptr() as u64, b"NtUserBuildHwndList"),
             None
         );
     }

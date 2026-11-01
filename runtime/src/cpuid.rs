@@ -26,6 +26,16 @@ const REFLEX_CPUID_CONSUMED: c_int = 1;
 static ACTIVE_IDENTITY: ActiveCpuIdentity = ActiveCpuIdentity::new();
 static REFLEX64_PRESENTATION_SELECTED: AtomicBool = AtomicBool::new(false);
 static ARTIFACT_PROFILE_SELECTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(feature = "reflex", feature = "syscall", feature = "kuser"))]
+static ARTIFACT_AMD_SESSION: linuwux::artifact::AmdSession = linuwux::artifact::AmdSession::new();
+
+#[cfg(all(feature = "reflex", feature = "syscall", feature = "kuser"))]
+pub(crate) fn artifact_amd_v2_active() -> bool {
+    crate::config::artifact_amd_v2_enabled()
+        && ACTIVE_IDENTITY.load().vendor() == Vendor::Amd
+        && ARTIFACT_PROFILE_SELECTED.load(Ordering::Acquire)
+}
 /// Set once Reflex's registration leaf (`0x336933`, the same handshake the
 /// pre-Rust runtime called "arm") has fired at least once, for either the
 /// legacy or modern protocol — both set the resume handler from this leaf,
@@ -595,7 +605,7 @@ fn trace_forwarded_game_fault(info: *const siginfo_t, gregs: *const greg_t) {
 }
 
 fn leaf_varies_per_core(leaf: u32) -> bool {
-    leaf == 0xb || leaf == 0x1f
+    matches!(leaf, 1 | 0xb | 0x1f | 0x8000_001e)
 }
 
 fn native_reply(leaf: u32, subleaf: u32) -> Registers {
@@ -706,6 +716,39 @@ pub unsafe extern "C" fn cpuid_sigsegv_handler(
         )
     };
     #[cfg(all(feature = "syscall", feature = "kuser", feature = "reflex"))]
+    if (!is_wine_system_rip(rip as u64) || ARTIFACT_AMD_SESSION.pid() != 0)
+        && crate::config::artifact_amd_v2_enabled()
+        && ACTIVE_IDENTITY.load().vendor() == Vendor::Amd
+    {
+        // Discover Artifact using the existing image boundary. Once its PID
+        // is registered, SimpleSvm applies to all user-mode callers in that
+        // process, including calls from Wine's Windows system DLLs.
+        // Further caller classification cannot change this process-wide
+        // profile. Avoid a discarded legacy reply and /proc/self/maps scan
+        // on each new protected-code call site after selection.
+        if !artifact_amd_v2_active() {
+            let _ = fixed_reply(leaf, Some(rip as u64));
+        }
+        if artifact_amd_v2_active() {
+            #[cfg(all(
+                feature = "cpuid",
+                feature = "hooks",
+                feature = "reflex",
+                feature = "syscall",
+                feature = "kuser"
+            ))]
+            crate::artifact_amd::before_cpuid(leaf);
+            let reply = unsafe { artifact_amd_v2_cpuid(leaf, control, payload, gregs) };
+            if let Some(reply) = reply {
+                unsafe { write_cpuid_reply(gregs, rip, reply) };
+            } else {
+                // The ready path updates only RAX, exactly as SimpleSvm does.
+                unsafe { gregs.add(libc::REG_RIP as usize).write(rip.wrapping_add(2)) };
+            }
+            return;
+        }
+    }
+    #[cfg(all(feature = "syscall", feature = "kuser", feature = "reflex"))]
     if leaf == 0x0033_6933 {
         crate::syscall::register_reflex_dispatch_handler(control);
         PROTOCOL_ESTABLISHED.store(true, Ordering::Release);
@@ -725,6 +768,10 @@ pub unsafe extern "C" fn cpuid_sigsegv_handler(
         }
     };
 
+    unsafe { write_cpuid_reply(gregs, rip, reply) };
+}
+
+unsafe fn write_cpuid_reply(gregs: *mut greg_t, rip: greg_t, reply: Registers) {
     unsafe {
         gregs
             .add(libc::REG_RAX as usize)
@@ -740,6 +787,57 @@ pub unsafe extern "C" fn cpuid_sigsegv_handler(
             .write(i64::from(reply.edx));
         gregs.add(libc::REG_RIP as usize).write(rip.wrapping_add(2));
     }
+}
+
+#[cfg(all(feature = "syscall", feature = "kuser", feature = "reflex"))]
+unsafe fn artifact_amd_v2_cpuid(
+    leaf: u32,
+    control: u64,
+    payload: u64,
+    gregs: *mut greg_t,
+) -> Option<Registers> {
+    use linuwux::artifact::{KUSER_READY, REGISTER_HANDLER, REGISTER_PROCESS};
+    match leaf {
+        REGISTER_PROCESS => {
+            ARTIFACT_AMD_SESSION.register(payload);
+            unsafe { debug_log(c"experimental AMD Artifact process registered".as_ptr()) };
+            // A repeated registration after the handler exists must also
+            // retain Reflex's process identity for direct-syscall routing.
+            if PROTOCOL_ESTABLISHED.load(Ordering::Acquire) {
+                unsafe { reflex_handle_cpuid(leaf, control, ARTIFACT_AMD_SESSION.pid()) };
+            }
+        }
+        REGISTER_HANDLER => {
+            crate::syscall::register_reflex_dispatch_handler(control);
+            unsafe { reflex_handle_cpuid(leaf, control, payload) };
+            PROTOCOL_ESTABLISHED.store(true, Ordering::Release);
+            let pid = ARTIFACT_AMD_SESSION.pid();
+            if pid != 0 {
+                unsafe { reflex_handle_cpuid(REGISTER_PROCESS, 0, pid) };
+            }
+        }
+        KUSER_READY
+            if ARTIFACT_AMD_SESSION.take_ready(|| unsafe {
+                crate::kuser::patch_kuser_shared_data_recipe(Recipe::ArtifactAmd as c_int) == 0
+            }) =>
+        {
+            unsafe {
+                gregs.add(libc::REG_RAX as usize).write(1);
+                debug_log(c"experimental AMD Artifact KUSER ready acknowledged".as_ptr());
+            }
+            return None;
+        }
+        _ => {}
+    }
+    if ARTIFACT_AMD_SESSION.pid() != 0
+        && let Some(mut reply) = linuwux::artifact::amd_reply(leaf, control as u32)
+    {
+        if leaf == 1 {
+            reply = with_native_apic_id(reply, native_reply(1, 0).ebx);
+        }
+        return Some(reply);
+    }
+    Some(native_reply(leaf, control as u32))
 }
 
 #[cfg(test)]

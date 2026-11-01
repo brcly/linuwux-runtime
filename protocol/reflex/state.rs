@@ -401,6 +401,7 @@ impl State {
                     KuserRecipe::Dispatch => c"reflex KUSER recipe=dispatch",
                     KuserRecipe::Selector => c"reflex KUSER recipe=selector",
                     KuserRecipe::Resume => c"reflex KUSER recipe=resume",
+                    KuserRecipe::ArtifactAmd => c"reflex KUSER recipe=artifact-amd",
                 });
                 if !host.patch_kuser(recipe) {
                     host.log(c"reflex KUSER patch failed");

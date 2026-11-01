@@ -39,6 +39,12 @@ impl Host for RuntimeHost {
         }
     }
     fn patch_kuser(&self, recipe: KuserRecipe) -> bool {
+        #[cfg(all(feature = "cpuid", feature = "syscall", feature = "kuser"))]
+        let recipe = if recipe == KuserRecipe::Resume && crate::cpuid::artifact_amd_v2_active() {
+            KuserRecipe::ArtifactAmd
+        } else {
+            recipe
+        };
         unsafe { patch_kuser_shared_data_recipe(recipe as c_int) == 0 }
     }
     fn set_hwprofile_guid(&self) {
