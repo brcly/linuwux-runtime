@@ -1,6 +1,6 @@
 //! Wine loader adaptations for the recognized AMD Artifact image.
 //! Enabled only with LINUWUX_ARTIFACT_AMD_V2=1; unknown layouts are untouched.
-use crate::procmem::{read_memory, read_u32, read_u64, write_u32, write_u64};
+use crate::procmem::{read_memory, read_u16, read_u32, read_u64, write_u32, write_u64};
 use core::ffi::{CStr, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -8,8 +8,11 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static STARTED: AtomicBool = AtomicBool::new(false);
 static PREPARING: AtomicBool = AtomicBool::new(false);
 static BASE: AtomicU64 = AtomicU64::new(0);
-static PEB: AtomicU64 = AtomicU64::new(0);
+static TEB: AtomicU64 = AtomicU64::new(0);
+static ORIGINAL_PEB: AtomicU64 = AtomicU64::new(0);
 static ORIGINAL_LDR: AtomicU64 = AtomicU64::new(0);
+static GETPROC: AtomicU64 = AtomicU64::new(0);
+static REPAIRED_LDR: AtomicU64 = AtomicU64::new(0);
 const XGETBV_HELPER: [u8; 13] = [
     0x31, 0xc9, 0x0f, 0x01, 0xd0, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xd0, 0xc3,
 ];
@@ -18,6 +21,12 @@ fn log(message: &'static CStr) {
         fn debug_log(message: *const core::ffi::c_char);
     }
     unsafe { debug_log(message.as_ptr()) };
+}
+fn log_hex(prefix: &'static CStr, value: u64) {
+    unsafe extern "C" {
+        fn debug_log_hex(prefix: *const core::ffi::c_char, value: u64);
+    }
+    unsafe { debug_log_hex(prefix.as_ptr(), value) };
 }
 
 fn matches(address: u64, expected: &[u8]) -> bool {
@@ -50,11 +59,18 @@ pub(crate) fn start() {
 }
 
 extern "C" fn repair_worker(_: *mut c_void) -> *mut c_void {
+    let mut getproc_repaired = false;
     for _ in 0..15_000 {
         let base = BASE.load(Ordering::Acquire);
-        if base != 0 && repair_getproc(base) {
-            log(c"AMD Artifact: cached GetProcAddress now uses original trampoline");
-            break;
+        if base != 0 {
+            if !getproc_repaired && repair_getproc(base) {
+                log(c"AMD Artifact: cached GetProcAddress now uses original trampoline");
+                getproc_repaired = true;
+            }
+            repair_loader_lists();
+            if getproc_repaired && REPAIRED_LDR.load(Ordering::Acquire) != 0 {
+                break;
+            }
         }
         let delay = libc::timespec {
             tv_sec: 0,
@@ -66,28 +82,148 @@ extern "C" fn repair_worker(_: *mut c_void) -> *mut c_void {
 }
 
 fn repair_getproc(base: u64) -> bool {
-    let Some(getproc) = read_u64(base + 0x42138) else {
-        return false;
-    };
-    let mut jump = [0; 5];
-    if !read_memory(getproc, &mut jump) || jump[0] != 0xe9 {
+    let expected = GETPROC.load(Ordering::Acquire);
+    if expected == 0 {
         return false;
     }
-    let relay = getproc
-        .wrapping_add(5)
-        .wrapping_add_signed(i32::from_le_bytes(jump[1..].try_into().unwrap()) as i64);
-    let Some(trampoline) = relay.checked_sub(19) else {
+    let Some((sections, count, image_size)) = pe_layout(base) else {
         return false;
     };
-    if !matches(relay, &[0xff, 0x25, 0, 0, 0, 0])
-        || read_u64(relay + 6) != Some(base + 0x11d58)
-        || !matches(trampoline, &[0x48, 0x55, 0x48, 0x89, 0xe5])
+    let image_end = base.saturating_add(u64::from(image_size));
+    // The cached GetProcAddress pointer lives in a writable data section. Its
+    // offset moved between Artifact builds, so locate it by validating the
+    // hook chain instead of hardcoding an RVA.
+    for index in 0..count {
+        let Some(header) = sections.checked_add(u64::from(index) * 40) else {
+            continue;
+        };
+        let Some(vsize) = read_u32(header + 8) else {
+            continue;
+        };
+        let Some(va) = read_u32(header + 12) else {
+            continue;
+        };
+        let Some(characteristics) = read_u32(header + 36) else {
+            continue;
+        };
+        if characteristics & 0x8000_0000 == 0 || characteristics & 0x2000_0000 != 0 {
+            continue;
+        }
+        let start = base + u64::from(va);
+        let end = start.saturating_add(u64::from(vsize));
+        let mut slot = start;
+        while slot + 8 <= end {
+            if let Some(getproc) = read_u64(slot) {
+                if getproc != expected {
+                    slot += 8;
+                    continue;
+                }
+                // The cache points at the patched system GetProcAddress, which
+                // lives outside the artifact image; only the detour target has
+                // to be inside it.
+                if let Some(trampoline) = validate_getproc(base, getproc, image_end) {
+                    if write_u64(slot, trampoline) {
+                        log_hex(c"AMD Artifact repaired cache RVA=", slot - base);
+                        return true;
+                    }
+                }
+            }
+            slot += 8;
+        }
+    }
+    false
+}
+
+fn validate_getproc(base: u64, getproc: u64, image_end: u64) -> Option<u64> {
+    let mut jump = [0; 5];
+    if !read_memory(getproc, &mut jump) || jump[0] != 0xe9 {
+        return None;
+    }
+    let relay = getproc
+        .checked_add(5)?
+        .checked_add_signed(i32::from_le_bytes(jump[1..].try_into().unwrap()) as i64)?;
+    let trampoline = relay.checked_sub(19)?;
+    if !matches(relay, &[0xff, 0x25, 0, 0, 0, 0]) {
+        return None;
+    }
+    let target = read_u64(relay + 6)?;
+    if target < base || target >= image_end {
+        return None;
+    }
+    // The relay must point at Artifact's obfuscated GetProcAddress hook. A
+    // generic in-image target is unsafe: the new DLL contains other detours
+    // with the same relay shape, and selecting one leaves Wine's loader lock
+    // held during startup.
+    log_hex(c"AMD Artifact target=", target - base);
+    if !matches(trampoline, &[0x48, 0x55, 0x48, 0x89, 0xe5])
         || !matches(trampoline + 5, &[0xff, 0x25, 0, 0, 0, 0])
         || read_u64(trampoline + 11) != Some(getproc + 5)
     {
-        return false;
+        return None;
     }
-    write_u64(base + 0x42138, trampoline)
+    Some(trampoline)
+}
+
+/// Returns the section table address, section count, and SizeOfImage.
+fn pe_layout(base: u64) -> Option<(u64, u16, u32)> {
+    let pe = u64::from(read_u32(base + 0x3c)?);
+    if pe > 0x1000 || !matches(base + pe, b"PE\0\0") {
+        return None;
+    }
+    let sections = read_u16(base + pe + 6)?;
+    let optional_size = u64::from(read_u16(base + pe + 20)?);
+    let table = base
+        .checked_add(pe)?
+        .checked_add(0x18)?
+        .checked_add(optional_size)?;
+    let image_size = read_u32(base + pe + 0x50)?;
+    Some((table, sections, image_size))
+}
+
+/// Range of the first executable `.text` section.
+fn text_range(base: u64) -> Option<(u64, u64)> {
+    let (sections, count, _) = pe_layout(base)?;
+    for index in 0..count {
+        let header = sections.checked_add(u64::from(index) * 40)?;
+        let mut name = [0; 8];
+        if !read_memory(header, &mut name) {
+            continue;
+        }
+        let vsize = read_u32(header + 8)?;
+        let va = read_u32(header + 12)?;
+        let raw_size = read_u32(header + 16)?;
+        let characteristics = read_u32(header + 36)?;
+        if &name[..5] == b".text" && characteristics & 0x2000_0000 != 0 {
+            let start = base + u64::from(va);
+            return Some((start, start + u64::from(vsize.max(raw_size))));
+        }
+    }
+    None
+}
+
+fn find_pattern(start: u64, end: u64, pattern: &[u8]) -> Option<u64> {
+    if pattern.is_empty() || end <= start {
+        return None;
+    }
+    let mut buffer = [0; 4096];
+    let mut address = start;
+    while address < end {
+        let length = core::cmp::min(buffer.len() as u64, end - address) as usize;
+        if !read_memory(address, &mut buffer[..length]) {
+            return None;
+        }
+        if let Some(position) = buffer[..length]
+            .windows(pattern.len())
+            .position(|window| window == pattern)
+        {
+            return address.checked_add(position as u64);
+        }
+        if length < pattern.len() {
+            break;
+        }
+        address = address.checked_add((length - pattern.len() + 1) as u64)?;
+    }
+    None
 }
 
 pub(crate) fn before_cpuid(leaf: u32) {
@@ -97,7 +233,14 @@ pub(crate) fn before_cpuid(leaf: u32) {
     if BASE.load(Ordering::Acquire) == 0 {
         prepare();
     }
-    if leaf == linuwux::artifact::REGISTER_PROCESS && BASE.load(Ordering::Acquire) != 0 {
+    if matches!(
+        leaf,
+        linuwux::artifact::REGISTER_PROCESS
+            | linuwux::artifact::REGISTER_HANDLER
+            | linuwux::artifact::KUSER_READY
+    ) && BASE.load(Ordering::Acquire) != 0
+    {
+        log_hex(c"AMD Artifact loader check leaf=", u64::from(leaf));
         repair_loader_lists();
     }
 }
@@ -127,18 +270,19 @@ fn prepare() {
             false
         }
     });
-    if base == 0 || read_u32(base + 0x3c).is_none() {
+    if base == 0 {
         return;
     }
-    let pe = u64::from(read_u32(base + 0x3c).unwrap());
-    if pe > 0x1000
-        || !matches(base + pe, b"PE\0\0")
-        || read_u32(base + pe + 0x50) != Some(0x11e000)
-        || !matches(base + 0x14090, &XGETBV_HELPER)
-        || !matches(
-            base + 0x13123,
+    let Some((text_start, text_end)) = text_range(base) else {
+        return;
+    };
+    if find_pattern(text_start, text_end, &XGETBV_HELPER).is_none()
+        || find_pattern(
+            text_start,
+            text_end,
             &[0x50, 0x66, 0x31, 0xc9, 0x66, 0xba, 0x82, 0],
         )
+        .is_none()
     {
         return;
     }
@@ -172,8 +316,17 @@ fn prepare() {
         log(c"AMD Artifact: unable to materialize native process heaps");
         return;
     }
-    PEB.store(peb, Ordering::Relaxed);
+    TEB.store(gs, Ordering::Relaxed);
+    ORIGINAL_PEB.store(peb, Ordering::Relaxed);
     ORIGINAL_LDR.store(ldr, Ordering::Relaxed);
+    let Some(kernel32) = crate::syscall::pe_export::module_base(b"kernel32.dll") else {
+        return;
+    };
+    let Some(getproc) = crate::syscall::pe_export::export_address(kernel32, b"GetProcAddress")
+    else {
+        return;
+    };
+    GETPROC.store(getproc, Ordering::Release);
     BASE.store(base, Ordering::Release);
     log(c"AMD Artifact loader preparation ready");
 }
@@ -271,37 +424,65 @@ fn loader_head_repairs(
     Some(writes)
 }
 
-fn repair_loader_lists() {
-    let peb = PEB.load(Ordering::Relaxed);
+pub(crate) fn repair_loader_lists() {
+    let teb = TEB.load(Ordering::Relaxed);
+    if teb == 0 || !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(peb) = read_u64(teb + 0x60) else {
+        return;
+    };
     let old = ORIGINAL_LDR.load(Ordering::Relaxed);
     let Some(new) = read_u64(peb + 0x18) else {
         return;
     };
-    if new == old {
+    if new == old || REPAIRED_LDR.load(Ordering::Acquire) == new {
+        return;
+    }
+    if read_u32(new) != Some(0x58) {
+        log_hex(
+            c"AMD Artifact ldr header=",
+            u64::from(read_u32(new).unwrap_or(0)),
+        );
+        log(c"AMD Artifact: cloned loader header validation failed");
         return;
     }
     // Restoring PEB->Ldr to Wine's original ntdll data creates a different
     // module identity from Artifact's GetModuleHandleA shadow. Phantom Blade Zero derives
     // the containing PE base from this field and XORs the two identities.
     // Keep Artifact's location, repairing only the copied-head mismatch.
-    if read_u32(new) != Some(0x58) {
-        log(c"AMD Artifact: cloned loader header validation failed");
-        return;
-    }
     let Some(writes) = loader_head_repairs(old, new, read_u64) else {
         log(c"AMD Artifact: loader-list validation failed; leaving it untouched");
         return;
     };
+    // The new build clones the whole PEB and moves the handshake thread's TEB
+    // onto it, while other threads keep the original PEB. Its copied list
+    // heads still reference Wine's real nodes, whose links return to the
+    // original sentinel, so neither header can be traversed to completion.
+    // Emulate the older build: make the clone Ldr the process-wide loader
+    // data and close the shared nodes over its sentinel. The nodes stay real,
+    // so Wine's CONTAINING_RECORD lookups remain valid. Pointing only the
+    // clone at Wine's data instead hides the loader identity Artifact checks.
+    let original_peb = ORIGINAL_PEB.load(Ordering::Relaxed);
+    let repoint = peb != original_peb;
+    if repoint && (original_peb == 0 || !write_u64(original_peb + 0x18, new)) {
+        log(c"AMD Artifact: original PEB loader pointer repair failed");
+        return;
+    }
     for (index, &(address, before, after)) in writes.iter().enumerate() {
         if read_u64(address) != Some(before) || !write_u64(address, after) {
             for &(address, before, _) in writes[..index].iter().rev() {
                 write_u64(address, before);
+            }
+            if repoint {
+                write_u64(original_peb + 0x18, old);
             }
             log(c"AMD Artifact: loader-list repair failed; prior writes rolled back");
             return;
         }
     }
     log(c"AMD Artifact: live loader lists reanchored to Artifact cloned heads");
+    REPAIRED_LDR.store(new, Ordering::Release);
     repair_shadow_thread_notifications(new);
 }
 
