@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![no_std]
 
+pub mod artifact;
 pub mod cpuid;
 pub mod debug;
 pub mod environment;

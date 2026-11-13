@@ -99,8 +99,30 @@ struct Route {
     rax_is_resume: bool,
 }
 
-fn is_bypass(xmm5: &[u8; 16]) -> bool {
-    u64::from_le_bytes(xmm5[..8].try_into().unwrap()) == SYSCALL_BYPASS_MAGIC
+fn artifact_amd_v2_active() -> bool {
+    #[cfg(all(feature = "cpuid", feature = "kuser", feature = "reflex"))]
+    {
+        crate::cpuid::artifact_amd_v2_active()
+    }
+    #[cfg(not(all(feature = "cpuid", feature = "kuser", feature = "reflex")))]
+    {
+        false
+    }
+}
+
+fn is_bypass(xmm5: &[u8; 16], artifact_amd_v2: bool) -> bool {
+    let marker = u64::from_le_bytes(xmm5[..8].try_into().unwrap());
+    if artifact_amd_v2 {
+        return marker == linuwux::artifact::SYSCALL_BYPASS_MAGIC;
+    }
+    marker == SYSCALL_BYPASS_MAGIC
+}
+
+fn syscall_xmm4(selector: u32, previous: [u8; 16], artifact_amd_v2: bool) -> [u8; 16] {
+    // SimpleSvm executes MOVD XMM4,EAX on both the route and bypass hops.
+    let mut value = if artifact_amd_v2 { [0; 16] } else { previous };
+    value[..4].copy_from_slice(&selector.to_le_bytes());
+    value
 }
 
 #[unsafe(no_mangle)]
@@ -139,6 +161,7 @@ unsafe fn redirect(
     }
     let xmm = unsafe { ptr::addr_of_mut!((*fpregs)._xmm).cast::<[u8; 16]>() };
     let xmm5 = unsafe { xmm.add(5).read() };
+    let artifact_amd_v2 = artifact_amd_v2_active();
     let gregs = unsafe { ptr::addr_of_mut!((*context).uc_mcontext.gregs).cast::<libc::greg_t>() };
     let rip = unsafe { gregs.add(libc::REG_RIP as usize).read() as u64 };
     // Every branch below needs the current thread id at least once, and some
@@ -189,6 +212,11 @@ unsafe fn redirect(
         unsafe {
             xmm.add(4).write(saved.xmm4);
             xmm.add(5).write(saved.xmm5);
+            if artifact_amd_v2 {
+                let selector = gregs.add(libc::REG_RAX as usize).read() as u32;
+                xmm.add(4).write(syscall_xmm4(selector, saved.xmm4, true));
+                xmm.add(5).write([0; 16]);
+            }
             gregs
                 .add(libc::REG_R11 as usize)
                 .write(saved.r11 as libc::greg_t);
@@ -202,7 +230,7 @@ unsafe fn redirect(
         );
         return false;
     }
-    if is_bypass(&xmm5) {
+    if is_bypass(&xmm5, artifact_amd_v2) {
         #[cfg(all(feature = "debug", feature = "kuser", feature = "reflex"))]
         trace_window_list(c"window list Reflex bypass", gregs);
         #[cfg(feature = "debug")]
@@ -216,6 +244,11 @@ unsafe fn redirect(
                     rip,
                 );
             }
+        }
+        if artifact_amd_v2 {
+            let selector = unsafe { gregs.add(libc::REG_RAX as usize).read() as u32 };
+            let value = syscall_xmm4(selector, [0; 16], true);
+            unsafe { xmm.add(4).write(value) };
         }
         unsafe { xmm.add(5).write([0; 16]) };
         #[cfg(all(feature = "kuser", feature = "reflex"))]
@@ -308,9 +341,8 @@ unsafe fn redirect(
         gregs.add(libc::REG_EFL as usize).write(r11);
 
         let selector = gregs.add(libc::REG_RAX as usize).read() as u32;
-        let mut xmm4 = xmm.add(4).read();
-        xmm4[..4].copy_from_slice(&selector.to_le_bytes());
-        xmm.add(4).write(xmm4);
+        xmm.add(4)
+            .write(syscall_xmm4(selector, xmm.add(4).read(), artifact_amd_v2));
         let rcx = gregs.add(libc::REG_RCX as usize).read() as u64;
         let rax = if selected_route.rax_is_resume {
             syscall_resume(rip, rcx)
@@ -334,5 +366,33 @@ unsafe fn syscall_resume(rip: u64, rcx: u64) -> u64 {
         rip.wrapping_add(2)
     } else {
         rcx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_bypass, syscall_xmm4};
+
+    #[test]
+    fn amd_selectors_using_the_old_marker_still_reach_artifact() {
+        let mut old = [0x55; 16];
+        old[..8].copy_from_slice(&linuwux::reflex::SYSCALL_BYPASS_MAGIC.to_le_bytes());
+        let mut new = [0x55; 16];
+        new[..8].copy_from_slice(&linuwux::artifact::SYSCALL_BYPASS_MAGIC.to_le_bytes());
+        assert!(is_bypass(&old, false));
+        assert!(!is_bypass(&old, true));
+        assert!(is_bypass(&new, true));
+        assert!(!is_bypass(&new, false));
+    }
+
+    #[test]
+    fn amd_route_and_replay_use_the_current_service_and_clear_upper_xmm4() {
+        let routed = syscall_xmm4(0x3333, [0xaa; 16], true);
+        assert_eq!(&routed[..4], &0x3333u32.to_le_bytes());
+        assert_eq!(&routed[4..], &[0; 12]);
+        let replayed = syscall_xmm4(0x36, routed, true);
+        assert_eq!(&replayed[..4], &0x36u32.to_le_bytes());
+        assert_eq!(&replayed[4..], &[0; 12]);
+        assert_eq!(&syscall_xmm4(0x3333, [0xaa; 16], false)[4..], &[0xaa; 12]);
     }
 }

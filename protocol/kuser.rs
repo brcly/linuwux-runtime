@@ -19,6 +19,7 @@ pub enum Recipe {
     Resume = 0,
     Selector = 1,
     Dispatch = 2,
+    ArtifactAmd = 3,
 }
 
 impl Recipe {
@@ -27,6 +28,7 @@ impl Recipe {
             0 => Some(Self::Resume),
             1 => Some(Self::Selector),
             2 => Some(Self::Dispatch),
+            3 => Some(Self::ArtifactAmd),
             _ => None,
         }
     }
@@ -35,7 +37,7 @@ impl Recipe {
         let ops: &[(usize, usize, u64)] = match self {
             Self::Dispatch => DISPATCH_OPS,
             Self::Selector => SELECTOR_OPS,
-            Self::Resume => {
+            Self::Resume | Self::ArtifactAmd => {
                 for (index, byte) in b"C:\\Windows\0".iter().copied().enumerate() {
                     write(0x30 + index * 2, byte);
                     write(0x31 + index * 2, 0);
@@ -47,8 +49,32 @@ impl Recipe {
             }
         };
         for &(offset, size, value) in ops {
+            // The newer AMD source does not write the old completion marker
+            // or clear these extended-feature fields.
+            if self == Self::ArtifactAmd
+                && matches!(
+                    offset,
+                    0x3d8 | 0x3e0 | 0x3ec | 0x5f0 | 0x5f8 | 0x808 | 0x810 | 0xffc
+                )
+            {
+                continue;
+            }
             for (index, byte) in value.to_le_bytes()[..size].iter().copied().enumerate() {
                 write(offset + index, byte);
+            }
+        }
+        if self == Self::ArtifactAmd {
+            write(0x295, 1);
+            // VBS.cmd's Windows prerequisite removes all XCR0 components
+            // above AVX. Present that OS state instead of Wine's host AVX-512
+            // mask; the SimpleSvm source assumes this prerequisite is met.
+            for (offset, value) in [(0x3d8, 7u64), (0x3e0, 7u64)] {
+                for (index, byte) in value.to_le_bytes().into_iter().enumerate() {
+                    write(offset + index, byte);
+                }
+            }
+            for (index, byte) in 0x340u32.to_le_bytes().into_iter().enumerate() {
+                write(0x3e8 + index, byte);
             }
         }
         if self == Self::Resume {
@@ -161,6 +187,9 @@ const PATCH_DISPATCH_FAILED: u32 = 6;
 const PATCH_SELECTOR_APPLYING: u32 = 7;
 const PATCH_SELECTOR_READY: u32 = 8;
 const PATCH_SELECTOR_FAILED: u32 = 9;
+const PATCH_ARTIFACT_APPLYING: u32 = 10;
+const PATCH_ARTIFACT_READY: u32 = 11;
+const PATCH_ARTIFACT_FAILED: u32 = 12;
 const PATCH_WAIT_LIMIT: u32 = 4096;
 
 #[derive(Debug, Default)]
@@ -178,6 +207,7 @@ impl PatchState {
                 PATCH_RESUME_APPLYING => Some(PATCH_RESUME_FAILED),
                 PATCH_DISPATCH_APPLYING => Some(PATCH_DISPATCH_FAILED),
                 PATCH_SELECTOR_APPLYING => Some(PATCH_SELECTOR_FAILED),
+                PATCH_ARTIFACT_APPLYING => Some(PATCH_ARTIFACT_FAILED),
                 _ => None,
             });
     }
@@ -204,6 +234,11 @@ impl PatchState {
                 PATCH_SELECTOR_READY,
                 PATCH_SELECTOR_FAILED,
             ),
+            Recipe::ArtifactAmd => (
+                PATCH_ARTIFACT_APPLYING,
+                PATCH_ARTIFACT_READY,
+                PATCH_ARTIFACT_FAILED,
+            ),
         };
         let mut completion_state = failed_state;
         let mut waits = 0;
@@ -212,8 +247,10 @@ impl PatchState {
             if current == ready_state {
                 return Ok(());
             }
-            let another_recipe_apply =
-                matches!(current, PATCH_DISPATCH_APPLYING | PATCH_SELECTOR_APPLYING);
+            let another_recipe_apply = matches!(
+                current,
+                PATCH_DISPATCH_APPLYING | PATCH_SELECTOR_APPLYING | PATCH_ARTIFACT_APPLYING
+            );
             if another_recipe_apply && current != applying_state {
                 if waits == PATCH_WAIT_LIMIT {
                     return Err(PatchError::Conflict);
@@ -274,5 +311,61 @@ impl PatchState {
         } else {
             Err(PatchError::ApplyFailed)
         }
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+
+    #[test]
+    fn amd_artifact_keeps_avx_and_rdpid_without_the_old_marker() {
+        let mut page = [0xa5; PAGE_SIZE];
+        Recipe::ArtifactAmd.visit_writes(false, |offset, value| page[offset] = value);
+        assert_eq!(page[0x285], 1);
+        assert_eq!(page[0x295], 1);
+        assert_eq!(page[0x29b], 1);
+        assert_eq!(page[0x29c], 1);
+        assert_eq!(&page[0xffc..], &[0xa5; 4]);
+        assert_eq!(&page[0x3f0..0x5f0], &[0xa5; 0x200]);
+        assert_eq!(
+            u64::from_le_bytes(page[0x3d8..0x3e0].try_into().unwrap()),
+            7
+        );
+        assert_eq!(
+            u64::from_le_bytes(page[0x3e0..0x3e8].try_into().unwrap()),
+            7
+        );
+        assert_eq!(
+            u32::from_le_bytes(page[0x3e8..0x3ec].try_into().unwrap()),
+            0x340
+        );
+    }
+
+    #[test]
+    fn older_ready_page_is_not_mistaken_for_the_artifact_recipe() {
+        let state = PatchState::new();
+        assert_eq!(state.patch(Recipe::Resume, || true, || {}), Ok(()));
+        let mut applied = false;
+        assert_eq!(
+            state.patch(
+                Recipe::ArtifactAmd,
+                || {
+                    applied = true;
+                    true
+                },
+                || {}
+            ),
+            Ok(())
+        );
+        assert!(applied);
+        assert_eq!(
+            state.patch(
+                Recipe::Resume,
+                || panic!("must reject incompatible recipe"),
+                || {}
+            ),
+            Err(PatchError::Conflict)
+        );
     }
 }

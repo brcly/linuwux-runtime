@@ -12,6 +12,24 @@ use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "cpuid")]
 static LEGACY_PROFILE: AtomicBool = AtomicBool::new(false);
 
+#[cfg(all(
+    feature = "cpuid",
+    feature = "reflex",
+    feature = "syscall",
+    feature = "kuser"
+))]
+static ARTIFACT_AMD_V2: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(
+    feature = "cpuid",
+    feature = "reflex",
+    feature = "syscall",
+    feature = "kuser"
+))]
+pub(crate) fn artifact_amd_v2_enabled() -> bool {
+    ARTIFACT_AMD_V2.load(Ordering::Acquire)
+}
+
 #[cfg(feature = "cpuid")]
 pub(crate) fn legacy_profile_forced() -> bool {
     LEGACY_PROFILE.load(Ordering::Acquire)
@@ -26,6 +44,13 @@ fn env_flag_set(name: &CStr) -> bool {
 unsafe extern "C" fn initialize() {
     #[cfg(feature = "cpuid")]
     LEGACY_PROFILE.store(env_flag_set(c"LINUWUX_LEGACY_PROFILE"), Ordering::Release);
+    #[cfg(all(
+        feature = "cpuid",
+        feature = "reflex",
+        feature = "syscall",
+        feature = "kuser"
+    ))]
+    ARTIFACT_AMD_V2.store(env_flag_set(c"LINUWUX_ARTIFACT_AMD_V2"), Ordering::Release);
 }
 
 #[used]

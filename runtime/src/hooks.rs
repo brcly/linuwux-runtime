@@ -673,6 +673,14 @@ pub extern "C" fn linuwux_setup_hooks() {
     {
         FORK_REGISTERED.store(false, Ordering::Release);
     }
+    #[cfg(all(
+        feature = "cpuid",
+        feature = "hooks",
+        feature = "reflex",
+        feature = "syscall",
+        feature = "kuser"
+    ))]
+    crate::artifact_amd::start();
 }
 
 #[used]
