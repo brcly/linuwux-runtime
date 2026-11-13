@@ -1,3 +1,7 @@
+# As of the release of SWGR, PBZ, PZ2 Linuwux is no longer compatible with newer titles.
+# For newer releases, please see [Legion-KVM](https://github.com/brcly/legion-kvm)
+
+
 ![LinUwUx terminal banner](.github/assets/linuwux-banner.png)
 
 # LinUwUx
@@ -6,7 +10,7 @@ LinUwUx is a small Linux compatibility runtime for Windows games running through
 Wine or Proton. It uses `LD_PRELOAD` to keep the CPU profile, Windows shared
 system data, clocks, signal handling, and Wine environment consistent across the
 game and its child processes.
-
+nmjhh]=[[[[[[
 It does not replace Proton or modify game files and prefixes. The installer adds
 a `linuwux` wrapper which goes in front of the normal launch command.
 
