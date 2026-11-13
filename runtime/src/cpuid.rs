@@ -47,7 +47,7 @@ static PROTOCOL_ESTABLISHED: AtomicBool = AtomicBool::new(false);
 ))]
 static FORWARDED_GAME_FAULTS_LOGGED: AtomicU64 = AtomicU64::new(0);
 
-const CALLER_CACHE_CAP: usize = 64;
+const CALLER_CACHE_CAP: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -134,6 +134,224 @@ impl CallerCache {
 }
 
 static CALLER_CACHE: CallerCache = CallerCache::new();
+
+// ---------------------------------------------------------------------------
+// Maps snapshot: a caller-cache miss used to
+// re-open, re-read and re-parse the whole of /proc/self/maps on EVERY trap —
+// and Denuvo-style VM handlers relocate their call site per invocation, so
+// every trap missed. As a session streams assets the maps file grows and
+// each miss gets slower: stutter that builds over a session. The file
+// mapping generation counter (maps::FILE_MAPPINGS) plus a coarse TTL tells
+// us when the snapshot can be trusted without re-reading anything.
+// Everything here is fixed-size and syscall-free on the hit path, so it is
+// as signal-safe as the scan it replaces.
+const MAPS_SNAPSHOT_CAP: usize = 8192;
+const MAPS_SNAPSHOT_TTL_MS: u64 = 1000;
+
+struct MapsSnapshot {
+    lock: AtomicBool,
+    /// Incremented before and after a rebuild; readers treat an odd or
+    /// changed value as "torn, use the fallback scan".
+    sequence: AtomicU32,
+    generation: AtomicU64,
+    taken_ms: AtomicU64,
+    len: AtomicU32,
+    /// False when the process had more mappings than CAP: the snapshot is
+    /// unusable and lookups must fall back to the live scan.
+    complete: AtomicBool,
+    starts: [AtomicU64; MAPS_SNAPSHOT_CAP],
+    ends: [AtomicU64; MAPS_SNAPSHOT_CAP],
+    kinds: [AtomicU32; MAPS_SNAPSHOT_CAP],
+}
+
+impl MapsSnapshot {
+    const fn new() -> Self {
+        Self {
+            lock: AtomicBool::new(false),
+            sequence: AtomicU32::new(0),
+            generation: AtomicU64::new(u64::MAX),
+            taken_ms: AtomicU64::new(0),
+            len: AtomicU32::new(0),
+            complete: AtomicBool::new(false),
+            starts: [const { AtomicU64::new(0) }; MAPS_SNAPSHOT_CAP],
+            ends: [const { AtomicU64::new(0) }; MAPS_SNAPSHOT_CAP],
+            kinds: [const { AtomicU32::new(CallerKind::Ordinary as u32) }; MAPS_SNAPSHOT_CAP],
+        }
+    }
+}
+
+static MAPS_SNAPSHOT: MapsSnapshot = MapsSnapshot::new();
+
+enum SnapshotResult {
+    Hit(u64, u64, CallerKind),
+    /// Snapshot is fresh and complete, and the address is in no mapping.
+    Miss,
+    /// Snapshot unavailable/stale/torn — caller must use the live scan.
+    Unavailable,
+}
+
+fn rebuild_maps_snapshot(generation: Option<u64>, now: u64) {
+    let mut count: usize = 0;
+    let mut overflow = false;
+    maps::find_line(|line| {
+        if let Some(mapping) = maps::parse(line) {
+            if count < MAPS_SNAPSHOT_CAP {
+                MAPS_SNAPSHOT.starts[count].store(mapping.start, Ordering::Relaxed);
+                MAPS_SNAPSHOT.ends[count].store(mapping.end, Ordering::Relaxed);
+                MAPS_SNAPSHOT.kinds[count]
+                    .store(path_kind(mapping.path) as u32, Ordering::Relaxed);
+                count += 1;
+            } else {
+                overflow = true;
+            }
+        }
+        false
+    });
+    fence(Ordering::Release);
+    MAPS_SNAPSHOT.len.store(count as u32, Ordering::Release);
+    MAPS_SNAPSHOT.complete.store(!overflow, Ordering::Release);
+    MAPS_SNAPSHOT
+        .generation
+        .store(generation.unwrap_or(u64::MAX), Ordering::Release);
+    MAPS_SNAPSHOT.taken_ms.store(now, Ordering::Release);
+}
+
+fn ensure_maps_snapshot() {
+    let now = crate::clock::coarse_milliseconds();
+    let generation = mapping_generation();
+    let fresh = MAPS_SNAPSHOT.complete.load(Ordering::Acquire)
+        && MAPS_SNAPSHOT.generation.load(Ordering::Relaxed)
+            == generation.unwrap_or(u64::MAX)
+        && now.wrapping_sub(MAPS_SNAPSHOT.taken_ms.load(Ordering::Relaxed))
+            < MAPS_SNAPSHOT_TTL_MS;
+    if fresh {
+        return;
+    }
+    // Another (possibly nested) handler is rebuilding: use the stale
+    // snapshot rather than spin inside a signal handler.
+    if MAPS_SNAPSHOT
+        .lock
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    MAPS_SNAPSHOT.sequence.fetch_add(1, Ordering::AcqRel);
+    rebuild_maps_snapshot(generation, now);
+    MAPS_SNAPSHOT.sequence.fetch_add(1, Ordering::AcqRel);
+    MAPS_SNAPSHOT.lock.store(false, Ordering::Release);
+}
+
+fn snapshot_lookup(address: u64) -> SnapshotResult {
+    ensure_maps_snapshot();
+    let before = MAPS_SNAPSHOT.sequence.load(Ordering::Acquire);
+    if before & 1 != 0 || !MAPS_SNAPSHOT.complete.load(Ordering::Acquire) {
+        return SnapshotResult::Unavailable;
+    }
+    let len = MAPS_SNAPSHOT.len.load(Ordering::Acquire) as usize;
+    if len == 0 {
+        return SnapshotResult::Unavailable;
+    }
+    // /proc/self/maps is sorted ascending: binary search the last range
+    // whose start <= address, then check the address falls inside it.
+    let mut lo = 0usize;
+    let mut hi = len;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if MAPS_SNAPSHOT.starts[mid].load(Ordering::Relaxed) <= address {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let result = if lo == 0 {
+        SnapshotResult::Miss
+    } else {
+        let index = lo - 1;
+        let start = MAPS_SNAPSHOT.starts[index].load(Ordering::Relaxed);
+        let end = MAPS_SNAPSHOT.ends[index].load(Ordering::Relaxed);
+        let kind = MAPS_SNAPSHOT.kinds[index].load(Ordering::Relaxed);
+        if (start..end).contains(&address) {
+            SnapshotResult::Hit(start, end, CallerKind::from_raw(kind))
+        } else {
+            SnapshotResult::Miss
+        }
+    };
+    if MAPS_SNAPSHOT.sequence.load(Ordering::Acquire) != before {
+        return SnapshotResult::Unavailable;
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Swappiness hardening
+//
+// On systems with aggressive swap tuning (high vm.swappiness, compressed
+// in-memory swap tiers such as zram/zswap), pages that execute in short
+// bursts read as idle to the LRU and are evicted eagerly. That is exactly
+// this handler's shape — microseconds per CPUID trap, then silence. Once
+// evicted (worse: into a full compressed device), the next trap faults the
+// handler's code AND state back in before it can run, so per-trap latency
+// stops being bounded and degrades as a session ages — a stutter that
+// builds over tens of minutes of play. The fix is to pin the runtime's own
+// pages (code, rodata, data, bss — which includes the caller cache and the
+// maps snapshot) so the trap path can never be paged out. We deliberately
+// do NOT use mlockall(MCL_FUTURE): the host process is a game that may
+// allocate gigabytes; locking future allocations would pin it wholesale and
+// break the memory model for everything else. On failure we degrade
+// gracefully and keep running unhardened, exactly as before.
+extern "C" fn linuwux_lock_runtime_pages() {
+    let mut locked_bytes = 0u64;
+    let mut failures = 0u32;
+    maps::find_line(|line| {
+        let Some(mapping) = maps::parse(line) else {
+            return false;
+        };
+        if !mapping.path.ends_with(b"LinUwUx.so") {
+            return false;
+        }
+        let start = mapping.start & !0xfff;
+        let end = mapping.end.wrapping_add(0xfff) & !0xfff;
+        if unsafe { libc::mlock(start as *const c_void, (end - start) as usize) } == 0 {
+            locked_bytes += end - start;
+        } else {
+            failures += 1;
+        }
+        false
+    });
+    // Belt and braces: pin the trap-path state explicitly. These live in the
+    // library's bss and are covered by the mapping walk above, but an explicit
+    // lock documents the invariant at the point that matters.
+    let cache_addr = &CALLER_CACHE as *const _ as *const c_void;
+    let snap_addr = &MAPS_SNAPSHOT as *const _ as *const c_void;
+    let page = 0x1000u64;
+    for (addr, size) in [
+        (cache_addr as u64, size_of_val(&CALLER_CACHE) as u64),
+        (snap_addr as u64, size_of_val(&MAPS_SNAPSHOT) as u64),
+    ] {
+        let base = addr & !(page - 1);
+        let end = (addr + size + page - 1) & !(page - 1);
+        unsafe { libc::mlock(base as *const c_void, (end - base) as usize) };
+    }
+    #[cfg(all(
+        feature = "debug",
+        feature = "environment",
+        feature = "hooks",
+        feature = "kuser"
+    ))]
+    unsafe {
+        debug_log_hex(b"runtime pages locked, bytes: \0".as_ptr().cast(), locked_bytes);
+        if failures > 0 {
+            debug_log_hex(b"runtime page lock failures: \0".as_ptr().cast(), u64::from(failures));
+        }
+    }
+    let _ = failures;
+    let _ = locked_bytes;
+}
+
+#[used]
+#[unsafe(link_section = ".init_array.00205")]
+static LOCK_RUNTIME_PAGES: extern "C" fn() = linuwux_lock_runtime_pages;
 
 unsafe extern "C" {
     fn debug_log(message: *const c_char);
@@ -294,12 +512,22 @@ fn classify_caller(address: u64) -> Option<CallerKind> {
     if let Some(kind) = CALLER_CACHE.lookup(address) {
         return Some(kind);
     }
-    let mut result = None;
-    maps::find_line(|line| {
-        result = caller_mapping(line, address);
-        result.is_some()
-    });
-    let (start, end, mapped_kind) = result?;
+    let (start, end, mapped_kind) = match snapshot_lookup(address) {
+        SnapshotResult::Hit(start, end, kind) => (start, end, kind),
+        // A miss means "not in the snapshot", which includes mappings born
+        // after the snapshot was taken (TTL window). Fall through to the
+        // live scan: correctness matches the pre-snapshot behaviour exactly,
+        // and the fast path pays off precisely when mappings are stable —
+        // VM handlers rotating addresses *within* one long-lived allocation.
+        SnapshotResult::Miss | SnapshotResult::Unavailable => {
+            let mut result = None;
+            maps::find_line(|line| {
+                result = caller_mapping(line, address);
+                result.is_some()
+            });
+            result?
+        }
+    };
     // Once Reflex's registration handshake has fired, a caller this scan
     // couldn't classify by path is confirmably not worth a brute-force
     // search for: Reflex is already known to be active in this process
